@@ -656,11 +656,78 @@ def _is_ion(resname: str, name: str) -> bool:
     return False
 
 
+def _residue_identity(atom, _seen: set | None = None) -> tuple[str, str, str, int]:
+    """``(pdb_name, resname, chain, resseq)`` for one atom.
+
+    RDKit keeps the original PDB record on each atom, so the residue an atom
+    came from is available -- it was simply not being written out. Losing it
+    means every atom of a 300-residue protein lands in one anonymous `REC`
+    residue numbered 1, and nothing downstream can tell a backbone nitrogen
+    from a side-chain one. That is enough to make a viewer unable to group
+    atoms into residues, infer bonds, or draw a backbone, so it is carried
+    through here.
+
+    The polar hydrogens added by :func:`_add_receptor_polar_hydrogens` have no
+    record of their own -- RDKit invents them -- so they inherit the identity of
+    the heavy atom they were attached to. Without that, every added hydrogen
+    would land in a residue of its own and the receptor would be shredded again,
+    which is presumably why the identity used to be dropped wholesale.
+
+    `_seen` guards the neighbour walk. Two atoms that both lack a record and
+    are bonded to each other would otherwise bounce between them forever.
+    """
+    if _seen is None:
+        _seen = set()
+    if atom.GetIdx() in _seen:
+        return atom.GetSymbol(), "UNL", " ", 1
+    _seen.add(atom.GetIdx())
+
+    info = atom.GetPDBResidueInfo()
+    if info is not None and (info.GetResidueName() or "").strip():
+        name = (info.GetName() or "").strip() or atom.GetSymbol()
+        resname = (info.GetResidueName() or "").strip().upper()
+        chain = (info.GetChainId() or " ").strip() or " "
+        try:
+            resseq = int(info.GetResidueNumber())
+        except (TypeError, ValueError):
+            resseq = 1
+        return name, resname, chain, resseq
+
+    for nbr in atom.GetNeighbors():
+        inherited = _residue_identity(nbr, _seen)
+        if inherited[1] != "UNL":
+            return inherited
+    return atom.GetSymbol(), "UNL", " ", 1
+
+
+def _atom_name(atom) -> str:
+    """The PDB atom name to write, for an atom that may be a new hydrogen.
+
+    RDKit names an added hydrogen by copying the heavy atom's name, so writing
+    `info.GetName()` straight through produces a residue with three atoms called
+    `N`: the backbone nitrogen and the two hydrogens on it. That is not a
+    cosmetic problem -- residue-level bond perception keys off atom names, and
+    a duplicate name silently drops the bonds to everything after the first
+    match. A hydrogen is therefore always written as `H`.
+    """
+    if atom.GetSymbol() == "H":
+        return "H"
+    info = atom.GetPDBResidueInfo()
+    if info is not None and (info.GetName() or "").strip():
+        return (info.GetName() or "").strip()
+    return atom.GetSymbol()
+
+
 def _molecule_to_pdbqt(mol, resname: str = "UNL") -> str:
     """Serialise an RDKit molecule to PDBQT text.
 
     Only polar hydrogens are written, and heavy-atom coordinates are taken as
     they are: a receptor must be rigid, so nothing here may be optimised.
+
+    Residue names, atom names, chain identifiers and residue numbers come from
+    each atom's own PDB record (see :func:`_residue_identity`). `resname` is
+    only the fallback for a molecule that has no residue information at all,
+    such as one read from an SDF.
 
     The line layout comes from :func:`opendocking.pdbqt_writer.format_atom_line`.
     There is deliberately only one formatter in the package: two hand-rolled
@@ -675,12 +742,33 @@ def _molecule_to_pdbqt(mol, resname: str = "UNL") -> str:
     serial = 0
     for atom in mol.GetAtoms():
         symbol = atom.GetSymbol()
+        pos = conf.GetAtomPosition(atom.GetIdx())
         if symbol == "H":
             # Keep only hydrogens bonded to N, O or S.
             nbrs = atom.GetNeighbors()
             if not nbrs or nbrs[0].GetSymbol() not in ("N", "O", "S"):
                 continue
             pdbqt_type = "HD"
+            # ...and only if it actually landed next to that atom. `AddHs` is
+            # asked for coordinates, but it does not always manage them, and a
+            # hydrogen with no position is written as (0, 0, 0) -- an atom at
+            # the coordinate origin, thousands of angstroms from its own
+            # parent, which then docks as if it were real. Three of them came
+            # out that way on the crambin fixture. A hydrogen 0.7-1.35 A from
+            # the heavy atom it was added to is a real one; anything else is
+            # not, and the residue is better off without it than with a
+            # phantom.
+            parent = conf.GetAtomPosition(nbrs[0].GetIdx())
+            separation = pos.Distance(parent)
+            if not (0.7 <= separation <= 1.35):
+                warnings.warn(
+                    f"dropped a polar hydrogen of {nbrs[0].GetSymbol()} at "
+                    f"{separation:.2f} Å from the atom it was added to: "
+                    "RDKit did not give it a usable position",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                continue
         else:
             pdbqt_type = pdbqt_atom_type(atom, mol)
         charge = (
@@ -691,16 +779,17 @@ def _molecule_to_pdbqt(mol, resname: str = "UNL") -> str:
         if not np.isfinite(charge):
             charge = 0.0
         serial += 1
-        pos = conf.GetAtomPosition(atom.GetIdx())
+        name, res, chain, resseq = _residue_identity(atom)
         lines.append(
             format_atom_line(
                 serial,
-                symbol,
-                resname,
-                1,
+                _atom_name(atom),
+                res or resname,
+                resseq,
                 (pos.x, pos.y, pos.z),
                 charge,
                 pdbqt_type,
+                chain=chain,
             )
         )
     lines.append("TER")

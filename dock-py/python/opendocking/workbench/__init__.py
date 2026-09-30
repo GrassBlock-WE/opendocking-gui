@@ -255,6 +255,18 @@ class MoleculeView:
     # `name` cannot tell the current pose from the previous one -- which is how
     # old results stayed on screen and the "ligand" checkbox stopped hiding them.
     role: str = "ligand"
+    #: How the bonds were obtained: "declared", "template" or "distance".
+    #: Shown in the status bar, because a bond order nobody can vouch for
+    #: should not look the same as one that came out of the file.
+    bond_source: str = "distance"
+    #: Anything the structure layer wants the user to know about this file.
+    warnings: list[str] = field(default_factory=list)
+    #: True when the structure has an amino-acid backbone, which is what the
+    #: ribbon representations need.
+    has_backbone: bool = False
+    #: The parsed structure, kept so the backbone can be re-read for the ribbon
+    #: without parsing the file a second time.
+    structure: object = None
 
     @classmethod
     def from_pdbqt(
@@ -265,14 +277,53 @@ class MoleculeView:
         radius: float,
         role: str = "ligand",
     ) -> "MoleculeView":
-        coords, elements = _parse_pdbqt_atoms(Path(path).read_text(encoding="utf-8"))
+        from .structure import parse_structure
+
+        parsed = parse_structure(Path(path).read_text(encoding="utf-8"), name)
+        source = "declared" if parsed.declared else "distance"
+        if not parsed.declared and parsed.is_protein():
+            source = "template"
         return cls(
             name=name,
-            coords=coords,
-            elements=elements,
+            coords=np.asarray(parsed.coords(), np.float32).reshape(-1, 3),
+            elements=parsed.elements(),
+            bonds=np.asarray(parsed.bond_pairs(), np.int32).reshape(-1, 2),
             color=color,
             radius=radius,
             role=role,
+            bond_source=source,
+            warnings=list(parsed.warnings),
+            has_backbone=parsed.is_protein(),
+            structure=parsed,
+        )
+
+    @classmethod
+    def from_text(
+        cls,
+        text: str,
+        name: str,
+        color,
+        radius: float,
+        role: str = "ligand",
+    ) -> "MoleculeView":
+        from .structure import parse_structure
+
+        parsed = parse_structure(text, name)
+        source = "declared" if parsed.declared else "distance"
+        if not parsed.declared and parsed.is_protein():
+            source = "template"
+        return cls(
+            name=name,
+            coords=np.asarray(parsed.coords(), np.float32).reshape(-1, 3),
+            elements=parsed.elements(),
+            bonds=np.asarray(parsed.bond_pairs(), np.int32).reshape(-1, 2),
+            color=color,
+            radius=radius,
+            role=role,
+            bond_source=source,
+            warnings=list(parsed.warnings),
+            has_backbone=parsed.is_protein(),
+            structure=parsed,
         )
 
     def atom_colors(self) -> np.ndarray:
@@ -292,18 +343,22 @@ class MoleculeView:
             dtype=np.float32,
         )
 
+    def bond_pairs(self) -> np.ndarray:
+        """The bonds this structure was given, as an ``(n_bonds, 2)`` array.
+
+        These come from :mod:`opendocking.workbench.structure`, which reads them
+        out of `ROOT`/`BRANCH` records, from amino-acid templates, or -- for a
+        flat ligand with neither -- from a covalent-radius rule that is audited
+        and reported. There is deliberately no distance fallback here any more:
+        a viewer that silently re-derives bonds cannot tell the user which
+        bonds it is sure about.
+        """
+        return np.asarray(self.bonds, dtype=np.int32).reshape(-1, 2)
+
     def bond_segments(self) -> np.ndarray:
-        """Bond endpoints as an ``(n_bonds, 2, 3)`` array, from a distance test."""
-        if len(self.coords) < 2:
-            return np.zeros((0, 2, 3), np.float32)
-        d = np.linalg.norm(self.coords[:, None, :] - self.coords[None, :, :], axis=-1)
-        # Covalent-radius heuristic, generous enough for aromatic 1.39 Å bonds.
-        cutoff = 1.95
-        iu = np.triu_indices(len(self.coords), k=1)
-        pairs = np.stack([iu[0], iu[1]], axis=1)
-        keep = d[iu] < cutoff
-        pairs = pairs[keep]
-        if len(pairs) == 0:
+        """Bond endpoints as an ``(n_bonds, 2, 3)`` array."""
+        pairs = self.bond_pairs()
+        if len(pairs) == 0 or len(self.coords) < 2:
             return np.zeros((0, 2, 3), np.float32)
         return self.coords[pairs]
 
@@ -312,6 +367,45 @@ class MoleculeView:
         if len(self.coords) == 0:
             return np.zeros(3, np.float32)
         return self.coords.mean(axis=0)
+
+    def backbone_ribbon(self, **kwargs):
+        """A swept ribbon along the backbone, or ``None`` if there is none.
+
+        The guide points are the CA atoms and the ribbon's face is oriented with
+        the CA-to-CB direction, which is what stops a flat ribbon twisting about
+        its own axis as the chain runs. Glycine has no CB, so it falls back to
+        the N-to-C bisector, which points the same way for every residue.
+        """
+        from .geometry import ribbon as build_ribbon
+        from .structure import secondary_structure
+
+        if self.structure is None or not self.has_backbone:
+            return None
+        trace = self.structure.backbone()
+        if len(trace) < 2:
+            return None
+        atoms = self.structure.atoms
+        guide = np.asarray([atoms[ca].xyz for _, ca, _ in trace], dtype=np.float64)
+
+        sides = []
+        for idx, (n, ca, c) in enumerate(trace):
+            side = None
+            for cand in self.structure.residues:
+                if ca in cand.atoms:
+                    cb = next(
+                        (i for i in cand.atoms if atoms[i].name == "CB"), None
+                    )
+                    if cb is not None:
+                        side = np.asarray(atoms[cb].xyz) - np.asarray(atoms[ca].xyz)
+                    else:
+                        # Glycine: the N-CA-C bisector stands in for CB.
+                        a = np.asarray(atoms[n].xyz) - np.asarray(atoms[ca].xyz)
+                        b = np.asarray(atoms[c].xyz) - np.asarray(atoms[ca].xyz)
+                        side = a + b
+                    break
+            sides.append(side if side is not None else np.array([0.0, 0.0, 1.0]))
+        states = secondary_structure(trace, atoms)
+        return build_ribbon(guide, np.asarray(sides), states, **kwargs)
 
 
 @dataclass

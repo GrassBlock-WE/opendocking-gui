@@ -36,6 +36,9 @@ __all__ = [
     "build_programs",
     "draw_spheres",
     "draw_lines",
+    "draw_mesh",
+    "REPRESENTATIONS",
+    "REPRESENTATION_KEYS",
 ]
 
 SPHERE_VERTEX_SHADER = """
@@ -210,6 +213,60 @@ def draw_lines(ctx, prog, positions, colors, mvp, opacity) -> None:
     col_buf.release()
 
 
+def draw_mesh(ctx, prog, mesh, mvp, opacity) -> None:
+    """Draw a :class:`~opendocking.workbench.geometry.MeshData` with the sphere program.
+
+    One upload path for every solid representation, so spheres, bond cylinders
+    and the backbone ribbon all go through the same attribute layout and the
+    same shader. Adding a representation therefore means generating geometry,
+    not touching the renderer.
+
+    The buffer-per-attribute rule from :func:`draw_spheres` applies here for the
+    same reason: moderngl's default stride is the size of *one* attribute, so
+    sharing a buffer between `in_position` and `in_normal` reads the first vec3
+    three times over and renders wrong geometry with nothing raised.
+    """
+    import moderngl
+
+    if mesh is None or mesh.empty:
+        return
+    pos_buf = ctx.buffer(mesh.positions.tobytes())
+    nrm_buf = ctx.buffer(mesh.normals.tobytes())
+    col_buf = ctx.buffer(mesh.colors.tobytes())
+    ibo = ctx.buffer(mesh.indices.tobytes())
+    vao = ctx.vertex_array(
+        prog,
+        [
+            (pos_buf, "3f", "in_position"),
+            (nrm_buf, "3f", "in_normal"),
+            (col_buf, "3f", "in_color"),
+        ],
+        index_buffer=ibo,
+    )
+    prog["mvp"] = _mat4(mvp)
+    prog["opacity"] = float(opacity)
+    vao.render(moderngl.TRIANGLES)
+    vao.release()
+    pos_buf.release()
+    nrm_buf.release()
+    col_buf.release()
+    ibo.release()
+
+
+#: The representations the viewport offers, in the order they are listed.
+#: `needs_backbone` marks the ones that only mean something for a protein; a
+#: molecule without a backbone falls back and says so rather than drawing
+#: nothing.
+REPRESENTATIONS: tuple[tuple[str, str, bool], ...] = (
+    ("spheres", "Space-filling", False),
+    ("ball_and_stick", "Ball and stick", False),
+    ("stick", "Skeletal (sticks only)", False),
+    ("ribbon", "Ribbon (backbone)", True),
+    ("cartoon", "Cartoon (ribbon + side chains)", True),
+)
+REPRESENTATION_KEYS = tuple(key for key, _, _ in REPRESENTATIONS)
+
+
 class Viewport(QOpenGLWidget):
     """The OpenGL rendering surface.
 
@@ -227,6 +284,9 @@ class Viewport(QOpenGLWidget):
         self.box_center = np.zeros(3, np.float32)
         self.box_size = np.asarray([22.0, 22.0, 22.0], np.float32)
         self.show_box = True
+        #: One of ``REPRESENTATION_KEYS``. Set through :meth:`set_representation`
+        #: so the status bar can be told about it.
+        self.representation = "spheres"
         self._ctx = None
         self._sphere_prog = None
         self._line_prog = None
@@ -290,16 +350,67 @@ class Viewport(QOpenGLWidget):
         ctx.screen.use()
 
     def _draw_molecule(self, mol: MoleculeView, mvp) -> None:  # pragma: no cover
-        draw_spheres(self._ctx, self._sphere_prog, self._mesh, mol, mvp)
-        segs = mol.bond_segments()
-        if len(segs):
-            draw_lines(
-                self._ctx,
-                self._line_prog,
-                segs.reshape(-1, 3),
-                np.tile(np.asarray(mol.color, np.float32), (len(segs) * 2, 1)),
-                mvp,
-                float(mol.opacity),
+        from .geometry import bonds as bond_geometry
+        from .geometry import spheres as sphere_geometry
+
+        mode = self.representation
+        if mode in ("ribbon", "cartoon") and not mol.has_backbone:
+            # A ligand has no backbone, so a ribbon of it would be a line with
+            # nothing on it. Fall back and let the status bar say so.
+            mode = "ball_and_stick"
+
+        pairs = mol.bond_pairs()
+        colors = mol.atom_colors()
+
+        if mode == "spheres":
+            draw_spheres(self._ctx, self._sphere_prog, self._mesh, mol, mvp)
+            segs = mol.bond_segments()
+            if len(segs):
+                draw_lines(
+                    self._ctx,
+                    self._line_prog,
+                    segs.reshape(-1, 3),
+                    np.tile(np.asarray(mol.color, np.float32), (len(segs) * 2, 1)),
+                    mvp,
+                    float(mol.opacity),
+                )
+            return
+
+        if mode == "ball_and_stick":
+            draw_mesh(
+                self._ctx, self._sphere_prog,
+                sphere_geometry(mol.coords, mol.atom_radii() * 0.42, colors),
+                mvp, mol.opacity,
+            )
+            draw_mesh(
+                self._ctx, self._sphere_prog,
+                bond_geometry(mol.coords, pairs, float(mol.radius) * 0.20, colors),
+                mvp, mol.opacity,
+            )
+            return
+
+        if mode == "stick":
+            # The skeletal view: bonds only, which is the usual way a small
+            # molecule is drawn when the question is its shape rather than its
+            # surface.
+            draw_mesh(
+                self._ctx, self._sphere_prog,
+                bond_geometry(mol.coords, pairs, float(mol.radius) * 0.16, colors),
+                mvp, mol.opacity,
+            )
+            return
+
+        # ribbon / cartoon
+        draw_mesh(
+            self._ctx, self._sphere_prog, mol.backbone_ribbon(), mvp, mol.opacity
+        )
+        if mode == "cartoon":
+            # Side chains as thin sticks so the detail is still reachable
+            # without going back to a space-filling view of 30 000 atoms.
+            draw_mesh(
+                self._ctx, self._sphere_prog,
+                bond_geometry(mol.coords, pairs, float(mol.radius) * 0.13, colors),
+                mvp, mol.opacity,
             )
 
     def _draw_lines(self, positions, colors, mvp, opacity) -> None:  # pragma: no cover
@@ -469,6 +580,12 @@ class MainWindow(QtWidgets.QMainWindow):
     def _build_ui(self) -> None:  # pragma: no cover - GUI
         panel_widget = QtWidgets.QWidget()
         form = QtWidgets.QFormLayout(panel_widget)
+
+        self.cmb_representation = QtWidgets.QComboBox()
+        for key, label, _ in REPRESENTATIONS:
+            self.cmb_representation.addItem(label, key)
+        self.cmb_representation.currentIndexChanged.connect(self._on_representation)
+        form.addRow("display", self.cmb_representation)
 
         self.cb_receptor = QtWidgets.QCheckBox("receptor")
         self.cb_receptor.setChecked(True)
@@ -686,6 +803,45 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_box_visibility(self) -> None:  # pragma: no cover - GUI
         self.viewport.show_box = self.cb_box.isChecked()
         self.viewport.update()
+
+    def _on_representation(self) -> None:  # pragma: no cover - GUI
+        """Switch how the scene is drawn, and say what that means for the bonds.
+
+        The status line is the point of this handler as much as the redraw. A
+        ball-and-stick picture makes a wrong bond as convincing as a right one,
+        so the bar always reports where the connectivity came from -- read out
+        of the file, out of the residue templates, or inferred from distances --
+        and names any file whose bonds could not be taken at face value.
+        """
+        key = self.cmb_representation.currentData()
+        if key not in REPRESENTATION_KEYS:
+            return
+        self.viewport.representation = key
+        self.viewport.update()
+        self._describe_representation()
+
+    def _describe_representation(self) -> None:  # pragma: no cover - GUI
+        parts: list[str] = []
+        for mol in self.viewport.molecules:
+            if not mol.visible:
+                continue
+            n = len(mol.bond_pairs())
+            where = {
+                "declared": "read from the file",
+                "template": "residue templates",
+                "distance": "inferred from distances",
+            }.get(mol.bond_source, mol.bond_source)
+            note = ""
+            if self.viewport.representation in ("ribbon", "cartoon") and not mol.has_backbone:
+                note = " (no backbone, drawn ball-and-stick)"
+            parts.append(
+                f"{mol.name}: {n} bonds from {where}{note}"
+            )
+            for w in mol.warnings[:2]:
+                parts.append(f"  ! {w}")
+        if not parts:
+            return
+        self.statusBar().showMessage("  |  ".join(parts))
 
     def _on_box_changed(self) -> None:  # pragma: no cover - GUI
         self.viewport.box_center = np.asarray(

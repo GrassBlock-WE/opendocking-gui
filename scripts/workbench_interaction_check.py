@@ -630,6 +630,147 @@ def main() -> int:
     shot(win2, "10_negative_coords")
     win2.close()
 
+    # ------------------------------------------------- display representations
+    section("10. display representations")
+    from opendocking.workbench.app import REPRESENTATION_KEYS  # noqa: PLC0415
+
+    check(
+        "the display selector offers every representation",
+        set(REPRESENTATION_KEYS) == {"spheres", "ball_and_stick", "stick",
+                                     "ribbon", "cartoon"},
+        ", ".join(REPRESENTATION_KEYS),
+    )
+    check(
+        "the selector has one entry per representation",
+        win.cmb_representation.count() == len(REPRESENTATION_KEYS),
+        f"{win.cmb_representation.count()} entries",
+    )
+
+    for key in REPRESENTATION_KEYS:
+        index = win.cmb_representation.findData(key)
+        win.cmb_representation.setCurrentIndex(index)
+        app.processEvents()
+        check(
+            f"selecting '{key}' reaches the viewport",
+            win.viewport.representation == key,
+            f"viewport says {win.viewport.representation!r}",
+        )
+        if PIXELS_OK:
+            arr, _ = shot(win, f"11_repr_{key}")
+            drawn = non_background(arr)
+            check(
+                f"'{key}' draws something",
+                drawn > 500,
+                f"{drawn} non-background px",
+            )
+        else:
+            skip(f"'{key}' draws something", "no framebuffer to read")
+
+    # A ribbon needs a backbone. The example receptor is a synthetic blob, so
+    # it must fall back rather than pretend, and the status bar has to say so.
+    win.cmb_representation.setCurrentIndex(
+        win.cmb_representation.findData("ribbon")
+    )
+    app.processEvents()
+    receptor_view = next(m for m in win.viewport.molecules if m.role == "receptor")
+    check(
+        "a structure with no backbone reports that it has none",
+        not receptor_view.has_backbone,
+        "the synthetic example receptor is not a protein",
+    )
+    check(
+        "a file with no amino-acid residue falls back instead of claiming a ribbon",
+        receptor_view.backbone_ribbon() is None,
+        "backbone_ribbon() returned None",
+    )
+    message = win.statusBar().currentMessage()
+    check(
+        "the status bar says where the bonds came from",
+        "bonds from" in message,
+        message[:110],
+    )
+
+    # The receptor's bonds are the interesting ones. Whatever the source, no
+    # bond may join atoms of different residues unless it is the peptide C-N,
+    # because that is the failure this whole path was written to prevent.
+    check(
+        "the loaded receptor's bonds are all physically possible",
+        all(
+            0.85
+            <= float(
+                np.linalg.norm(
+                    receptor_view.coords[i] - receptor_view.coords[j]
+                )
+            )
+            < 2.0
+            for i, j in receptor_view.bond_pairs()
+        ),
+        f"{len(receptor_view.bond_pairs())} bonds checked",
+    )
+
+    win.cmb_representation.setCurrentIndex(
+        win.cmb_representation.findData("spheres")
+    )
+    app.processEvents()
+
+    # The example receptor is a synthetic blob, so nothing above has actually
+    # drawn a ribbon. A real protein has to, or the feature is untested.
+    crambin = EXAMPLES / "1crn_prep.pdbqt"
+    if crambin.is_file():
+        section("10b. a ribbon on a real protein")
+        win3 = MainWindow(receptor=crambin)
+        win3.resize(1000, 760)
+        win3.show()
+        QTest.qWaitForWindowExposed(win3, 5000)
+        app.processEvents()
+        QTest.qWait(400)
+        app.processEvents()
+
+        protein = next(m for m in win3.viewport.molecules if m.role == "receptor")
+        check("the prepared receptor kept its residue names",
+              protein.has_backbone,
+              f"{len(protein.coords)} atoms, bonds from {protein.bond_source}")
+        check("its bonds came from residue templates",
+              protein.bond_source == "template", protein.bond_source)
+        check("it is grouped into one entry per residue",
+              protein.structure is not None
+              and len(protein.structure.residues) == 46,
+              f"{0 if protein.structure is None else len(protein.structure.residues)} "
+              "residues")
+
+        ribbon = protein.backbone_ribbon()
+        check("a ribbon was built from the backbone",
+              ribbon is not None and len(ribbon) > 0,
+              f"{0 if ribbon is None else len(ribbon)} triangles")
+
+        drawn = {}
+        for key in ("ball_and_stick", "ribbon", "cartoon"):
+            win3.cmb_representation.setCurrentIndex(
+                win3.cmb_representation.findData(key)
+            )
+            app.processEvents()
+            if PIXELS_OK:
+                arr, _ = shot(win3, f"12_protein_{key}")
+                drawn[key] = non_background(arr)
+                check(f"protein '{key}' draws something",
+                      drawn[key] > 500, f"{drawn[key]} non-background px")
+            else:
+                skip(f"protein '{key}' draws something", "no framebuffer to read")
+
+        if len(drawn) == 3:
+            check(
+                "the protein ribbon is a different picture from its atoms",
+                abs(drawn["ribbon"] - drawn["ball_and_stick"]) > 500,
+                f"ribbon {drawn['ribbon']} px vs ball-and-stick "
+                f"{drawn['ball_and_stick']} px",
+            )
+        msg = win3.statusBar().currentMessage()
+        check("the status bar names the template source for the protein",
+              "residue templates" in msg, msg[:110])
+        win3.close()
+    else:
+        skip("a ribbon on a real protein", f"{crambin.name} is not present")
+
     # ---------------------------------------------------------------- report
     section("summary")
     npass = sum(1 for r in results if r[0] == "PASS")

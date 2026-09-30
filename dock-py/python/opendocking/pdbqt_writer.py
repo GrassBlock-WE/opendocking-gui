@@ -27,6 +27,7 @@ __all__ = [
 _COL_SERIAL = (6, 11)
 _COL_NAME = (12, 16)
 _COL_RESNAME = (17, 20)
+_COL_CHAIN = (21, 22)
 _COL_RESSEQ = (22, 26)
 _COL_X = (30, 38)
 _COL_Y = (38, 46)
@@ -53,6 +54,7 @@ def format_atom_line(
     charge: float,
     atom_type: str,
     *,
+    chain: str = " ",
     precision: int = 3,
 ) -> str:
     """Format one PDBQT ``ATOM`` record at the exact column positions.
@@ -63,6 +65,13 @@ def format_atom_line(
         The AutoDock type token, e.g. ``"C"``, ``"OA"``, ``"Cl"``, ``"HD"``.
         Meeko writes ``Cl`` and ``Br`` with mixed case; the parser accepts
         either, and matching Meeko keeps the files readable by other tools.
+    chain:
+        One-character chain identifier. It is a whole column, so it was left
+        out of this signature for a while and everything came out as ``" "`` --
+        which is a legal file that has quietly lost half its residue identity.
+        Anything that reads structure rather than just coordinates (a viewer
+        grouping atoms into residues, a tool inferring which atoms are bonded)
+        needs it, so it is a parameter now.
     """
     if len(atom_type) > 2:
         raise ValueError(f"PDBQT atom type {atom_type!r} is longer than two characters")
@@ -75,7 +84,7 @@ def format_atom_line(
         " ",
         _field(resname, _COL_RESNAME, right=False),
         " ",
-        " ",
+        _field((chain or " ")[:1], _COL_CHAIN, right=False),
         _field(str(resseq), _COL_RESSEQ),
         " ",
         "   ",

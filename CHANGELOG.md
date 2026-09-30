@@ -11,6 +11,24 @@ The project is pre-1.0. The `0.x` line is where the interfaces still move.
 
 ## [Unreleased]
 
+### Added
+
+- **Five display modes in the workbench**, chosen from a `display` selector:
+  space-filling, ball-and-stick, skeletal (sticks only), ribbon and cartoon.
+  The last two need a protein backbone; a structure without one falls back to
+  ball-and-stick and says so in the status bar rather than drawing an empty
+  ribbon. The backbone ribbon is a swept surface along the CA trace, oriented by
+  parallel transport so it does not twist, and coloured by a geometric estimate
+  of secondary structure.
+- `opendocking.workbench.structure`, a GUI-free module that reads a structure
+  with its residue identity intact and decides its connectivity. `structure.py`
+  and `geometry.py` are importable without Qt or a display, and
+  `scripts/structure_bond_check.py` and
+  `scripts/representation_geometry_check.py` verify them headlessly.
+- The status bar now reports where each structure's bonds came from — read out
+  of `ROOT`/`BRANCH` records, out of amino-acid templates, or inferred from
+  distances — and names any bond that could not be taken at face value.
+
 ### Fixed
 
 - `Ligand.from_pdbqt_str` did not work at all. It called the file-opening
@@ -47,6 +65,37 @@ The project is pre-1.0. The `0.x` line is where the interfaces still move.
 - The `workbench` CI job requested `libxkbcommon-x11` instead of
   `libxkbcommon-x11-0`, and did not install `libxcb-cursor0`, without which Qt
   6.5+ refuses to load its xcb platform plugin.
+- **`prepare-receptor` destroyed all residue identity.** Every atom of a
+  receptor was written as residue `REC`, residue number 1, with no chain and no
+  atom name, so a 46-residue protein came out as one anonymous blob. Nothing
+  downstream could group atoms into residues, infer which atoms are bonded, or
+  draw a backbone. The name, residue, chain and number now come from each
+  atom's own PDB record.
+- A polar hydrogen added during receptor preparation was written with its heavy
+  atom's name, producing residues with three atoms called `N`. Hydrogens are now
+  written as `H`.
+- `AddHs` sometimes returns a hydrogen with no position, which was written as
+  `(0, 0, 0)` — an atom at the coordinate origin, thousands of ångströms from
+  its own parent, which then docked as though it were real. Three of them
+  appeared on the crambin fixture. A hydrogen that did not land within
+  0.7–1.35 Å of the atom it was added to is now dropped with a warning.
+- **Bond perception in the viewer** was a flat "closer than 1.95 Å" rule, which
+  welds atoms of different residues together across a protein interface. On the
+  crambin fixture that rule invents 48 bonds between residues. Connectivity now
+  comes from `ROOT`/`BRANCH` records where the file has them, from amino-acid
+  templates where the file is a protein, and from a covalent-radius rule only
+  for a flat small molecule with neither — and in every case it is audited and
+  the source is reported.
+- A declared bond whose two atoms are further apart than the two elements can
+  possibly be is no longer drawn. The docked-pose writer emits a forked group
+  such as a carboxyl as a flat chain, so its files declare a bond between two
+  oxygens 2.23 Å apart; the viewer drops it and says why. The writer itself
+  still needs nested `BRANCH` records and is listed under Known limitations.
+- `scripts/odgui_launch_check.py` used `ctypes.windll`, which does not exist off
+  Windows, so the check crashed instead of running on Linux. It now closes the
+  window through the X11 window manager there, and reports a partial result if
+  no window manager tool is installed rather than claiming a clean shutdown it
+  never tested.
 
 ### Changed
 
@@ -54,6 +103,17 @@ The project is pre-1.0. The `0.x` line is where the interfaces still move.
   40 times 0.1 Å apart, which placed atoms on identical coordinates. It now
   uses a 4×4×3 lattice at 3.0 Å pitch, so every atom pair is physically
   possible.
+
+### Known limitations
+
+- The docked-pose writer lists the atoms of a `BRANCH` as a chain, as the
+  PDBQT format requires, but a forked group — a carboxyl carbon with two
+  oxygens — is not a chain. Such groups need nested `BRANCH` records. Until
+  then a pose file can declare a bond that the geometry contradicts; the viewer
+  detects and reports it, but the file itself is not strictly conformant.
+- Secondary structure is estimated from backbone φ and ψ against the
+  Ramachandran basins. It is geometric, not DSSP, and it under-detects short
+  helices.
 
 ---
 

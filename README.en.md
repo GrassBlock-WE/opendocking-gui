@@ -129,6 +129,22 @@ Left drag rotates, right drag pans, middle drag dollies, wheel zooms, `Frame all
 re-frames. The File menu offers `Load receptor… / Load ligand… / Open poses… /
 Dock now`.
 
+**Display modes** (the `display` selector in the control panel):
+
+| Mode | What it draws |
+|---|---|
+| `Space-filling` | a sphere per atom, bonds as thin lines |
+| `Ball and stick` | smaller atoms plus a cylinder along each bond, each half coloured by its own atom |
+| `Skeletal` | bonds only |
+| `Ribbon` | a smooth swept ribbon along the backbone, coloured by an estimated secondary structure |
+| `Cartoon` | the ribbon plus side chains as thin sticks |
+
+The last two need a protein backbone; a structure without one falls back to
+ball-and-stick and says so in the status bar. The status bar also states where
+each structure's bonds came from — read out of the file, from residue
+templates, or inferred from distances. A ball-and-stick picture makes a wrong
+bond as convincing as a right one, so that line is not decoration.
+
 ## Things to know before you use the results
 
 - **The search box must be given explicitly.** A box covering the whole protein
