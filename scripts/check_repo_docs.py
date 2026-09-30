@@ -112,13 +112,38 @@ def main() -> int:
                         f"{rel}:{number}: broken link -> {target}"
                     )
 
-    print(f"scanned {len(iter_files())} files, {checked_links} relative link(s)")
+    # --- YAML / CITATION must actually parse -----------------------------
+    # A workflow that does not parse fails every run in 0 seconds with
+    # "This run likely failed because of a workflow file issue", which is easy
+    # to miss and impossible to debug from the Actions tab. Caught here
+    # instead, before the push.
+    yaml_checked = 0
+    try:
+        import yaml
+    except ImportError:
+        print("PyYAML not installed; skipping YAML validation")
+    else:
+        for path in sorted(ROOT.rglob("*")):
+            if not path.is_file() or path.suffix.lower() not in {".yml", ".yaml", ".cff"}:
+                continue
+            if SKIP_DIRS & set(path.relative_to(ROOT).parts):
+                continue
+            yaml_checked += 1
+            rel = path.relative_to(ROOT)
+            try:
+                yaml.safe_load(path.read_text(encoding="utf-8"))
+            except yaml.YAMLError as exc:
+                first = str(exc).splitlines()[0] if str(exc) else exc.__class__.__name__
+                problems.append(f"{rel}: does not parse as YAML -- {first}")
+
+    print(f"scanned {len(iter_files())} files, {checked_links} relative link(s), "
+          f"{yaml_checked} YAML/CFF file(s)")
     if problems:
         print(f"\n{len(problems)} problem(s):")
         for line in problems:
             print(f"  {line}")
         return 1
-    print("no broken links, no machine-specific paths")
+    print("no broken links, no machine-specific paths, all YAML parses")
     return 0
 
 

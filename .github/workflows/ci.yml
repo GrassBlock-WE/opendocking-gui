@@ -102,11 +102,10 @@ jobs:
       # CLI. A third entry would be a packaging mistake worth catching here.
       - name: Exactly the two documented console scripts are installed
         run: |
-          scripts=$(python -c "import importlib.metadata as m; print('\n'.join(sorted(e.name for e in m.entry_points(group='console_scripts') if 'opendocking' in (e.value or ''))))")
-          echo "installed: ${scripts}"
-          if [ "$scripts" != "odcli
-odgui" ]; then
-            echo "::error::expected exactly 'odcli' and 'odgui', got: ${scripts}"
+          actual=$(python -c "import importlib.metadata as m; print(','.join(sorted(e.name for e in m.entry_points(group='console_scripts') if 'opendocking' in (e.value or ''))))")
+          echo "installed: ${actual}"
+          if [ "${actual}" != "odcli,odgui" ]; then
+            echo "::error::expected 'odcli,odgui' but got: ${actual}"
             exit 1
           fi
 
