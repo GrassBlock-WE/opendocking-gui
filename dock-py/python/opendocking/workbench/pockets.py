@@ -34,21 +34,26 @@ protein with the ligand's residue removed, the search run without ever being
 told where to look, and each site's box tested for whether it holds the whole
 bound pose:
 
-| complex              | ligand       | atoms | rank of the site whose box holds the whole pose | of | its own volume |
-|----------------------|--------------|-------|-----------------------------------------------|---|----------------|
-| 1STP streptavidin    | biotin       | 16    | **1**                                         | 40 | 161 A³         |
-| 3PTB trypsin         | benzamidine  | 9     | **1**                                         | 39 | 357 A³         |
-| 2NNQ                 | T4B          | 36    | **1**                                         | 41 | 359 A³, sealed |
-| 1HVR HIV protease   | XK2          | 46    | **1**                                         | 47 | 544 A³         |
-| 1CRN crambin        | ibuprofen    | 16    | 9                                             | 16 | 12 A³          |
+| complex              | ligand       | atoms | rank of that site | of | its volume | atoms its box holds |
+|----------------------|--------------|-------|-------------------|---|------------|--------------------|
+| 1STP streptavidin    | biotin       | 16    | **1**             | 40 | 161 A³     | 16 / 16           |
+| 3PTB trypsin         | benzamidine  | 9     | **1**             | 39 | 357 A³     | 9 / 9             |
+| 2NNQ                 | T4B          | 36    | **1**             | 41 | 359 A³, sealed | 36 / 36        |
+| 1HVR HIV protease   | XK2          | 46    | **1**             | 47 | 544 A³     | 43 / 46           |
+| 1CRN crambin        | ibuprofen    | 16    | 9                 | 16 | 12 A³      | 16 / 16           |
 
-Four first, one ninth, five out of five found and five out of five boxes
-holding the entire bound pose. That is what the search is for and it is worth
-saying plainly, because the version of this file that got there had a
-one-voxel dilation in front of the labelling step which merged every one of
-the first four sites into the protein's outer surface: they were not
-mis-ranked, they were not in the list at all. See the comment on `interior` in
-`find_pockets` for the before-and-after voxel counts.
+Four first and one ninth, five out of five found. Four of the five boxes hold
+**every** atom of the bound pose; the fifth holds 43 of 46, and the site is a
+cleft that runs past where the inhibitor's flexible tail ends.
+
+That is what the search is for and it is worth saying plainly, because the
+version of this file that got there had a one-voxel dilation in front of the
+labelling step. It merged the three open sites -- 1STP, 3PTB and 1HVR, the ones
+this module calls grooves -- into the protein's outer surface: they were not
+mis-ranked, they were **not in the list at all**. (2NNQ's site is a *sealed*
+cavity and was never dilated, which is why it survived and the others did not.)
+See the comment on `interior` in `find_pockets` for the before-and-after voxel
+counts.
 
 What it still does not do, measured rather than assumed:
 
