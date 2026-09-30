@@ -636,8 +636,13 @@ def auto_box(
     This is a convenience for small receptors and for tests. For a real protein
     the search box must be a *binding site* — a 3000-atom receptor in one box
     would need tens of gigabytes of maps and would make the search far less
-    effective. Use the workbench's box tool, or pass ``--center_*`` and
-    ``--size_*`` on the command line, to place it by hand.
+    effective.
+
+    To place it on a real site rather than by hand: ``--auto-box N`` on the
+    command line, or the site list in the workbench, both of which use
+    :func:`opendocking.workbench.pockets.find_pockets`. This function is *not*
+    that — it is the whole-receptor box this paragraph is warning about, kept
+    because a test needs something trivial and honest to compare against.
     """
     (lo, hi) = receptor.bounds
     return GridBox(
