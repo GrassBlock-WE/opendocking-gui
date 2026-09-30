@@ -101,7 +101,16 @@ The project is pre-1.0. The `0.x` line is where the interfaces still move.
   14 skipped, 75 checks — the same 61 passes CI reports, plus the one that used
   to vanish.
 
-- `find_contacts` accepted `hbond_max` and `hbond_min_angle` and **ignored
+- Three checks put `dock-py/python` on `sys.path` ahead of everything else, so
+  they imported the **source copy** of `opendocking`. A clean checkout cannot
+  load that copy: the compiled `_dockpy` extension is gitignored and only exists
+  in site-packages, so every one of them died on a fresh CI runner with "The
+  Open Docking native extension is not available" — while working perfectly on
+  the maintainer's machine, where a development build had left the extension
+  sitting in the source tree. They now prefer the installed package and only
+  fall back to the source tree when there is none, which is also the more useful
+  default: it is what a user gets. `workbench_smoke.py` had the right pattern
+  written down already; the new scripts did not copy it.- `find_contacts` accepted `hbond_max` and `hbond_min_angle` and **ignored
   them**: the helper read the module constants directly, so only the
   close-contact cut-off was ever applied. A caller tightening the thresholds to
   check a borderline pose would have been told it had worked.

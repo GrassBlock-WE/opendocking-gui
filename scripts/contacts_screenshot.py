@@ -10,7 +10,14 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT / "dock-py" / "python"))
+# Prefer the installed `opendocking`; only fall back to the source tree when the
+# installed one is missing. Putting `dock-py/python` on the path unconditionally
+# shadows the working package with a copy that cannot import, because a clean
+# checkout has no compiled `_dockpy` there. Same note as `contacts_check.py`.
+try:  # noqa: SIM105
+    import opendocking  # noqa: F401
+except ImportError:  # pragma: no cover - only on an uninstalled checkout
+    sys.path.insert(0, str(ROOT / "dock-py" / "python"))
 
 from PyQt6 import QtCore, QtOpenGLWidgets, QtWidgets  # noqa: E402
 

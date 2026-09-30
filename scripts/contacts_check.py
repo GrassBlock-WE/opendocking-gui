@@ -25,7 +25,21 @@ from pathlib import Path
 import numpy as np
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT / "dock-py" / "python"))
+
+# Prefer the *installed* package, and only fall back to the source tree when
+# there is no installed one. Putting `dock-py/python` on the path instead --
+# which is what this did first -- makes Python import the source copy of
+# `opendocking`, and a clean checkout has no `_dockpy` extension in it: the
+# compiled module lives in site-packages and the `.pyd`/`.so` is gitignored.
+# So that version worked on the maintainer's machine, where a development
+# build had left the extension sitting in the source tree, and failed
+# everywhere else with "The Open Docking native extension is not available".
+# Testing what is installed is also the more useful default: it is what a user
+# gets, and it is what CI builds.
+try:  # noqa: SIM105
+    import opendocking  # noqa: F401
+except ImportError:  # pragma: no cover - only on an uninstalled checkout
+    sys.path.insert(0, str(ROOT / "dock-py" / "python"))
 
 from opendocking.workbench import MoleculeView  # noqa: E402
 from opendocking.workbench import contacts as C  # noqa: E402

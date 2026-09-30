@@ -14,7 +14,16 @@ from math import dist
 import numpy as np
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT / "dock-py" / "python"))
+
+# Prefer the installed package; fall back to the source tree only when there is
+# none. Putting `dock-py/python` on the path first imports the source copy of
+# `opendocking`, which a clean checkout cannot load because it has no compiled
+# `_dockpy` extension -- that file is gitignored and only exists in
+# site-packages. See `contacts_check.py` for the same note in full.
+try:  # noqa: SIM105
+    import opendocking  # noqa: F401
+except ImportError:  # pragma: no cover - only on an uninstalled checkout
+    sys.path.insert(0, str(ROOT / "dock-py" / "python"))
 
 from opendocking.workbench import geometry, structure as st_mod  # noqa: E402
 from opendocking.workbench import MoleculeView  # noqa: E402
