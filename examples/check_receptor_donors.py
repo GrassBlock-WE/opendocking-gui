@@ -132,4 +132,11 @@ def main(pdb_path: str) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main(sys.argv[1] if len(sys.argv) > 1 else "1crn_receptor.pdb"))
+    # The defaults resolve next to this file rather than next to the caller's
+    # working directory, so `python examples/check_receptor_donors.py` works
+    # from the repository root. A bare "1crn_receptor.pdb" only worked after a
+    # `cd examples`, which is not what anyone runs.
+    here = Path(__file__).resolve().parent
+    raise SystemExit(
+        main(sys.argv[1] if len(sys.argv) > 1 else str(here / "1crn_receptor.pdb"))
+    )

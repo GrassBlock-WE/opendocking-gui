@@ -578,10 +578,12 @@ def evaluate_conformations(
     ``use_gpu`` moves the per-atom grid interpolation to the compute kernel.
     It is **off by default**, and that default is deliberate: the kernel
     accumulates in single precision, so it agrees with the CPU path to about
-    1e-8 rather than bit-for-bit. A default that silently changes the last
-    digits of a result depending on the machine would make runs irreproducible
-    across hardware. Opt in with ``use_gpu=True`` when you are scoring a large
-    population and the speed is worth that much precision.
+    single precision -- a relative error of order 1e-7, which on a score of
+    order 10 is around a microcalorie per mole -- rather than bit-for-bit. A
+    default that silently changes the last digits of a result depending on the
+    machine would make runs irreproducible across hardware. Opt in with
+    ``use_gpu=True`` when you are scoring a large population and the speed is
+    worth that much precision.
 
     Pass a dict as ``report_backend`` and it is filled in with
     ``backend`` (``"gpu"`` or ``"cpu"``), ``adapter``, ``gpu_skip_reason``

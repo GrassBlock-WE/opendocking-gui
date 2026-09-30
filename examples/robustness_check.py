@@ -57,16 +57,31 @@ def run_in_subprocess(label: str, code: str) -> None:
     with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False, encoding="utf-8") as fh:
         fh.write(code)
         path = fh.name
+    # `text=True` on its own decodes with the *system* code page, which is not
+    # UTF-8 on a Chinese Windows install. The child mixes encodings by design:
+    # Python's own traceback follows the locale while the Rust engine writes
+    # UTF-8 ("...Ångström"). A decode error inside the reader thread used to
+    # kill it, leaving `stderr` unset, and the `in` test below then raised a
+    # TypeError instead of reporting anything. Decoding as UTF-8 with
+    # replacement turns a mismatch into a visible substitution character.
     proc = subprocess.run(
-        [sys.executable, path], capture_output=True, text=True, timeout=180
+        [sys.executable, path],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=180,
     )
     Path(path).unlink(missing_ok=True)
+    # Belt and braces: if a decode did take the stream down, `stderr` is None.
+    # This function exists to report a verdict, so it must never raise instead.
+    stderr = proc.stderr or ""
     # A child that could not even import the package exits 1, which the abort
     # check below would happily call a pass. That makes the test prove nothing,
     # so the import errors are rejected explicitly.
-    if "ModuleNotFoundError" in proc.stderr or "NameError" in proc.stderr:
+    if "ModuleNotFoundError" in stderr or "NameError" in stderr:
         failures.append(label)
-        detail = (proc.stderr.strip().splitlines() or ["(no stderr)"])[-1]
+        detail = (stderr.strip().splitlines() or ["(no stderr)"])[-1]
         print(
             f"  FAIL {label:<34} -> the child could not import the package "
             f"({detail[:50]}); nothing was actually tested"
@@ -82,7 +97,7 @@ def run_in_subprocess(label: str, code: str) -> None:
             "(this is what a Rust panic looks like)"
         )
     else:
-        detail = (proc.stderr.strip().splitlines() or ["(no stderr)"])[-1]
+        detail = (stderr.strip().splitlines() or ["(no stderr)"])[-1]
         print(f"  ok   {label:<34} -> exit {proc.returncode}, {detail[:60]}")
 
 

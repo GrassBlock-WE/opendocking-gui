@@ -130,6 +130,38 @@ class TestPreparation:
                 float(line[38:46])
                 float(line[46:54])
 
+    def test_loading_from_text_matches_loading_from_a_file(
+        self, data_dir, maps, tmp_path
+    ):
+        """``from_pdbqt_str`` must parse the text, not open it as a path.
+
+        Regression: the binding handed the text to the file-opening reader, so
+        this entry point failed on *every* input -- on Windows with os error
+        123 ("the filename ... is incorrect", because a PDBQT is full of
+        newlines), on Linux by looking for a file named after the whole
+        document. Nothing caught it, because the only callers passed
+        deliberately malformed text and a catchable ValueError looks the same
+        whether it came from the parser or from a failed open. Asserting the
+        successful path is the only thing that distinguishes them.
+        """
+        text = (data_dir / "ligands" / "ibuprofen.pdbqt").read_text()
+        from_text = Ligand.from_pdbqt_str(text)
+
+        copied = tmp_path / "ibuprofen.pdbqt"
+        copied.write_text(text, encoding="utf-8")
+        from_file = load_ligand(copied)
+
+        assert from_text.num_atoms == from_file.num_atoms
+        assert from_text.num_torsions == from_file.num_torsions
+        assert from_text.num_dof == from_file.num_dof
+
+        # And it has to be a working ligand, not just a parsed shell: the two
+        # must score identically.
+        conf = np.zeros(from_text.num_dof)
+        a = score_conformation(from_text, maps, conf)[0]
+        b = score_conformation(from_file, maps, conf)[0]
+        assert a == pytest.approx(b, abs=1e-12), f"{a} vs {b}"
+
     @pytest.mark.parametrize(
         "name,min_torsions", [("benzene", 0), ("toluene", 0), ("ibuprofen", 4)]
     )
@@ -266,8 +298,8 @@ class TestScoring:
         """Opting into the GPU must be explicit, and must be close.
 
         The kernel accumulates in single precision, so it agrees with the CPU
-        path to roughly 1e-8 and not bit-for-bit. That is why the default is
-        off: a default that silently changed the last digits of a result
+        path to single precision and not bit-for-bit. That is why the default
+        is off: a default that silently changed the last digits of a result
         depending on the machine would make runs irreproducible across
         hardware.
         """
@@ -287,9 +319,22 @@ class TestScoring:
         assert set(report) >= {"backend", "adapter", "gpu_skip_reason"}
         assert report["backend"] in ("cpu", "gpu")
         assert report["num_conformations"] == n
+
+        # The tolerance has to be relative, and that is not a detail. These
+        # conformations are placed at random, so a good share of them sit
+        # outside the box and score in the hundreds -- where a single ulp of a
+        # single-precision number is already around 1e-4. A fixed absolute
+        # threshold below that would be smaller than the arithmetic it is
+        # meant to check, so it would pass on the machine it was written on
+        # and fail on every other shader compiler. Measured worst case is
+        # about one f32 ulp of the score, so the meaningful criterion is the
+        # error relative to the size of the score.
+        scale = max(1.0, float(np.max(np.abs(cpu))))
         worst = float(np.max(np.abs(gpu - cpu)))
-        # A few ulp of single precision across a sum of grid samples per atom.
-        assert worst < 1e-4, f"GPU and CPU disagree by {worst:g}"
+        assert worst <= 1e-5 * scale, (
+            f"GPU and CPU disagree by {worst:g} absolute "
+            f"({worst / scale:g} relative) on scores of magnitude {scale:g}"
+        )
         if report["backend"] == "gpu":
             assert report["gpu_skip_reason"] is None
             assert report["adapter"]

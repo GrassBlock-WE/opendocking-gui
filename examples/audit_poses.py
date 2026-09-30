@@ -164,6 +164,12 @@ def main(
         e_cpu = opendocking.evaluate_conformations(lig, maps, pop, "vina", use_gpu=False)
         e_gpu = opendocking.evaluate_conformations(lig, maps, pop, "vina", use_gpu=True)
         gpu_gap = float(np.max(np.abs(e_gpu - e_cpu)))
+        # Relative, for the same reason the unit test is: the kernel is single
+        # precision, and a clashing pose can score in the hundreds, where any
+        # fixed absolute threshold would sit below the arithmetic it is meant
+        # to check. The floor keeps near-zero scores from demanding a relative
+        # accuracy the hardware cannot give.
+        gpu_rel = gpu_gap / max(1.0, float(np.max(np.abs(e_cpu))))
 
         flags = []
         if n_clash:
@@ -173,8 +179,8 @@ def main(
         if downhill > 1e-6:
             flags.append(f"NOT a minimum ({downhill:+.5f} reachable)")
             problems += 1
-        if gpu_gap > 1e-3:
-            flags.append("CPU/GPU disagree")
+        if gpu_rel > 1e-5:
+            flags.append(f"CPU/GPU disagree ({gpu_rel:.1e} relative)")
             problems += 1
 
         suffix = ("  <-- " + "; ".join(flags)) if flags else ""
@@ -198,10 +204,13 @@ def main(
 
 
 if __name__ == "__main__":
+    # Defaults resolve next to this file, not the caller's working directory,
+    # so these run from the repository root without a `cd examples` first.
+    here = Path(__file__).resolve().parent
     raise SystemExit(
         main(
-            sys.argv[1] if len(sys.argv) > 1 else "1crn_prep.pdbqt",
-            sys.argv[2] if len(sys.argv) > 2 else "biotin_prep.pdbqt",
+            sys.argv[1] if len(sys.argv) > 1 else str(here / "1crn_prep.pdbqt"),
+            sys.argv[2] if len(sys.argv) > 2 else str(here / "biotin_prep.pdbqt"),
             parse_centre(sys.argv[3]) if len(sys.argv) > 3 else None,
             float(sys.argv[4]) if len(sys.argv) > 4 else 18.0,
         )

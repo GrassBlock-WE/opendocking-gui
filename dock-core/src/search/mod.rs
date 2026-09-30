@@ -713,15 +713,44 @@ mod tests {
         // than its atom list — which is an out-of-bounds index, not a graceful
         // error.
         fn blob() -> Molecule {
-            let (mut mol, _) = parse_butane();
-            let template = mol.atoms.clone();
-            for _ in 0..40 {
+            let (parsed, _) = parse_butane();
+            let template = parsed.atoms;
+            // 40 copies on a 4x4x3 lattice. The spacing matters: butane spans
+            // 3.65 A in x and 1.3 A in y, so a 3.0 A pitch leaves at least
+            // 1.7 A between any two copies. Packing the copies 0.1 A apart --
+            // which is what this used to do -- put atoms on *identical*
+            // coordinates (copy k's C1 against copy k+15's C2), so the blob
+            // was a physically impossible structure. Nothing complained,
+            // because the engine scored it anyway and returned finite
+            // numbers. A fixture that cannot be docked is not a useful test.
+            //
+            // Every atom comes from the lattice: keeping the parsed template
+            // as atoms 0..4 and *also* placing a copy at lattice origin would
+            // put the same atom in the molecule twice.
+            let mut atoms: Vec<crate::types::Atom> = Vec::with_capacity(40 * template.len());
+            for k in 0..40 {
+                let offset = [
+                    3.0 * (k % 4) as f64,
+                    3.0 * ((k / 4) % 4) as f64,
+                    3.0 * (k / 16) as f64,
+                ];
                 for a in &template {
                     let mut a = a.clone();
-                    a.coord[0] += 0.1;
-                    mol.atoms.push(a);
+                    for axis in 0..3 {
+                        a.coord[axis] += offset[axis];
+                    }
+                    atoms.push(a);
                 }
             }
+            // Centre it, so the 14 Å box around the origin actually contains it.
+            let n = atoms.len() as f64;
+            for axis in 0..3 {
+                let mean: f64 = atoms.iter().map(|a| a.coord[axis]).sum::<f64>() / n;
+                for a in &mut atoms {
+                    a.coord[axis] -= mean;
+                }
+            }
+            let mut mol = Molecule::from_atoms(atoms).expect("a lattice of butane is valid");
             mol.perceive_bonds()
                 .expect("bond perception should succeed");
             mol.assign_ring_membership()

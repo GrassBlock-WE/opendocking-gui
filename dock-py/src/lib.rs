@@ -43,7 +43,7 @@ use dock_core::docking::{dock, DockingConfig, DockingResult, SearchMode};
 use dock_core::grid::{GridBox, GridMaps};
 use dock_core::kinematics::Conformation;
 use dock_core::ligand::Ligand;
-use dock_core::pdbqt::{read_pdbqt, ParsedStructure};
+use dock_core::pdbqt::{parse_pdbqt, ParsedStructure};
 use dock_core::receptor::Receptor;
 use dock_core::scoring::{ScoringFunction, VinaScoring};
 use dock_core::search::ScoringContext;
@@ -311,7 +311,14 @@ impl PyLigand {
     /// Read a ligand from PDBQT text.
     #[staticmethod]
     fn from_pdbqt_str(text: &str) -> PyResult<Self> {
-        let parsed: ParsedStructure = read_pdbqt(text).map_err(to_py_err)?;
+        // `parse_pdbqt`, not `read_pdbqt`: the latter takes a *path* and
+        // opens a file. Passing the PDBQT text to it made this entry point
+        // fail on every input -- on Windows with os error 123 ("the
+        // filename ... is incorrect", because a PDBQT is full of newlines),
+        // on Linux by looking for a file whose name is the whole document.
+        // Nothing caught it: every caller passed malformed text and saw a
+        // catchable ValueError either way, which is exactly what it wanted.
+        let parsed: ParsedStructure = parse_pdbqt(text).map_err(to_py_err)?;
         let torsions = parsed.active_torsion_pairs();
         Ok(PyLigand {
             inner: Arc::new(

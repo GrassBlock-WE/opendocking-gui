@@ -12,7 +12,7 @@ use crate::grid::MAPS_PER_TYPE;
 use crate::kinematics::KinematicTree;
 use crate::pdbqt::{read_pdbqt, ParsedStructure};
 use crate::scoring::weights_for_kind;
-use crate::types::{grid_type_index, Atom, Molecule, Vec3};
+use crate::types::{dist3, grid_type_index, Atom, Molecule, Vec3};
 
 /// Intramolecular interactions closer than this many bonds are excluded.
 ///
@@ -20,6 +20,18 @@ use crate::types::{grid_type_index, Atom, Molecule, Vec3};
 /// already accounted for by the bonded terms; scoring them again would let a
 /// torsion collapse. This matches Vina's exclusion rule.
 pub const MIN_INTRA_BOND_DISTANCE: usize = 4;
+
+/// Two atoms of one ligand may not be closer than this, in ångström.
+///
+/// The shortest real contact in any molecule is an H–H bond at about 0.74 Å,
+/// so 0.5 Å cannot reject a genuine structure; it only catches two atoms
+/// sitting on the same coordinate, which is what a truncated or mis-prepared
+/// file looks like. Such a ligand used to be accepted silently: the pair is
+/// either a bonded neighbour (excluded from the intramolecular term) or gets
+/// a hard-coded short-range clamp, so every number came out finite and the
+/// failure was invisible. A docking run then returned plausible-looking poses
+/// built from geometry that does not exist.
+pub const MIN_ATOM_SEPARATION: f64 = 0.5;
 
 /// A prepared docking ligand.
 #[derive(Debug, Clone, Serialize)]
@@ -50,6 +62,15 @@ impl Ligand {
     ) -> Result<Ligand> {
         if molecule.is_empty() {
             return Err(DockError::molecule("ligand contains no atoms"));
+        }
+        if let Some((i, j, d)) = closest_atom_pair(&molecule) {
+            return Err(DockError::molecule(format!(
+                "atoms {i} ({}) and {j} ({}) are {d:.3} Å apart, below the \
+                 {MIN_ATOM_SEPARATION:.1} Å floor: this is a duplicate or a \
+                 broken structure, and scoring it would return finite but \
+                 meaningless energies",
+                molecule.atoms[i].name, molecule.atoms[j].name,
+            )));
         }
         let mut mol = molecule;
         // Re-derive the interaction classes even if the caller built the
@@ -150,6 +171,26 @@ impl Ligand {
     }
 }
 
+/// The closest pair of atoms closer than [`MIN_ATOM_SEPARATION`], if any.
+///
+/// Returns `(i, j, distance)`. Ligands are tens of atoms, so the quadratic
+/// scan is free next to the grid precalculation that follows it, and it runs
+/// once per ligand rather than per conformation.
+fn closest_atom_pair(mol: &Molecule) -> Option<(usize, usize, f64)> {
+    let mut worst: Option<(usize, usize, f64)> = None;
+    for i in 0..mol.len() {
+        for j in (i + 1)..mol.len() {
+            let d = dist3(mol.atoms[i].coord, mol.atoms[j].coord);
+            // `map_or(true, ..)` rather than `is_none_or`: the latter is stable
+            // from 1.82 and this crate's MSRV is 1.75.
+            if d < MIN_ATOM_SEPARATION && worst.map_or(true, |(_, _, w)| d < w) {
+                worst = Some((i, j, d));
+            }
+        }
+    }
+    worst
+}
+
 /// All atom pairs at least `min_dist` bonds apart, stored once each.
 ///
 /// Vina reaches the same total by tabulating a per-conformation ligand grid
@@ -201,6 +242,63 @@ mod tests {
             c(4, [3.650, 1.300, 0.000]),
         ])
         .unwrap()
+    }
+
+    /// Two atoms placed on the same coordinate, bonded neighbours.
+    fn coincident_neighbours() -> Molecule {
+        let c = |i: u32, p: Vec3| Atom::new(i, p, Element::C, AtomType::CH);
+        Molecule::from_atoms(vec![
+            c(1, [0.000, 0.000, 0.000]),
+            c(2, [0.000, 0.000, 0.000]),
+            c(3, [1.500, 0.000, 0.000]),
+        ])
+        .unwrap()
+    }
+
+    #[test]
+    fn two_atoms_on_the_same_coordinate_are_refused() {
+        // Regression: this used to be accepted silently. Because the pair is
+        // also a bonded neighbour it was dropped from the intramolecular term
+        // altogether, so every energy came out finite and the malformed
+        // structure produced plausible-looking poses. A crash would at least
+        // have been visible.
+        let err = Ligand::from_molecule(coincident_neighbours())
+            .expect_err("coincident atoms must be refused, not scored");
+        let message = err.to_string();
+        assert!(message.contains("0.0"), "message: {message}");
+        assert!(message.contains("below the"), "message: {message}");
+    }
+
+    #[test]
+    fn the_separation_floor_does_not_reject_a_real_molecule() {
+        // H2 has the shortest bond that exists (0.74 Å), and this chain is
+        // built from realistic C-C and C-H distances. If the floor ever
+        // rejects something like this it is set far too high.
+        // C1 at the origin, C4 one real C-C bond away, and both hydrogens of
+        // the methyl group in the plane perpendicular to that bond. Placing an
+        // H along the bond axis instead would put it 0.45 Å from C4, which is
+        // the floor being tested for -- real geometry has to stay clear of it.
+        let h = |i: u32, p: Vec3| Atom::new(i, p, Element::H, AtomType::HD);
+        let mol = Molecule::from_atoms(vec![
+            Atom::new(1, [0.000, 0.000, 0.000], Element::C, AtomType::CH),
+            h(2, [0.000, 1.090, 0.000]),
+            h(3, [0.000, -0.545, 0.943]),
+            Atom::new(4, [1.540, 0.000, 0.000], Element::C, AtomType::CH),
+        ])
+        .unwrap();
+        let tightest = (0..mol.len())
+            .flat_map(|i| ((i + 1)..mol.len()).map(move |j| (i, j)))
+            .map(|(i, j)| dist3(mol.atoms[i].coord, mol.atoms[j].coord))
+            .fold(f64::INFINITY, f64::min);
+        assert!(
+            tightest > MIN_ATOM_SEPARATION,
+            "real geometry has a {tightest:.3} Å contact, inside the {MIN_ATOM_SEPARATION:.1} Å floor"
+        );
+        // The floor is not close to any real bond: the tightest contact here is
+        // a normal C-H bond. If this ever approaches 0.5 the floor is wrong.
+        assert!(tightest > 1.0, "tightest contact is {tightest:.3} Å");
+        assert!(closest_atom_pair(&mol).is_none());
+        assert!(Ligand::from_molecule(mol).is_ok());
     }
 
     #[test]

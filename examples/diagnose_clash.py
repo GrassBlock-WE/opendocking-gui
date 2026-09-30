@@ -105,10 +105,13 @@ def _coords_for(lig, conf):
 
 
 if __name__ == "__main__":
+    # Defaults resolve next to this file, not the caller's working directory,
+    # so these run from the repository root without a `cd examples` first.
+    here = Path(__file__).resolve().parent
     raise SystemExit(
         main(
-            sys.argv[1] if len(sys.argv) > 1 else "1crn_prep.pdbqt",
-            sys.argv[2] if len(sys.argv) > 2 else "biotin_prep.pdbqt",
+            sys.argv[1] if len(sys.argv) > 1 else str(here / "1crn_prep.pdbqt"),
+            sys.argv[2] if len(sys.argv) > 2 else str(here / "biotin_prep.pdbqt"),
             [float(x) for x in (sys.argv[3] if len(sys.argv) > 3 else "9.24,9.71,6.91").split(",")],
             float(sys.argv[4]) if len(sys.argv) > 4 else 26.0,
             int(sys.argv[5]) if len(sys.argv) > 5 else 400,

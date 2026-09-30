@@ -1,4 +1,4 @@
-﻿# 验证报告
+# 验证报告
 
 本文如实记录**跑了什么、结果如何、以及什么没有验证**。
 不要跳过第二、三节。在那些项目上，本工具只是一个能编译、能跑的程序，
@@ -12,8 +12,8 @@
 
 | 命令 | 结果 |
 |---|---|
-| `cargo test -p dock-core` | **104 passed; 0 failed** + 1 doctest |
-| `cargo test -p dock-core --features gpu` | **114 passed; 0 failed** + 1 doctest |
+| `cargo test -p dock-core` | **106 passed; 0 failed** + 1 doctest |
+| `cargo test -p dock-core --features gpu` | **116 passed; 0 failed** + 1 doctest |
 | `cargo clippy --workspace --all-targets -- -D warnings` | **exit 0** |
 | `cargo clippy -p dock-core --features gpu --all-targets -- -D warnings` | **exit 0** |
 | `cargo build --workspace --all-targets`（含 bench） | 零警告零错误 |
@@ -43,7 +43,7 @@ GPU 后端**已经接入批量打分路径**（`evaluate_conformations(use_gpu=T
 | 项 | 结果 |
 |---|---|
 | `python -m pip install -r requirements.txt` | 依赖清单按运行时 / 构建 / GUI / 开发分组，附实测版本 |
-| `python -m pytest --pyargs opendocking.tests -q` | **37 passed**（对**已安装的 wheel**运行） |
+| `python -m pytest --pyargs opendocking.tests -q` | **38 passed**（对**已安装的 wheel**运行） |
 | CPU wheel | `dist/opendocking-0.1.0-cp38-abi3-win_amd64.whl` |
 | GPU wheel | `dist-gpu/opendocking-0.1.0-cp38-abi3-win_amd64.whl` |
 
@@ -211,7 +211,7 @@ macOS（Metal）、Linux（Vulkan）、AMD 独显、Intel 核显、Apple Silicon
 ## 3. 验证过程中发现并修复的 bug
 
 以下每一项都是**跑出来**的，不是读代码想出来的。
-共 56 条，按性质分组。
+共 68 条，按性质分组。
 
 ### 3.1 正确性
 
@@ -542,19 +542,160 @@ pose 1: closest approach to a cell face = 0.0000 cells
 
 #### 发布目录的独立性验证
 
-`opendocking-gui/` 只含源码与文档，**93 个文件、约 1 MB**。不是"看起来干净"，
+`opendocking-gui/` 只含源码与文档，**94 个文件、972 KiB**。不是"看起来干净"，
 而是逐项验过：
 
-- 与工作区**逐字节比对** 93/93 一致，没有漏拷也没有多拷
+- 与工作区**逐字节比对** 94/94 一致，没有漏拷也没有多拷
 - 22 个必备文件齐备，7 类禁入项（`odck.md` / 构建产物 / 缓存）一个都没有
 - 文档卫生检查**在该目录内部**重跑：0 编码损坏、0 断链、0 本机路径
 - 可执行源码里旧包名残留 **0** 处
   （`docs/VERIFICATION.md` 里有 1 处，是**举例说明 §3.10 那个 bug**，是有意保留的）
-- **在该目录内部从零构建并测试**：rustfmt → 104/114 测试 → 双配置 clippy →
-  wheel 构建安装 → 37 pytest → `odgui --check` → 3 个 examples →
+- **在该目录内部从零构建并测试**：rustfmt → 106/116 测试 → 双配置 clippy →
+  wheel 构建安装 → 38 pytest → `odgui --check` → 5 个 examples →
   GUI 交互 50 项 → 真实启动关窗
 
 最后一条是关键：它证明这个目录不依赖任何没被复制的文件。
+
+### 3.13 CPU/GPU 一致性单测的阈值本身就是错的
+
+推上 GitHub 后 CI 第一次真正跑完，`engine / bindings (gpu)` 在 Python 测试这一步变红——
+**不是 clippy，也不是引擎算错了**：
+
+```
+AssertionError: GPU and CPU disagree by 0.000114503
+assert 0.00011450314968897146 < 0.0001
+```
+
+本机 RTX 3050 上同一个断言是绿的。量了实际数字才看清根因：
+
+| 量 | 值 |
+|---|---|
+| 该批构象的得分量级 `max\|cpu\|` | **1042** |
+| 本机（NVIDIA）最差绝对误差 | 3.81e-05 |
+| CI（软件光栅化）最差绝对误差 | 1.15e-04 |
+| `f32_eps × 量级` | **1.24e-04** |
+| CI 相对误差 | **1.10e-07** ≈ 0.92 个 f32 ulp |
+
+原来的断言写的是 `worst < 1e-4`，一个**固定绝对阈值**。而这些构象是随机摆的，
+相当一部分伸出盒子，得分到几百，单精度下一个 ulp 就有 `1e-4` 量级——
+**阈值比它要检查的算术本身还小**。所以它不是"CI 更严所以暴露了问题"，
+而是这个阈值在任何机器上都不可能可靠：NVIDIA 的编译器碰巧落在下面就绿，
+换一个就红。误差本身完全在单精度舍入范围内，引擎没有问题。
+
+| # | 现象 | 根因 | 修复 |
+|---|---|---|---|
+| 58 | gpu job 的 `test_the_gpu_batch_path_agrees_and_reports_itself` 在 CI 挂、本机绿 | 断言用固定绝对阈值 `1e-4`，低于该批得分量级下一个 f32 ulp（1.24e-4）。机器换了、shader 编译器换了就必红 | 改为**相对**阈值：`worst <= 1e-5 * max(1, max\|cpu\|)`，并在注释里写明为什么绝对阈值在这里没有意义 |
+| 59 | `examples/audit_poses.py` 的 `gpu_gap > 1e-3` 是同一个错 | 同一类：绝对阈值套在可能带 clash 的位姿上（clash 位姿能量可达几百） | 一并改为相对阈值，flag 里带上相对数值 |
+| 60 | `docs/ARCHITECTURE.md` 声称 GPU 与 CPU 结果"逐位相同" | **不实**。拆分只保证**分子内项**逐位相同，分子间插值是单精度的，测得相对误差 ~1e-7 | 改正说法，并补上两个平台上的实测相对误差 |
+| 61 | `core.evaluate_conformations` 的 docstring 写"agrees to about 1e-8" | 同上，且 1e-8 是在**得分很小**的位姿上量的绝对值，被当成了普遍结论 | 改为"相对误差约 1e-7，量级 10 的得分上约合 1 微卡/摩尔" |
+| 62 | workbench job 在 "Install system libraries" 6 秒失败：`E: Unable to locate package libxkbcommon-x11` | 包名漏了 `-0` 后缀。core job 里写的是对的，gui job 是从别处复制时漏掉的 | 改为 `libxkbcommon-x11-0` |
+
+这一条与 §3.10 的教训是同一类：**断言写死的数字，必须问它"这个数字和什么量纲比"**。
+"GPU 和 CPU 相差小于 1e-4" 读起来像一个物理精度声明，实际上它是一个
+**关于测试机器 shader 编译器的断言**。
+
+#### 相对阈值的取舍，以及它的反向验证
+
+把阈值改成相对的不是"放宽"，所以必须证明它**仍然能抓住真 bug**。
+对 10 个点逐个核对了新阈值的判定：
+
+| 情形 | 最差绝对误差 | 得分量级 | 判定 |
+|---|---|---|---|
+| 本机 NVIDIA（实测） | 3.81e-05 | 1042 | pass（余量 **91×**） |
+| CI 软件光栅化（实测） | 1.15e-04 | 1042 | pass |
+| 无 GPU，CPU 回退 | 0 | 1042 | pass |
+| 注入 1e-3 相对误差的真 bug | 1.04 | 1042 | **FAIL** |
+| 注入 1e-2 相对误差的真 bug | 10.4 | 1042 | **FAIL** |
+| 注入 0.01 绝对误差 @ 得分 −10.4 | 0.01 | 10.4 | **FAIL** |
+| 注入 0.01 绝对误差 @ 得分 −9.8 | 0.01 | 9.8 | **FAIL** |
+| 得分 0.5、f32 噪声 | 6e-08 | 0.5 | pass（`1.0` 下限生效） |
+| 得分 0.5、注入 0.01 | 0.01 | 0.5 | **FAIL** |
+
+**纯相对阈值有一个代价，这里明说**：在得分 1042 上，`0.01` 的绝对误差是
+`9.6e-6` 相对误差，会**通过**。之所以接受，是因为 `+1042 kcal/mol` 意味着
+构象被摆到了网格之外很远，那是一个没有人会当作结论的数字。
+而在**真正会被解读的得分区间**（对接位姿约 −10 kcal/mol），
+同样的 `0.01` 绝对误差比阈值大 100 倍，照样被抓住——上表后两行就是这个。
+
+没有再加一道绝对上限：任何在量级 1042 上不误伤的绝对上限都 ≥ 0.01，
+而在得分 −10 上它会比相对判据更松，反而**削弱**测试在关键区间的牙齿。
+单精度舍入本身就是相对量，加绝对上限会把刚修掉的那个 bug 请回来。
+
+### 3.14 重新跑 examples 时挖出的三个 bug
+
+CI 的两个 job 都绿之后，回到工作区把 `examples/` 5 个脚本在**仓库根目录**重跑
+（CI 根本不跑它们），结果挖出三个问题。其中一个是**公开 API 彻底失效**。
+
+#### 3.14.1 `Ligand.from_pdbqt_str` 从来没有工作过
+
+| # | 现象 | 根因 | 修复 |
+|---|---|---|---|
+| 63 | `Ligand.from_pdbqt_str(合法 PDBQT 文本)` 在**任何输入**上都失败 | `dock-py/src/lib.rs` 里这个函数调的是 `read_pdbqt(text)`，而 `read_pdbqt` 收的是**文件路径**并会去 `File::open`。等于把整段 PDBQT 当文件名去打开。Windows 报 `os error 123`（"文件名语法不正确"，因为 PDBQT 满是换行），Linux 去找一个名字等于整篇文档的文件 | 改用 `parse_pdbqt(text)`。同文件的 `Receptor::from_pdbqt_str` 本来就是对的（走 `dock_core::receptor` 里的 `parse_pdbqt`），所以只有配体这一侧坏了 | 新增 `test_loading_from_text_matches_loading_from_a_file`：文本路径与文件路径必须给出相同的原子数、扭转数、自由度数，且**在同一构象上给出相同能量** |
+
+这个 bug 能活下来，靠的是**它只被用在失败路径上**。唯一调用它的是
+`robustness_check.py` 里的三个子进程测试，而那三个测试传的是**故意写坏的
+PDBQT**——不管解析器行为如何，它们都会得到一个可捕获的 `ValueError`，
+退出码 1，被判为"没有 abort，通过"。**一个正确的解析器和一个完全坏的解析器，
+在这三个测试眼里一模一样。**
+
+修完之后再跑，那三个子进程报出来的才是真正的解析错误，而不是 `os error 123`。
+这和 §3.10 是同一个形状：**只断言"没有崩"，就分不清"做对了"和"根本没做"。**
+
+#### 3.14.2 防假通过的守卫自己会崩
+
+| # | 现象 | 根因 | 修复 |
+|---|---|---|---|
+| 64 | `robustness_check.py` 在中文 Windows 上直接 `TypeError: argument of type 'NoneType' is not iterable` | `subprocess.run(..., text=True)` 不指定编码时用**系统 locale 码页**解码子进程输出，本机是 GBK。子进程混了两种编码：Python 自己的 traceback 跟 locale，Rust 引擎写 UTF-8（`...Ångström`）。解码异常发生在 `subprocess` 的读取线程里，线程死掉后 `buffer.append()` 从没执行，`proc.stderr` 保持 `None`——而守卫写的是 `"..." in proc.stderr` | 显式 `encoding="utf-8", errors="replace"`：解码不匹配退化成可见的替换字符，而不是杀掉读取线程。再加 `stderr = proc.stderr or ""` 兜底。注释里写明这个函数存在的意义是**报结论**，不能自己抛异常 |
+
+#### 3.14.3 三个 example 在仓库根目录跑不起来
+
+| # | 现象 | 根因 | 修复 |
+|---|---|---|---|
+| 65 | `python examples/audit_poses.py` 等报 `FileNotFoundError: '1crn_prep.pdbqt'` | 默认参数是裸文件名，相对**调用者的当前目录**解析，只有先 `cd examples` 才行。而没人会 `cd examples` | 三个脚本的默认路径改为相对 `Path(__file__).parent` 解析，任意目录可跑 |
+
+这三个的共同点：**它们此前"验证通过"是因为我一直在正确的目录下调用。**
+CI 不跑 `examples/`，所以这条路径在 CI 上从来没有被覆盖过。
+
+### 3.15 修好 3.14.1 之后，暴露出的更深一层问题
+
+`from_pdbqt_str` 修好之后，`robustness_check.py` 里"两个原子重叠"这一项**从绿变红**。
+不是它本来是错的，是**它此前是被那个 bug 满足的**：`from_pdbqt_str` 无论传什么都报
+路径错误，所以这一项和"故意写坏的输入"长得一模一样。
+
+把 bug 修掉，才第一次真正测到解析器——于是测出一个新问题。
+
+| # | 现象 | 根因 | 修复 |
+|---|---|---|---|
+| 66 | 两个原子落在同一坐标的配体被**静默接受**，能量、梯度、批量打分、完整对接全部返回有限值，甚至给出一个 −0.61 kcal/mol 的"最优构象" | 引擎没有原子间距校验。这类结构不会崩：重叠对要么是成键邻居（本来就被排除在分子内项外），要么被短程钳位挡住，所以每一个数字都是有限的 | `Ligand::from_molecule_with` 增加 `MIN_ATOM_SEPARATION = 0.5 Å` 下限并拒绝，错误信息给出两个原子的名字、序号和实际距离。新增两个 Rust 测试：重叠必被拒；真实几何不得被误拒 |
+
+**为什么阈值取 0.5 Å**：任何真实分子中最短的接触是 H–H 键约 **0.74 Å**，
+所以 0.5 Å 不可能误伤真实结构，只可能抓住"同一坐标"这种截断或准备失败的文件。
+配一个测试把这个余量钉住：构造一个最短接触为正常 C–H 键长（1.09 Å）的分子，
+断言它通过——**如果这个下限哪天被调高，测试会先红**。
+
+这个 bug 比崩溃更危险。崩溃你看得见；它给出的是**有限、合理、但建立在不存在的
+几何上的**数字。
+
+#### 测试夹具里藏着一个物理上不可能的分子
+
+| # | 现象 | 根因 | 修复 |
+|---|---|---|---|
+| 67 | 加上间距校验后，`a_large_ligand_falls_back_to_the_cpu` 失败：原子 0 与原子 4 距离 0.000 Å | 夹具把丁烷复制 40 份、每份只沿 x 平移 **0.1 Å**，而丁烷本身跨 3.65 Å，必然出现完全重合的原子（副本 k 的 C1 与副本 k+15 的 C2 坐标相同）。这个夹具只是想造一个 >64 原子的分子来测 CPU 回退，重叠是意外的 | 改为 4×4×3 晶格、步距 3.0 Å，副本间最小距离 ≥1.7 Å；全部原子都从晶格生成（保留原模板会与晶格原点的副本重复） |
+
+这条值得单独记一笔：**这个夹具一直在用一个物理上不可能的分子做测试**，
+而测试是绿的。它检验的是"大配体能否回退到 CPU"，不是"分子是否有效"，
+所以重叠对它无所谓——引擎也不在乎，于是没人发现。
+
+#### 门禁自己抓到的一个错误
+
+| # | 现象 | 根因 | 修复 |
+|---|---|---|---|
+| 68 | 新写的 `closest_atom_pair` 用了 `Option::is_none_or`，clippy 报 `incompatible_msrv` | 该 API 从 **Rust 1.82** 才稳定，而本 crate 声明的 MSRV 是 **1.75**。本机工具链是 1.98，编译得过 | 改用 `map_or(true, ..)`，并把原因写进注释 |
+
+以及一处**我自己写的测试自己抓到的错**：新测试里我把一个 H 放在 C–C 键轴上，
+结果它距另一端碳 0.45 Å——正好低于我刚设的下限，被自己的断言抓住。
+另外 `closest_atom_pair` 在"没有近距离对"时返回 `None`，我第一版写成
+`.expect("no close pair in real geometry")`，断言方向写反了。两条都是当场改掉的。
 
 ---
 
@@ -562,8 +703,8 @@ pose 1: closest approach to a cell face = 0.0000 cells
 
 ```powershell
 # Rust
-cargo test -p dock-core                        # 104
-cargo test -p dock-core --features gpu         # 114
+cargo test -p dock-core                        # 106
+cargo test -p dock-core --features gpu         # 116
 cargo clippy --workspace --all-targets -- -D warnings
 cargo clippy -p dock-core --features gpu --all-targets -- -D warnings
 
@@ -573,7 +714,7 @@ python -m maturin build --release -m dock-py\Cargo.toml --out dist-gpu --feature
 python -m pip install --force-reinstall --no-deps dist\opendocking-0.1.0-cp38-abi3-win_amd64.whl
 
 # Python（对已安装的 wheel；改过 .py 必须先重建 wheel）
-python -m pytest --pyargs opendocking.tests -q        # 37
+python -m pytest --pyargs opendocking.tests -q        # 38
 
 # 验证脚本
 python scripts\workbench_smoke.py               # workbench 两级渲染验证
@@ -624,8 +765,9 @@ python scripts\check_repo_docs.py
 
 ## 5. 结论
 
-**可以据以使用的部分**：Rust 引擎的数值正确性（104/114 测试、两配置零警告）、
-CPU/GPU 数值一致性（实测 2.220e-06）、Python 绑定与零拷贝契约、
+**可以据以使用的部分**：Rust 引擎的数值正确性（106/116 测试、两配置零警告）、
+CPU/GPU 数值一致性（相对误差 ~1e-7，约一个 f32 ulp；两个不同平台实测，
+见 §3.13）、Python 绑定与零拷贝契约、
 CLI 全部子命令、workbench 的真实渲染**与全部交互控件**、
 畸形输入的安全处理、确定性与并行正确性、真实蛋白的完整预处理链路、
 并写的输出能被自己的读取器完整读回。

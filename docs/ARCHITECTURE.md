@@ -93,8 +93,19 @@ evaluate_population(ligand, maps, scoring, conformations, prefer_gpu)
        └── 两侧相加：inter + intra · scale
 ```
 
-分子内项拆出来单独在 CPU 上算，是为了让 GPU 路径返回的数和 CPU 路径**逐位相同**
-而不只是"差不多"。单测 `the_intramolecular_split_is_the_sum_of_its_parts` 钉住这一点。
+分子内项拆出来单独在 CPU 上算，是为了让**分子内那部分**在两条路径上逐位相同，
+不必跟着 shader 编译器的浮点行为变。单测
+`the_intramolecular_split_is_the_sum_of_its_parts` 钉住拆分本身的自洽性。
+
+但**两条路径的返回值并不逐位相同**。分子间插值是唯一走 GPU 的部分，kernel 用
+单精度累加：实测相对误差约 `1e-7`，也就是一个 f32 ulp 的量级，而且这个数字随
+驱动和 shader 编译器不同而不同（NVIDIA 上 3.7e-8，软件光栅化上 1.1e-7）。
+这正是 `use_gpu` 默认关闭的原因——默认值不该让结果的最后几位随机器变。
+
+对应单测 `test_the_gpu_batch_path_agrees_and_reports_itself` 因此断言的是
+**相对**误差而不是绝对误差。这些构象是随机摆的，相当一部分伸出盒子，得分到
+几百，单精度下一个 ulp 就有 `1e-4` 量级；任何比它小的固定绝对阈值都比它想检查的
+算术本身还小，只会在写它的机器上侥幸通过。
 
 回退条件（全部静默，因为回退后的结果必须和 CPU 一致）：
 
