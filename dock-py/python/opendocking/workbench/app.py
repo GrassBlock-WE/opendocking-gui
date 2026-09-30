@@ -971,18 +971,41 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lbl_pockets.setWordWrap(True)
         form.addRow("site", self.lbl_pockets)
 
-        self.pocket_table = QtWidgets.QTableWidget(0, 4)
+        # Five columns, and the fifth is the one the ranking is built from.
+        # The list is ordered by `volume ** (1/3) * burial` and a user cannot
+        # see either term, which made the order look arbitrary: a 6 x 10 x 17
+        # A groove with 88 A3 of space in it outranked the 20 A3 pocket a
+        # ligand was actually sitting in, and nothing on screen said why.
+        # Showing the volume makes the order legible, and the kind column
+        # already separates "sealed" from "groove", which is the other thing
+        # worth knowing before clicking a row.
+        self.pocket_table = QtWidgets.QTableWidget(0, 5)
         self.pocket_table.setHorizontalHeaderLabels(
-            ["#", "kind", "centre", "size"]
+            ["#", "kind", "centre", "size", "vol Å³"]
         )
-        self.pocket_table.horizontalHeader().setStretchLastSection(True)
+        # Two columns are short by nature and three are not. Letting the
+        # centre column stretch and the rest size to their contents is what
+        # keeps "vol A^3" from being clipped to a "v" the way a last-section
+        # stretch did: the stretch went to the widest column, which is the one
+        # with the coordinates in it.
+        head = self.pocket_table.horizontalHeader()
+        for col in (0, 1, 3, 4):
+            head.setSectionResizeMode(
+                col, QtWidgets.QHeaderView.ResizeMode.ResizeToContents
+            )
+        head.setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeMode.Stretch)
+        head.setStretchLastSection(False)
         self.pocket_table.setSelectionBehavior(
             QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows
         )
         self.pocket_table.setEditTriggers(
             QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers
         )
-        self.pocket_table.setMinimumHeight(120)
+        # Tall enough for about eight rows. The shortlist is twelve now --
+        # crambin's real binding site is ninth -- so a table showing five made
+        # the user scroll for something that used to be one click away.
+        self.pocket_table.setMinimumHeight(250)
+        self.pocket_table.verticalHeader().setVisible(False)
         self.pocket_table.itemSelectionChanged.connect(self._on_pocket_selected)
         form.addRow(self.pocket_table)
 
@@ -1474,6 +1497,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 P.kind_label(p.kind),
                 f"({p.center[0]:.1f}, {p.center[1]:.1f}, {p.center[2]:.1f})",
                 f"{p.size[0]:.0f} × {p.size[1]:.0f} × {p.size[2]:.0f}",
+                f"{p.volume:.0f} Å³",
             )
             for col, text in enumerate(cells):
                 item = QtWidgets.QTableWidgetItem(text)

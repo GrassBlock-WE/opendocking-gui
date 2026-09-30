@@ -13,6 +13,25 @@ The project is pre-1.0. The `0.x` line is where the interfaces still move.
 
 ### Added
 
+- **`scripts/redock_benchmark.py`**: docking a ligand that is *already bound* in
+  a crystal structure, and asking whether the search finds it back. This is the
+  check the project was missing. Three columns, because they are three
+  different claims: a box derived from the bound ligand measures the engine; the
+  box the pocket search picks measures the whole chain; and the box of the site
+  that *actually* holds the bound pose separates a bad ranking from a bad box.
+  Sampling effort is chosen from the box's volume rather than fixed — a fixed
+  value quietly under-samples every large box and makes the box look like the
+  problem when the search was. The receptor is narrowed to the ligand's own
+  chain and prepared once, and the search and the engine are then given **the
+  same file**, because measuring two different molecules produces two numbers
+  that mean nothing. Not a CI gate: it needs a network, and there is no ground
+  truth a pass/fail could be honestly measured against.
+- **The pocket table shows why it is ordered the way it is.** The list is
+  ranked by `volume ** (1/3) * burial` and the user could see neither term, so
+  the order looked arbitrary — a 88 Å³ groove outranked the 20 Å³ pocket a
+  ligand was sitting in and nothing on screen said why. A fifth column carries
+  the site's own volume, which is the measure the ceiling is applied to and the
+  one the fix below made meaningful.
 - **The site is drawn, so it can be checked.** The workbench renders the
   selected site's own grid points as a translucent cloud, and the `site volume`
   toggle gates it. A table row saying "groove at (12.8, 7.2, 0.1), lined by
@@ -23,7 +42,7 @@ The project is pre-1.0. The `0.x` line is where the interfaces still move.
   that make it a site, and in space-filling about half of it disappeared.
   `pockets_check.py` asserts the cloud and the table describe the same
   geometry: one point per voxel, the same extent, the same centre, and every
-  point within reach of a lining residue.
+  point in free space.
 - **`odcli sites` says what a null result means.** "No sealed cavity" is a
   statement about the probe, not about the protein, and the two are easy to
   confuse. T4 lysozyme L99A has a cavity *deliberately engineered* into it and
@@ -116,6 +135,41 @@ The project is pre-1.0. The `0.x` line is where the interfaces still move.
 
 ### Fixed
 
+- **The pocket search lost every real binding site it found.** A one-voxel
+  isotropic dilation of the burial mask, applied *before* connected-component
+  labelling, was there to stop thin sheets being reported as slivers. It did the
+  opposite: a surface groove is one voxel thick, so growing it one voxel reaches
+  across its neck and merges the site into the protein's outer surface. The
+  merged lump then failed the volume ceiling and took the pocket with it. On the
+  component holding the bound ligand, measured before and after the growth:
+
+  | complex | undilated | after one dilation |
+  |---|---|---|
+  | 1STP biotin | 314 voxels, 1305 Å³ box → kept | 4905 voxels, 71909 Å³ |
+  | 3PTB benzamidine | 698 voxels, 10161 Å³ box → kept | 4114 voxels, 77893 Å³ |
+  | 1HVR XK2 | 1063 voxels, 8008 Å³ box → kept | 6303 voxels, 109965 Å³ |
+
+  A sensible pocket before the growth, a lump of the whole protein after it, and
+  the list looked perfectly normal throughout — the sites were not mis-ranked,
+  they were **not in the list at all**. Growth now happens per component, after
+  labelling, where it can no longer merge anything. On all four redocking
+  complexes the bound ligand's own site now comes out **first**; before this it
+  was absent. The search is also faster, the dilation having been the main cost.
+- **The volume ceiling was applied to a site's bounding box**, which is wrong in
+  both directions and discarded real pockets. A winding cleft is a long thin
+  tube: 1HVR's site is **544 Å³ of space in an 8008 Å³ box**, so the ceiling
+  rejected it, and a synthetic dog-legged slot reproduces the shape exactly —
+  1016 Å³ in a 9698 Å³ box, which the old ceiling dropped. The ceiling is now
+  on the site's own volume (`voxels * spacing³`), and `Pocket` carries that
+  number so it can be read rather than recomputed. A consequence worth stating:
+  the ceiling is now **inert on crambin** (16 sites either way; it used to be
+  23 → 20), because the lumps it was compensating for are no longer produced.
+  `pockets_check.py` asserts that explicitly — a filter that quietly stops
+  firing is how a filter rots.
+- **`max_pockets` default 8 → 12.** On crambin with ibuprofen docked into it, the
+  site the ligand actually occupies ranks **ninth of sixteen**, and its box holds
+  all sixteen ligand atoms. An eight-entry shortlist cut it off, so the feature
+  silently did not offer a binding site that was sitting in the ninth slot.
 - The `Real launch, then close` check could never pass on CI, and had been
   failing on every run since it was introduced. CI runs it under `xvfb-run`,
   which starts a display with **no window manager**, and `wmctrl` asks the
@@ -280,6 +334,27 @@ The project is pre-1.0. The `0.x` line is where the interfaces still move.
   is never mentioned, and the largest site is not necessarily the one a given
   ligand wants. It is a shortlist to choose from, and the caller is expected to
   let the user choose.
+- **A snug binding site is found but ranked low, and that is not fixable by
+  ranking harder.** On crambin with ibuprofen docked into it, the site the
+  ligand occupies is **12 Å³** and comes **ninth of sixteen**; three larger
+  lumps of surface come first. The reason is worth knowing because it is not a
+  bug: the search measures the space a ligand *leaves*, not the space it
+  occupies, and where a ligand fits snugly that space is nearly nothing. On the
+  four complexes whose pockets are roomier than their ligands, the true site
+  ranks **first** every time. An earlier version of this file appeared to rank
+  crambin's second, and that was luck — it ranked second only because an
+  unrelated ceiling happened to delete three larger lumps of surface first.
+- **A long cleft gets a long box, and a long box is a hard box.** 3PTB's site is
+  a 22 × 17 × 28 Å cleft and its box is 39 × 26 × 41 Å. There is no single box
+  that both contains a 9-atom ligand somewhere in a winding cleft and stays
+  small; this is a real limit of "one box per site" and every pocket code has
+  it. What helps is sampling effort proportional to volume, which is why
+  `redock_benchmark.py` picks it that way and prints it.
+- **1HVR is the worst redocking case and is left as it is.** A 46-atom flexible
+  ligand in a 30 × 38 × 32 Å box returns 21.24 Å at exhaustiveness 64 and
+   10.53 Å at 128 — improving monotonically with sampling, which says the
+  search is under-sampled rather than that the site is wrong. It is not tuned
+  until the number looks better.
 - **Re-docking from the automatic box reproduces crambin's reference energy but
   not its pose.** Docking ibuprofen into the site crambin's reference pose
   occupies gives −5.42 kcal/mol against the reference's −5.50, at 3.93 Å RMSD.
@@ -290,11 +365,12 @@ The project is pre-1.0. The `0.x` line is where the interfaces still move.
   hydrogen-bonds them. `scripts/pockets_check.py` asserts the energy and
   *records* the RMSD without asserting anything about it, because a small RMSD
   would be asserting that this run happened to find this minimum.
-- **The 1500 Å³ volume ceiling on a site is a heuristic.** It is there because
-  the single-voxel surface events become 6-connected after one dilation and
-  merge a protein's entire outer surface into lumps of 1700–3600 Å³, which then
-  outrank every real groove. It is a parameter, not a derived quantity, and
-  nothing here justifies the particular number.
+- **The 1500 Å³ volume ceiling on a site is a heuristic.** It is a guard against
+  a genuinely huge cavity, and it is a parameter rather than a derived quantity:
+  nothing here justifies the particular number. It used to have a second,
+  accidental job — removing the lumps of merged outer surface that the
+  pre-labelling dilation produced — and that job is gone now that the dilation
+  is, so the ceiling is inert on crambin and the checks say so.
 - **A small sealed cavity will not be found at the default probe.** T4 lysozyme
   L99A has one built in on purpose, and this search reports zero sealed
   cavities in it: the cavity is about 100 Å³ and a 1.4 Å probe inflates every

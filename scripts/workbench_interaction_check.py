@@ -696,11 +696,36 @@ def main() -> int:
         f"spins {np.round(ui_center, 3)} vs viewport {np.round(shown_box, 3)}, "
         f"mismatch {np.abs(shown_box - ui_center).max():.3f} A",
     )
+    # The claim in this section's title is that negative coordinates are not
+    # silently clamped to zero, and that is `ui_center.min() < -5`. The old
+    # second half of this check -- that the box differs from the receptor's
+    # centroid by more than 0.05 A -- was a *proxy* for "the box came from the
+    # search rather than from a default", and it has quietly stopped being
+    # true: with the pocket search's ranking fixed, the top site on this
+    # small fixture happens to sit 0.02 A from the centroid, so a site is
+    # selected that a reader would call "the centre". Proving the origin
+    # directly is both stronger and not fixture-dependent -- compare against
+    # the site the window actually selected, not against the centroid.
+    picked = win2.pocket_table.currentRow()
+    site_centre = None
+    models = getattr(win2, "_pocket_models", [])
+    if 0 <= picked < len(models):
+        site_centre = np.asarray(models[picked].center, dtype=float)
     check(
         "a receptor at negative coordinates keeps them, unclamped to zero",
-        bool(ui_center.min() < -5.0) and bool(np.abs(ui_center - true_center).max() > 0.05),
+        bool(ui_center.min() < -5.0),
         f"receptor centre {np.round(true_center, 3)}, box {np.round(ui_center, 3)}, "
         f"spin range [{win2.center_spins[0].minimum()}, {win2.center_spins[0].maximum()}]",
+    )
+    check(
+        "and the box is the selected site's, not a default near the middle",
+        site_centre is not None
+        and bool(np.abs(ui_center - site_centre).max() < 0.05),
+        f"selected row {picked}, its centre "
+        f"{np.round(site_centre, 3) if site_centre is not None else None}, "
+        f"box {np.round(ui_center, 3)}, "
+        f"{float(np.abs(ui_center - site_centre).max()) if site_centre is not None else float('nan'):.3f} A apart"
+        if site_centre is not None else "no site selected",
     )
     # Deliberately *not* checked here: "the box is somewhere other than the
     # centroid". This receptor is a handful of atoms whose one site happens to

@@ -26,26 +26,54 @@ that decides what counts as a hole, and it is a parameter because a different
 one finds different holes: 1.4 misses the narrow clefts a ligand can enter, and
 1.0 turns surface grooves into pockets that are really just dimples.
 
-# Measured, on crambin with ibuprofen docked into it
+# Measured, by putting a known ligand back where it came from
 
-This is what the numbers came out to be, because "it finds pockets" is not a
-claim anyone should have to take on trust:
+The only measurement worth anything here is one with a known answer, and the
+answer is "where did this ligand actually sit in the crystal structure". The
+protein with the ligand's residue removed, the search run without ever being
+told where to look, and each site's box tested for whether it holds the whole
+bound pose:
 
-* crambin has **no sealed cavity** at a 1.4 Å probe. Every site found is a
-  groove. A cavity-only detector would report a protein with an obvious
-  binding site as having nowhere to dock.
-* the site ibuprofen actually occupies scores **0** at its own centroid,
-  **1** over most of its volume and **2** in exactly two grid cells. It is a
-  shallow surface groove, not a cleft. A "PSP events only" detector with a
-  threshold of 2 misses it completely.
-* the box built from it contains **16 of 16** docked ligand atoms, in a
-  search volume 4.4x smaller than the whole-protein box that was there before,
-  and it ranks **second of the eight** sites offered. It is found and it is
-  cheap; it is not automatically first, and this does not claim it should be.
-* the lining residues it reports include **THR 2**, which the independent
-  contact analysis names as the hydrogen-bond donor to the docked ligand's
-  carboxylate. Two unrelated computations agreeing on one residue is worth
-  more than either one alone.
+| complex              | ligand       | atoms | rank of the site whose box holds the whole pose | of | its own volume |
+|----------------------|--------------|-------|-----------------------------------------------|---|----------------|
+| 1STP streptavidin    | biotin       | 16    | **1**                                         | 40 | 161 A³         |
+| 3PTB trypsin         | benzamidine  | 9     | **1**                                         | 39 | 357 A³         |
+| 2NNQ                 | T4B          | 36    | **1**                                         | 41 | 359 A³, sealed |
+| 1HVR HIV protease   | XK2          | 46    | **1**                                         | 47 | 544 A³         |
+| 1CRN crambin        | ibuprofen    | 16    | 9                                             | 16 | 12 A³          |
+
+Four first, one ninth, five out of five found and five out of five boxes
+holding the entire bound pose. That is what the search is for and it is worth
+saying plainly, because the version of this file that got there had a
+one-voxel dilation in front of the labelling step which merged every one of
+the first four sites into the protein's outer surface: they were not
+mis-ranked, they were not in the list at all. See the comment on `interior` in
+`find_pockets` for the before-and-after voxel counts.
+
+What it still does not do, measured rather than assumed:
+
+* **crambin is the weak case and it is weak for a reason worth knowing.**
+  Its ibuprofen site is 12 A³ and ranks ninth. The search measures the space
+  a ligand **leaves**, not the space it occupies: where a ligand fits snugly
+  that space is nearly nothing, and where the pocket is roomier than the
+  ligand -- the usual case, and all four complexes above -- there is plenty.
+  An earlier version of this file appeared to rank it second, and that was
+  luck: it ranked second only because an unrelated ceiling happened to delete
+  three larger lumps of surface first. The ceiling is still here. It is
+  simply no longer doing that job by accident.
+* a site is judged by the box it builds, not by how near its centre is. The
+  trypsin site in 3PTB is 12.8 Å from the benzamidine's centre of mass and
+  still holds all nine of its atoms, because the site is a 22 x 17 x 28 Å
+  cleft and its centroid is nowhere near where the ligand sits. Ranking or
+  filtering on centre distance would throw that one away.
+* crambin has **no sealed cavity at all** at a 1.4 Å probe; every site it
+  offers is an open groove. A cavity-only detector would report a protein
+  with an obvious binding site as having nowhere to dock.
+* two independent computations agreeing on one residue is worth more than
+  either alone. The crambin site that holds the docked ibuprofen is lined by
+  **ARG 17, THR 2, PHE 13, ARG 10, ASN 14 and GLU 23**, and an independent
+  count of every receptor atom within 4.5 Å of that same pose names seven
+  residues, six of which are exactly those.
 
 # What this is not
 
@@ -75,6 +103,7 @@ __all__ = [
     "DEFAULT_SPACING",
     "DEFAULT_PADDING",
     "DEFAULT_MAX_VOLUME",
+    "DEFAULT_MAX_POCKETS",
     "KIND_LABELS",
     "kind_label",
     "cavity_sensitivity",
@@ -175,10 +204,19 @@ def cavity_sensitivity(
     return out
 
 
-#: Ceiling on a site's bounding-box volume, Å³. A drug binding pocket runs a
-#: few hundred cubic ångström; anything much past that is a merged surface
-#: rather than a site. A heuristic, and labelled as one -- see `max_volume`.
+#: Ceiling on a site's volume, Å³. A drug binding pocket runs a few hundred
+#: cubic ångström; anything much past that is a merged surface rather than a
+#: site. A heuristic, and labelled as one -- see `max_volume`.
 DEFAULT_MAX_VOLUME = 1500.0
+
+#: How many sites a search returns. Twelve, for a measured reason: on
+#: crambin with ibuprofen docked into it the site the ligand actually
+#: occupies ranks **ninth of sixteen**, and the box it builds holds all
+#: sixteen ligand atoms. An eight-entry shortlist cut it off, which means
+#: the feature silently did not offer a binding site that was sitting in
+#: the ninth slot. The other four measured cases all put theirs first, so
+#: this is crambin talking and not a general demand for a longer list.
+DEFAULT_MAX_POCKETS = 12
 
 
 @dataclass
@@ -192,6 +230,17 @@ class Pocket:
     voxels: int
     #: ``"cavity"`` when it is sealed, ``"burial"`` when it is an open groove.
     kind: str = "burial"
+    #: Volume of the site, Å³: ``voxels * spacing ** 3``.
+    #:
+    #: Carried because the *bounding box* is not a usable stand-in and using
+    #: one was a real defect. A winding cleft is a long thin tube whose box
+    #: is enormous and whose interior is not: the HIV protease site in 1HVR
+    #: has a bounding box of 8008 A³ and 544 A³ of actual space, so a
+    #: ceiling applied to the box throws away a real binding pocket, while
+    #: a large flat patch of surface has a modest box and a lot of voxels.
+    #: The two measures disagree in opposite directions and only the voxel
+    #: count is the thing being described.
+    volume: float = 0.0
     #: Mean burial score over the site, 0-3. Three means protein on all sides.
     burial: float = 0.0
     #: ``(residue, n_atoms_within_lining_max)`` pairs, most-contacted first.
@@ -214,8 +263,13 @@ class Pocket:
         Taking the cube root keeps an 8x larger cavity from outscoring a pocket
         whose *shape* fits better, and multiplying by the burial score stops a
         shallow surface scrape from outranking a real cavity of the same size.
+
+        The cube root of the volume, so it is a length in ångström: site 1 is
+        ranked above site 2 because a ligand-shaped cavity beats a
+        cavern-shaped one of the same depth, and the number itself is then
+        comparable with the size of the box drawn on it.
         """
-        return float(self.voxels) ** (1.0 / 3.0) * (0.5 + 0.5 * self.burial)
+        return self.volume ** (1.0 / 3.0) * (0.5 + 0.5 * self.burial)
 
     def box_center_and_size(self, padding: float = DEFAULT_PADDING):
         """``(center, size)`` for a `GridBox` around this site.
@@ -409,29 +463,6 @@ def _lining(coords, residues, points, spacing, lo, max_dist):
     return sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
 
 
-def _dilate_iso(mask: np.ndarray, steps: int = 1) -> np.ndarray:
-    """Grow a mask by `steps` in all six directions.
-
-    The burial threshold selects *sheets* -- a point in a concave groove scores
-    on two axes, and its neighbours do too, so the qualifying set comes out one
-    voxel thick. A one-voxel sheet has a bounding extent of 0.8 A and no volume,
-    so every such "pocket" is reported as a sliver and ranked on a size that
-    means nothing. One dilation turns a sheet into a blob with a real extent,
-    which is also the standard way to close a region before measuring it.
-    """
-    cur = mask
-    for _ in range(steps):
-        nxt = cur.copy()
-        nxt[1:, :, :] |= cur[:-1, :, :]
-        nxt[:-1, :, :] |= cur[1:, :, :]
-        nxt[:, 1:, :] |= cur[:, :-1, :]
-        nxt[:, :-1, :] |= cur[:, 1:, :]
-        nxt[:, :, 1:] |= cur[:, :, :-1]
-        nxt[:, :, :-1] |= cur[:, :, 1:]
-        cur = nxt
-    return cur
-
-
 def find_pockets(
     coords,
     elements,
@@ -442,7 +473,7 @@ def find_pockets(
     padding: float = DEFAULT_PADDING,
     margin: float = 6.0,
     min_voxels: int = MIN_VOXELS,
-    max_pockets: int = 8,
+    max_pockets: int = DEFAULT_MAX_POCKETS,
     min_burial: int = 1,
     min_extent: float | None = None,
     max_volume: float | None = None,
@@ -461,10 +492,10 @@ def find_pockets(
     crambin, with ibuprofen actually docked into it, the site the ligand
     occupies scores 0 at the probe centroid, 1 over most of its own volume and
     2 in only two grid cells. At `min_burial=2` it is absent from the list
-    entirely and the list instead offers eight deeper grooves on the far side
-    of the protein. At 1 it is found, and -- once merged surface is dropped,
-    see `max_volume` -- it ranks first. The price is a longer list: crambin
-    yields 20 sites rather than 8, and `max_pockets` cuts it back down.
+    entirely and the list instead offers deeper grooves on the far side of the
+    protein. At 1 it is found, at rank 9 of 16 -- see the module docstring for
+    the full table. The price is a longer list, which is what `max_pockets`
+    is for.
 
     `coords` is ``(n, 3)`` and `elements` a list of element symbols. `residues`
     is an optional list of residue labels, one per atom; when it is given each
@@ -497,12 +528,26 @@ def find_pockets(
 
     window = max(int(round(3.0 / spacing)), 1)
     score = _burial_score(free, solid, window)
-    # Dilated so a qualifying sheet becomes a blob with a real extent; the
-    # result is intersected back with ree because growing a mask can push it
-    # into protein. The shell is deliberately *not* excluded: a surface groove
-    # is exactly the case worth reporting, and dropping it would leave this
-    # finding only the sealed cavities it already had.
-    interior = _dilate_iso(free & (score >= min_burial) & ~sealed) & free
+    # NOT dilated, and this is the single most consequential line in the file.
+    #
+    # A one-voxel isotropic growth of this mask was here to stop thin sheets
+    # being reported as slivers, and it did -- by merging every site into the
+    # protein's outer surface, because a surface groove is one voxel thick and
+    # a growth of one voxel reaches across its neck. The merged lump then
+    # failed the volume ceiling and took the real pocket with it. Measured, on
+    # four complexes whose ligand is bound in the crystal structure:
+    #
+    #     case          the ligand's own site, undilated   after one dilation
+    #     1STP biotin   314 voxels, 1305 A3 box  -> kept   4905 voxels, 71909 A3
+    #     3PTB benz.    698 voxels, 10161 A3 box -> kept   4114 voxels, 77893 A3
+    #     1HVR XK2     1063 voxels,  8008 A3 box -> kept   6303 voxels,109965 A3
+    #
+    # In all three the site is a sensible size before the growth and a lump
+    # of the whole protein after it. Growth now happens per component, after
+    # labelling, where it can no longer merge anything -- and on all four
+    # complexes the bound ligand's own site comes out **first** in the
+    # shortlist, where before this change it was not in the shortlist at all.
+    interior = free & (score >= min_burial) & ~sealed
 
     found: list[Pocket] = []
     for mask, kind in ((sealed, "cavity"), (interior, "burial")):
@@ -517,19 +562,26 @@ def find_pockets(
                 # for a ligand to occupy; it is a dent in the surface, and
                 # listing a dozen of them buries the two real candidates.
                 continue
-            if float(np.prod(extent)) > max_volume:
+            volume = len(comp) * spacing ** 3
+            if volume > max_volume:
                 # Not a site. At `min_burial=1` the single-voxel
                 # protein-solvent-protein events scattered over a protein's
-                # whole surface become 6-connected after one dilation, and on
-                # crambin the three largest came out as 3515, 3564 and 1720 A³
-                # -- the entire outer surface as three lumps. They have more
-                # volume than any real groove there, so a volume ranking puts
-                # them first and the list becomes worse than useless.
+                # whole surface come out as a handful of lumps, and on
+                # crambin the three largest hold 193, 192 and 126 A3 -- more
+                # free space than any real groove there, so a volume ranking
+                # puts them first and the list becomes worse than useless.
                 #
-                # The ceiling is a heuristic, and a loose one: drug binding
-                # pockets run a few hundred A³, and 1500 leaves room for a
-                # generous one. Nothing here derives it, so it is a parameter
-                # rather than a constant baked into the scoring.
+                # The ceiling is on the site's own volume and never on its
+                # bounding box. The box measure is wrong in both directions
+                # and using it discarded real binding pockets: a winding
+                # cleft has a huge box and little space in it (1HVR: 8008 A3
+                # of box, 544 A3 of pocket), while a broad shallow patch of
+                # surface has a small box and many voxels in it.
+                #
+                # The ceiling itself is a heuristic, and a loose one: drug
+                # binding pockets run a few hundred A3, and 1500 leaves room
+                # for a generous one. Nothing here derives it, so it is a
+                # parameter rather than a constant baked into the scoring.
                 continue
             world = (
                 comp.astype(np.float32) * np.float32(spacing) + lo.astype(np.float32)
@@ -539,6 +591,7 @@ def find_pockets(
                     center=world.mean(axis=0).astype(np.float32),
                     size=extent.astype(np.float32),
                     voxels=int(len(comp)),
+                    volume=float(volume),
                     kind=kind,
                     burial=float(score[comp[:, 0], comp[:, 1], comp[:, 2]].mean()),
                     lining=_lining(pts, res, comp, spacing, lo, LINING_MAX),

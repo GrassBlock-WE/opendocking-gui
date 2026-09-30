@@ -16,8 +16,14 @@ the form of the AutoDock Vina empirical function. On top of that it adds
 the hot path**.
 
 > **Two things you must know**
-> 1. **It has never been validated by redocking** — there is no evidence that it
->    places a known ligand back into the correct pocket.
+> 1. **Redocking has been tried, on a small batch, and part of it did not work.**
+>    `scripts/redock_benchmark.py` docks a ligand that is *already bound* in a
+>    crystal structure and asks whether it comes back: the engine gets two of
+>    four under 2 Å (biotin 1.17 Å, benzamidine 1.19 Å), and the box the pocket
+>    search picks gets one (3PTB, 1.26 Å). 1HVR's 46-atom flexible ligand is
+>    still 21 Å and **has not been tuned until the number looked better**. The
+>    numbers and how they were collected are in
+>    [`docs/VERIFICATION.md`](docs/VERIFICATION.md) §3.7.
 > 2. **Absolute energies must not be compared with AutoDock Vina or with
 >    literature values** (no cross-validation was done). Relative ranking, pose
 >    quality and geometric sanity are usable.
@@ -230,15 +236,34 @@ A large receptor takes a while, but the window stays usable.
   flat on the surface scores zero and is never listed, and the largest site is
   not necessarily the one your ligand wants. It is a shortlist to choose from,
   and choosing is the part it leaves to you.
+- **A snug binding site is found but ranked low.** On crambin with ibuprofen, the
+  site the ligand occupies is **12 Å³** and comes **ninth of sixteen**, behind
+  three larger lumps of surface. That is not a bug: the search measures the space
+  a ligand *leaves*, not the space it occupies, and a tight fit leaves almost
+  none. Where the pocket is roomier than the ligand — all four redocking
+  complexes above — the true site ranks **first**, every time. The table's fifth
+  column carries the volume the ranking is built from, which is why the order is
+  not simply "biggest first".
+- **A long winding cleft gets a long box, and a long box is a hard box.** 3PTB's
+  site is a 22 × 17 × 28 Å cleft and its box is 39 × 26 × 41 Å. No single box
+  both contains a 9-atom ligand somewhere in a winding cleft and stays small;
+  this is a real limit of "one box per site" and every pocket code has it. What
+  helps is sampling effort proportional to volume: the same box reads 12.88 Å
+  at exhaustiveness 16 and **1.26 Å** at 64, in under two seconds either way.
+- **1HVR is the worst case and is left as it is.** A 46-atom flexible ligand in a
+  30 × 38 × 32 Å box gives 21.24 Å at exhaustiveness 64 and 10.53 Å at 128 —
+  improving monotonically with sampling, which says the search is under-sampled
+  rather than that the site is wrong.
 - **Re-docking from the automatic box reproduces crambin's reference energy but
   not its pose.** Docking ibuprofen into the site the reference pose occupies
   gives −5.42 kcal/mol against the reference's −5.50, at 3.93 Å RMSD. The energy
   is reproduced; the pose is not. Crambin with ibuprofen has near-degenerate
   binding modes, and that is a property of the energy surface, not a misplaced box.
 - **The 1500 Å³ ceiling on a site is a heuristic**, not a derived quantity. It is
-  there because single-voxel surface events become connected after one dilation
-  and merge a protein's whole outer surface into lumps of 1700–3600 Å³, which
-  then outrank every real groove.
+  now a guard against a genuinely huge cavity and nothing else. It used to have a
+  second, accidental job — deleting the merged surface lumps the pre-labelling
+  dilation produced — and that job disappeared with the dilation, so the ceiling
+  is now inert on crambin (16 sites either way) and a check says so explicitly.
 - **A small sealed cavity will not be found at the default probe.** T4 lysozyme
   L99A has one built in on purpose, and this search reports zero sealed
   cavities there: the cavity is about 100 Å³ and a 1.4 Å probe inflates every

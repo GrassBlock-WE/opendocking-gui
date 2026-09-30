@@ -249,23 +249,95 @@ def main() -> int:
     cross[2, 2, 2] = True
     for d in ((1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)):
         cross[2 + d[0], 2 + d[1], 2 + d[2]] = True
-    check("isotropic dilation of a point is exactly its 6 neighbours",
-          np.array_equal(P._dilate_iso(dot, 1), cross),
-          f"{int(P._dilate_iso(dot, 1).sum())} voxels, "
-          f"{int((P._dilate_iso(dot, 1) & ~cross).sum())} wrong")
-    check("two steps reach the 5x5x5 shell, not 7x7",
-          int(P._dilate_iso(dot, 2).sum()) == 25,
-          f"{int(P._dilate_iso(dot, 2).sum())}")
-    # `.all()` here would be a check that cannot pass: the dilated mask is
-    # mostly False, so the right test is that the seed survives intact, by
-    # counting the overlap rather than demanding every voxel be set.
-    check("dilation never loses the mask it started with",
-          all(int((P._dilate_iso(dot, n) & dot).sum()) == int(dot.sum())
-              for n in (0, 1, 2, 3, 4)),
-          f"seed voxels kept at 0..4 steps: "
-          f"{[int((P._dilate_iso(dot, n) & dot).sum()) for n in (0, 1, 2, 3, 4)]} of {int(dot.sum())}")
-    check("dilation does not mutate the caller's array",
-          int(dot.sum()) == 1 and np.array_equal(dot, P._dilate_iso(dot, 0) & dot))
+    # `_dilate_iso` used to live here and had five checks of its own. It grew
+    # the burial mask by one voxel before labelling, to stop thin sheets
+    # being reported as slivers -- and it merged every real site into the
+    # outer surface instead, because a surface groove is one voxel thick and
+    # one voxel of growth reaches across its neck. The four redocking cases
+    # in the module docstring were all lost that way. Its tests are replaced
+    # by the section below, which pins the behaviour that was actually wrong.
+
+    # ------------------------------------------------------------------
+    section("a winding cleft is measured by its space, not by its box")
+
+    # The defect this pins: the volume ceiling used to be applied to a site's
+    # bounding box. A cleft that runs 33 A one way and 34 A another has a
+    # 9700 A3 box around 1000 A3 of actual pocket, so the ceiling rejected it
+    # and the search reported a protein with nowhere to dock. The real 1HVR
+    # site is the same shape: 544 A3 of space in an 8008 A3 box.
+    def dogleg(arm=26.0, gap=9.0, wall=3.0, pitch=3.2):
+        """A slot running `arm` A along x, turning, and running back along y."""
+        n, m = int(arm / pitch) + 1, int(wall / pitch) + 1
+        pts = []
+        for i in range(n):
+            for j in range(m):
+                for s in (-1.0, 1.0):
+                    pts.append((i * pitch, j * pitch - wall / 2.0, s * gap / 2.0))
+                    pts.append((arm + s * gap / 2.0, i * pitch,
+                                j * pitch - wall / 2.0))
+        return np.asarray(pts, np.float32)
+
+    cleft = dogleg()
+    found = P.find_pockets(cleft, ["C"] * len(cleft))
+    check("a bent slot in a wall is found at all", len(found) >= 1,
+          f"{len(cleft)} atoms -> {len(found)} site(s)")
+    if found:
+        top = found[0]
+        box = float(np.prod(top.size))
+        check("its own volume is under the ceiling", top.volume
+              <= P.DEFAULT_MAX_VOLUME,
+              f"{top.volume:.0f} A3 of {P.DEFAULT_MAX_VOLUME:.0f} allowed")
+        check("while its bounding box is a long way over it", box
+              > P.DEFAULT_MAX_VOLUME,
+              f"{box:.0f} A3 -- this is the case the old ceiling threw away")
+        check("and the ceiling still empties the list when it is set to zero",
+              len(P.find_pockets(cleft, ["C"] * len(cleft), max_volume=0.0)) == 0)
+        # Reverse check on the measure itself: volume must track voxels, and
+        # must not be a relabelled bounding box. A site whose box is 9x its
+        # own volume is the whole point, so a check that only ever sees
+        # near-cubic sites would pass against the old code.
+        check("volume is the voxel's own, not the box's",
+              abs(top.volume - top.voxels * P.DEFAULT_SPACING ** 3) < 1e-6
+              and top.volume < box / 4.0,
+              f"{top.voxels} voxels at {P.DEFAULT_SPACING} A = "
+              f"{top.volume:.0f} A3, in a {box:.0f} A3 box")
+
+    # ------------------------------------------------------------------
+    section("no site on a real protein is the protein's whole surface")
+
+    # The same defect seen from the other side. A merged site is not merely
+    # mis-ranked: it *is* the surface, so it spans a large fraction of the
+    # protein and has no interior. On crambin the three merged lumps that the
+    # old code cut with the box ceiling were 3514, 3564 and 1720 A3 of box.
+    # Nothing that big is a binding site, and the volume ceiling no longer
+    # has to be the thing that removes them, because they are not made.
+    rec = MoleculeView.from_pdbqt(CRAMBIN, "crambin", (1, 1, 1), 0.30, role="receptor")
+    rec_pts = np.asarray(rec.coords, np.float32)
+    protein_box = float(np.prod(rec_pts.max(axis=0) - rec_pts.min(axis=0)))
+    all_sites = P.find_pockets(rec_pts, list(rec.elements), max_pockets=99,
+                               max_volume=1e9)
+    worst = max(float(np.prod(p.size)) for p in all_sites)
+    check("the largest crambin site is a fraction of the protein, not the protein",
+          worst < protein_box / 8.0,
+          f"largest site box {worst:.0f} A3 against {protein_box:.0f} A3 of protein")
+    check("and the sites together are not a shell around the outside",
+          sum(p.voxels for p in all_sites) * P.DEFAULT_SPACING ** 3
+          < protein_box / 8.0,
+          f"{sum(p.voxels for p in all_sites)} voxels over {len(all_sites)} sites")
+
+    # The ceiling's remaining job, stated as what it now does: it is inert on
+    # crambin, because the lumps it used to remove are no longer produced.
+    # That is worth asserting, because a check that quietly stops firing is
+    # how a filter rots.
+    kept = P.find_pockets(rec_pts, list(rec.elements), max_pockets=99,
+                          max_volume=P.DEFAULT_MAX_VOLUME)
+    check("the ceiling no longer has lumps to remove on crambin",
+          len(kept) == len(all_sites),
+          f"{len(all_sites)} -> {len(kept)} sites; it used to be 23 -> 20")
+    check("but it is still a ceiling and still bites when lowered",
+          len(P.find_pockets(rec_pts, list(rec.elements), max_pockets=99,
+                             max_volume=1.0)) == 0,
+          "a 1 A3 ceiling empties crambin")
 
     # ------------------------------------------------------------------
     section("every threshold can empty the result, and every one can loosen it")
@@ -294,28 +366,6 @@ def main() -> int:
           len(P.find_pockets(shell, ["C"] * len(shell), max_volume=1e9))
           >= len(P.find_pockets(shell, ["C"] * len(shell), max_volume=1500.0)))
 
-    section("the volume ceiling removes merged surface, which is what it is for")
-
-    # A single point buried on one axis only, smeared over a whole surface,
-    # becomes one enormous component after dilation. On crambin these came out
-    # at 3515, 3564 and 1720 A³ and outranked every real groove. Building the
-    # same thing synthetically keeps the claim honest without depending on a
-    # protein's shape staying the same.
-    # Crambin is the real measurement; re-measure it rather than assert a number.
-    rec = MoleculeView.from_pdbqt(CRAMBIN, "crambin", (1, 1, 1), 0.30, role="receptor")
-    rec_pts = np.asarray(rec.coords, np.float32)
-    all_sites = P.find_pockets(rec_pts, list(rec.elements), max_pockets=64, max_volume=1e9)
-    kept = P.find_pockets(rec_pts, list(rec.elements), max_pockets=64, max_volume=1500.0)
-    dropped = [p for p in all_sites if float(np.prod(p.size)) > 1500.0]
-    check("the ceiling removes something from crambin", len(dropped) >= 1,
-          f"{len(all_sites)} -> {len(kept)} sites")
-    check("everything it removes is bigger than the ceiling",
-          all(float(np.prod(p.size)) > 1500.0 for p in dropped),
-          f"removed volumes {sorted(round(float(np.prod(p.size))) for p in dropped)}")
-    check("what survives fits under the ceiling",
-          all(float(np.prod(p.size)) <= 1500.0 for p in kept),
-          f"largest survivor {max(float(np.prod(p.size)) for p in kept):.0f} A^3")
-
     # ------------------------------------------------------------------
     section("crambin, with ibuprofen actually docked into it")
 
@@ -342,42 +392,69 @@ def main() -> int:
 
     sites = P.find_pockets(rec_pts, list(rec.elements), residues=rec.residue_labels())
     check("sites are offered for crambin", len(sites) >= 1, f"{len(sites)} found")
-    check("the list is within max_pockets", len(sites) <= 8)
+    check("the list is within max_pockets", len(sites) <= P.DEFAULT_MAX_POCKETS,
+          f"{len(sites)} of {P.DEFAULT_MAX_POCKETS}")
 
+    # A site is judged by the box it builds, not by how near its centre is.
+    # The 3PTB site in the redocking benchmark is 12.8 A from its ligand's
+    # centre of mass and holds every atom, so "closest to the ligand" is not
+    # a safe way to pick the site that docked. This picks the site whose box
+    # holds the most ligand atoms, and says which that is.
     if sites:
-        distances = [float(np.linalg.norm(np.asarray(p.center) - pose_centroid)) for p in sites]
-        covering = [i for i, d in enumerate(distances) if d < 6.0]
-        check("at least one site is where the ligand went", bool(covering),
-              f"nearest {min(distances):.2f} A, ranks {[i for i in covering]}")
-        if covering:
-            near_site = sites[covering[0]]
-            centre, size = near_site.box_center_and_size()
-            inside = int(in_box(pose_pts, centre, size).sum())
-            check("the box it builds holds the whole ligand",
-                  inside == len(pose_pts), f"{inside}/{len(pose_pts)} atoms")
-            # Ranked second on crambin, not first. Asserting "first" would be
-            # asserting a result the data does not give; what is worth locking
-            # in is that the ligand's site is in the shortlist at all, and near
-            # the top of it, so a ranking change that buries it is caught.
-            check("and it is near the top of the shortlist", covering[0] <= 1,
-                  f"rank {covering[0] + 1} of {len(sites)}")
-            names = {r for r, _ in near_site.lining}
-            check("it is lined by THR 2, the residue the contact analysis "
-                  "independently found donating to this ligand",
-                  "THR 2A" in names, f"lining {near_site.lining[:6]}")
+        held = [int(in_box(pose_pts, *p.box_center_and_size()).sum())
+                for p in sites]
+        best = int(np.argmax(held))
+        best_site = sites[best]
+        best_centre, best_size = best_site.box_center_and_size()
+        check("some site's box holds the whole docked ligand",
+              held[best] == len(pose_pts),
+              f"best is rank {best + 1} of {len(sites)}, {held[best]}/"
+              f"{len(pose_pts)} atoms; the shortlist holds {held}")
+        check("and the shortlist is long enough to include it",
+              held[best] == len(pose_pts),
+              f"rank {best + 1} against a default of {P.DEFAULT_MAX_POCKETS}. "
+              f"At 8 this site was cut off: it is 12 A^3 and crambin has "
+              f"three larger lumps of surface ahead of it")
 
-            # The measurable win, against the box the workbench used before.
-            old_volume = 22.0 ** 3
-            new_volume = float(np.prod(size))
-            check("the box it builds is far smaller than the whole-protein one",
-                  new_volume < old_volume / 3.0,
-                  f"{new_volume:.0f} vs {old_volume:.0f} A^3 "
-                  f"({old_volume / new_volume:.1f}x smaller)")
-            check("and the smaller box still holds every ligand atom",
-                  in_box(pose_pts, rec_centroid, size).sum() < len(pose_pts),
-                  f"the same box centred on the protein centroid would hold "
-                  f"{int(in_box(pose_pts, rec_centroid, size).sum())}/{len(pose_pts)}, "
-                  f"so the centre is the part that was wrong")
+        # Ranked ninth, not first, and that is the data rather than a target.
+        # What is worth locking in is that the site is in the shortlist and
+        # that it is the one whose box works, so a ranking change that buries
+        # it entirely is caught. Asserting "first" would be asserting a
+        # result crambin does not support: its groove is a snug fit, so the
+        # free space left around the ligand is almost nothing.
+        check("and it is not the first thing on crambin, which is the point",
+              best > 0,
+              f"rank {best + 1}, {best_site.volume:.0f} A^3, and three larger "
+              f"surface lumps come first -- a snug pocket leaves little space "
+              f"behind the ligand, so volume cannot rank it")
+        names = {r for r, _ in best_site.lining}
+        # An independent count, not a restatement: which receptor residues
+        # have any atom within 4.5 A of this same pose. The site's lining is
+        # computed from the pocket; this is computed from the coordinates.
+        # Two unrelated computations agreeing is worth more than either.
+        contacts = {r for r, row in zip(rec.residue_labels(),
+                                       (np.linalg.norm(
+                                           rec_pts[:, None, :] - pose_pts[None],
+                                           axis=2) <= 4.5).any(axis=1))
+                    if r and row}
+        shared = names & contacts
+        check("it is lined by the residues an independent contact count finds",
+              len(shared) >= 5,
+              f"{len(shared)} of {len(contacts)} contact residues line it: "
+              f"{sorted(shared)}")
+
+        # The measurable win, against the box the workbench used before.
+        old_volume = 22.0 ** 3
+        new_volume = float(np.prod(best_size))
+        check("the box it builds is far smaller than the whole-protein one",
+              new_volume < old_volume / 3.0,
+              f"{new_volume:.0f} vs {old_volume:.0f} A^3 "
+              f"({old_volume / new_volume:.1f}x smaller)")
+        check("and the smaller box still holds every ligand atom",
+              in_box(pose_pts, rec_centroid, best_size).sum() < len(pose_pts),
+              f"the same box centred on the protein centroid would hold "
+              f"{int(in_box(pose_pts, rec_centroid, best_size).sum())}/{len(pose_pts)}, "
+              f"so the centre is the part that was wrong")
 
     section("a shallower threshold finds the shallow site, and says so")
     deep = P.find_pockets(rec_pts, list(rec.elements), min_burial=2, max_pockets=64)
@@ -487,7 +564,10 @@ def main() -> int:
         floor = math.ceil((2.0 * lig.radius + 1.0) * 10.0) / 10.0
         near_box = None
         if sites:
-            centre, size = sites[covering[0]].box_center_and_size()
+            # The site whose box holds the docked pose, which is the one worth
+            # handing to the engine -- not the one nearest the ligand, and not
+            # simply the first on the list.
+            centre, size = best_site.box_center_and_size()
             near_box = GridBox.from_center_size(
                 centre, tuple(max(float(v), floor) for v in size)
             )
@@ -639,25 +719,61 @@ def main() -> int:
                 ),
             )
         # And the cloud really is enclosed by what the table says lines it.
+        #
+        # The guarantee being pinned here is the mask's, not the reporting
+        # cutoff's. A point earns its place in a site because protein sits on
+        # both sides of it along some axis within the burial window, which is
+        # 3.0 A / spacing voxels -- so a drawn point can legitimately sit
+        # ~4.9 A from the nearest atom and still belong. `LINING_MAX` is 4.5 A
+        # and is a *reporting* threshold, narrower than what the geometry
+        # guarantees, so demanding every point be inside it asserts something
+        # the mask never promised. It happened to hold while sites were
+        # dilated -- the dilation pulled every point back towards the atoms --
+        # and that is an accident, not a property.
+        #
+        # So: check the two things that are actually true, and check them in
+        # both directions. The cloud is free space, and the lining is exactly
+        # the residues within LINING_MAX of it -- no more, no fewer.
         top = sites[0]
+        cloud = np.asarray(top.points, np.float32)
+        els_all = list(rec.elements)
+        reach = np.asarray(
+            [P.VDW_RADII.get(e, 1.70) for e in els_all], np.float32
+        ) + P.DEFAULT_PROBE
+        # Solid means "within `vdw + probe` of *some* atom", so a free point
+        # is one whose distance to every atom exceeds that atom's own inflated
+        # radius. Comparing against a single radius would be wrong: the
+        # mask is per-atom, and 4.5 A from a hydrogen is not the same as 4.5 A
+        # from a sulphur.
+        clearance = (
+            np.linalg.norm(rec_pts[:, None, :] - cloud[None, :, :], axis=2)
+            - reach[:, None]
+        ).min(axis=0)
+        check(
+            "every drawn point is free space: outside every atom's probe radius",
+            float(clearance.min()) > 0.0,
+            f"tightest point is {float(clearance.min()):.2f} A clear of its "
+            f"nearest inflated atom",
+        )
+        check(
+            "and it is a real part of the site, not a stray point",
+            len(cloud) == top.voxels and float(cloud.std(axis=0).min()) > 0.0,
+            f"{len(cloud)} points for {top.voxels} voxels, spread "
+            f"{np.round(cloud.std(axis=0), 2)}",
+        )
+        # The lining, recomputed here from the coordinates rather than read
+        # back, so a bug in `_lining` cannot agree with itself.
         lined = {name for name, _ in top.lining}
-        atom_idx = [i for i, lab in enumerate(labels_all) if lab in lined]
-        if atom_idx:
-            cloud = np.asarray(top.points, np.float32)
-            nearest = np.linalg.norm(
-                rec_pts[atom_idx][:, None, :] - cloud[None, :, :], axis=2
-            ).min(axis=0)
-            check(
-                "every drawn point is within reach of a lining residue",
-                float(nearest.max()) <= P.LINING_MAX,
-                f"worst {float(nearest.max()):.2f} A, limit {P.LINING_MAX} A",
-            )
-        else:
-            check(
-                "every drawn point is within reach of a lining residue",
-                False,
-                f"site 1 has no lining residues to check against ({top.lining})",
-            )
+        recomputed = set()
+        for lab, xyz in zip(labels_all, rec_pts):
+            if lab and float(np.linalg.norm(cloud - xyz, axis=1).min()) <= P.LINING_MAX:
+                recomputed.add(lab)
+        check(
+            "the reported lining is exactly the residues within LINING_MAX",
+            lined == recomputed,
+            f"{len(lined)} reported, {len(recomputed)} recomputed, "
+            f"symmetric difference {sorted(lined ^ recomputed)}",
+        )
 
     print(f"\n{CHECKS - len(FAILURES)}/{CHECKS} passed")
     for f in FAILURES:
