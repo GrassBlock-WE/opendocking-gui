@@ -105,6 +105,29 @@ COLOR_LIGAND = (0.35, 0.75, 0.95)
 COLOR_BEST_POSE = (0.40, 0.90, 0.45)
 COLOR_BOX = (0.95, 0.75, 0.20)
 
+#: Interaction lines, by the class `contacts.find_contacts` assigns.
+#:
+#: The colours are chosen against the two things these lines are drawn over: a
+#: grey protein and a yellow search box. Hydrophobic contacts were grey to begin
+#: with, which made 16 of 48 lines in a real pose invisible — a contact you
+#: cannot see is not reported to anyone, however correctly it was computed.
+#: Hydrogen bonds are near-white rather than yellow so they cannot be mistaken
+#: for the box.
+COLOR_CONTACT = {
+    "hbond": (1.00, 0.97, 0.72),
+    "polar": (0.30, 0.82, 1.00),
+    "hydrophobic": (0.82, 0.45, 0.95),
+    "close": (0.45, 0.52, 0.62),
+}
+
+#: The same classes, for the table and the legend.
+CONTACT_LABELS = {
+    "hbond": "H-bond",
+    "polar": "polar",
+    "hydrophobic": "hydrophobic",
+    "close": "other",
+}
+
 
 def _unit_sphere(segments: int = 16, rings: int = 12) -> np.ndarray:
     """Vertices and per-vertex normals of a unit sphere, for instancing."""

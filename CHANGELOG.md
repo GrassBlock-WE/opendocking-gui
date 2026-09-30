@@ -13,6 +13,31 @@ The project is pre-1.0. The `0.x` line is where the interfaces still move.
 
 ### Added
 
+- **Pose/receptor interaction analysis.** The workbench can now say what the
+  pose is doing: a residue-level table of the interface, dashed lines between
+  contacting atoms coloured by class (hydrogen bond, polar, hydrophobic,
+  other), a legend keyed to the same colour table the renderer uses, and a
+  click on any row that flies the camera onto that residue's contacts.
+  `opendocking.workbench.contacts` does the work with no Qt and no display, and
+  `scripts/contacts_check.py` verifies it headlessly (39/39). Hydrogen bonds
+  are a geometric filter — H···acceptor under 2.6 Å and a donor–H···acceptor
+  angle over 120° — checked in **both** directions, because in a docked pose the
+  donor is usually the receptor. The distance and angle come back on every
+  contact so the cut-offs can be tightened rather than trusted. A hydrogen
+  whose parent cannot be resolved is never drawn as a bond.
+- **Anti-aliasing, depth fog and a background gradient.** The viewport asks the
+  surface format for 4x multisampling, the shaders gained a second light, a rim
+  term and aerial perspective, and the backdrop is a gradient rather than one
+  flat colour. Fog scales with the camera distance, so it does nothing on a
+  ligand viewed up close and is doing real work on a large receptor.
+- The controls panel is now scrollable. It was a plain widget in a dock, so once
+  the panel was taller than the window the Dock button and everything below it
+  were unreachable.
+- `examples/crambin_pose.pdbqt`: ibuprofen docked into crambin with this engine
+  (9 poses, best −5.5 kcal/mol, seed 20260930, box covering the protein). It is
+  here so the interaction checks have a pose with real residue names to work
+  on — the example receptor is a synthetic blob whose residues are all called
+  `REC`, and against it every contact is correctly anonymous.
 - **Five display modes in the workbench**, chosen from a `display` selector:
   space-filling, ball-and-stick, skeletal (sticks only), ribbon and cartoon.
   The last two need a protein backbone; a structure without one falls back to
@@ -76,6 +101,24 @@ The project is pre-1.0. The `0.x` line is where the interfaces still move.
   14 skipped, 75 checks — the same 61 passes CI reports, plus the one that used
   to vanish.
 
+- `find_contacts` accepted `hbond_max` and `hbond_min_angle` and **ignored
+  them**: the helper read the module constants directly, so only the
+  close-contact cut-off was ever applied. A caller tightening the thresholds to
+  check a borderline pose would have been told it had worked.
+- `workbench_smoke.py` reversed the red and blue channels before writing its
+  screenshots, so a grey protein rendered blue and every red oxygen rendered
+  blue. Anyone reading those images was hunting a colour bug that was in the
+  harness.
+- The hydrophobic interaction lines were drawn in grey, over a grey protein.
+  Sixteen of the forty-eight contacts in a real pose were invisible — a contact
+  that cannot be seen is not reported to anyone, however correctly it was
+  computed. They are violet now, and the hydrogen-bond line is near-white
+  rather than the yellow the search box already uses.
+- `workbench_interaction_check.py` put only `examples/` on `sys.path`, so
+  `opendocking` resolved to the *installed wheel* and the check was silently
+  testing the last build rather than the working tree. Same class of mistake as
+  the launch check's stale count, one layer up: a check that is not looking at
+  the thing it claims to look at.
 - `Ligand.from_pdbqt_str` did not work at all. It called the file-opening
   reader with the document text, so the PDBQT was treated as a filename and
   every call failed — `os error 123` on Windows, a search for a file named

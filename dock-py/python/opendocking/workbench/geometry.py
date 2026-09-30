@@ -31,6 +31,7 @@ __all__ = [
     "bonds",
     "ribbon",
     "catmull_rom",
+    "dashed_segments",
 ]
 
 
@@ -384,3 +385,54 @@ def _tangent_at(points: np.ndarray, i: int, n: int) -> np.ndarray:
     if norm < 1e-9:
         return np.array([0.0, 0.0, 1.0])
     return tangent / norm
+
+
+def dashed_segments(
+    starts: np.ndarray,
+    ends: np.ndarray,
+    dash: float = 0.40,
+    gap: float = 0.26,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Split straight segments into dashes, for the interaction lines.
+
+    A hydrogen bond drawn as a solid line is read as "these atoms are bonded",
+    which is precisely the claim being doubted — the point of the filter is
+    that a human has not confirmed it. A dash says the same thing a dashed line
+    has always said in a drawing: this is a proposed connection, not a fact.
+
+    Returns ``(segments, group)``: an ``(n, 2, 3)`` array in the same layout
+    `bonds` uses, and the ``(n,)`` index of the source segment each dash came
+    from. Returning the grouping rather than only the geometry is what lets the
+    caller colour each dash from its own contact without re-deriving how long
+    that line was, which is a second copy of the same arithmetic and a second
+    chance to disagree with it.
+
+    Segments shorter than one dash stay solid rather than vanishing: a very
+    short contact is a real contact, and clipping it to nothing would make the
+    densest part of the interface the sparsest part of the picture.
+    """
+    starts = np.asarray(starts, np.float32).reshape(-1, 3)
+    ends = np.asarray(ends, np.float32).reshape(-1, 3)
+    if len(starts) == 0:
+        return np.zeros((0, 2, 3), np.float32), np.zeros(0, np.int32)
+
+    period = dash + gap
+    out: list[np.ndarray] = []
+    group: list[int] = []
+    for index, (a, b) in enumerate(zip(starts, ends)):
+        length = float(np.linalg.norm(b - a))
+        if length <= 1e-6:
+            out.append(np.stack([a, b]))
+            group.append(index)
+            continue
+        n = int(length // period) + 1
+        for k in range(n):
+            t0 = (k * period) / length
+            t1 = min(1.0, (k * period + dash) / length)
+            if t1 <= t0:
+                break
+            out.append(np.stack([a + (b - a) * t0, a + (b - a) * t1]))
+            group.append(index)
+    if not out:
+        return np.zeros((0, 2, 3), np.float32), np.zeros(0, np.int32)
+    return np.asarray(out, np.float32), np.asarray(group, np.int32)

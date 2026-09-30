@@ -145,6 +145,38 @@ each structure's bonds came from — read out of the file, from residue
 templates, or inferred from distances. A ball-and-stick picture makes a wrong
 bond as convincing as a right one, so that line is not decoration.
 
+**Interaction analysis** (the `interactions` toggle in the control panel):
+
+A pose buried in a hydrophobic groove and a pose clinging to the outside of the
+protein look identical from the outside. The workbench now says which is which:
+
+- contacts are drawn as **dashed lines**, coloured by class, with a legend
+  beside them (hydrogen bond near-white, polar cyan, hydrophobic violet, other
+  slate);
+- an `interactions` table lists every residue involved with its hydrogen-bond
+  count, contact count and closest approach, **ranked hydrogen bonds first** —
+  ranking by distance alone puts a grazing contact ahead of a hydrogen bond;
+- **clicking any row flies the camera onto that residue's contacts**.
+
+A hydrogen bond here is a **geometric filter**: H···acceptor under 2.6 Å and a
+donor–H···acceptor angle over 120°, checked in **both** directions because in a
+docked pose the donor is usually the receptor. It is not a quantum calculation:
+it does not check that the acceptor's lone pair points back, does not model
+water bridges, and assigns no energies. Every contact carries its distance and
+angle so the cut-offs can be tightened rather than trusted.
+
+> **Where residue names come from**: the synthetic example receptor
+> (`rec_prep.pdbqt`) has every residue called `REC`, so against it the workbench
+> can report *how many* contacts there are but not attribute them, and the
+> table is empty. That is not a failure — it genuinely has no residue identity.
+> Load a real protein to get residue numbers.
+
+The picture itself is 4x multisampled, has depth fog (aerial perspective, which
+is what makes the front of a large receptor distinguishable from the back),
+two lights plus a rim term, and a gradient background rather than one flat
+colour. The fog range follows the camera distance, so it stays out of the way
+when a ligand fills the window and does real work when a big receptor is zoomed out.
+
 ## Things to know before you use the results
 
 - **The search box must be given explicitly.** A box covering the whole protein

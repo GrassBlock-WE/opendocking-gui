@@ -44,17 +44,23 @@ __all__ = [
 SPHERE_VERTEX_SHADER = """
 #version 330 core
 uniform mat4 mvp;
-// Explicit locations. moderngl assigns locations from the order of the
-// `vertex_array` buffer list, and getting that order wrong silently feeds
-// colours into positions; pinning them removes the ambiguity.
+// The view matrix is needed separately, not folded into `mvp`, because depth
+// fog is a function of how far a fragment is from the eye, and `mvp` has
+// already had the perspective divide baked into it. Passing the modelview
+// matrix is the difference between "far away" and "somewhere odd on screen".
+uniform mat4 mv;
 layout (location = 0) in vec3 in_position;
 layout (location = 1) in vec3 in_normal;
 layout (location = 2) in vec3 in_color;
 out vec3 v_color;
 out vec3 v_normal;
+out float v_depth;
 void main() {
     v_color = in_color;
     v_normal = in_normal;
+    vec4 eye = mv * vec4(in_position, 1.0);
+    // The camera looks down -z, so distance in front of it is -eye.z.
+    v_depth = -eye.z;
     gl_Position = mvp * vec4(in_position, 1.0);
 }
 """
@@ -63,26 +69,48 @@ SPHERE_FRAGMENT_SHADER = """
 #version 330 core
 in vec3 v_color;
 in vec3 v_normal;
+in float v_depth;
 uniform float opacity;
+uniform vec3 fog_color;
+uniform vec2 fog_range;   // (near, far): below near is clear, above far is fog
 out vec4 out_color;
 void main() {
-    // A single Lambert term is enough to read the curvature of a sphere and
-    // costs almost nothing; a second light or shadowing would not survive a
-    // 30 000-atom receptor at interactive rates.
-    float lambert = 0.35 + 0.65 * max(dot(normalize(v_normal),
-                                          normalize(vec3(0.4, 0.5, 0.8))), 0.0);
-    out_color = vec4(v_color * lambert, opacity);
+    vec3 n = normalize(v_normal);
+    // Two lights, because one light makes every sphere look like the same
+    // ball: a second one from the opposite side separates the front of an atom
+    // from the back and gives the model some volume without a second pass.
+    vec3 key_dir  = normalize(vec3(0.45, 0.55, 0.75));
+    vec3 fill_dir = normalize(vec3(-0.55, -0.25, 0.35));
+    float key  = max(dot(n, key_dir), 0.0);
+    float fill = max(dot(n, fill_dir), 0.0);
+    // A little rim light, which is what stops a dense receptor reading as one
+    // flat silhouette.
+    float rim = pow(1.0 - abs(n.z), 3.0) * 0.18;
+    float shade = 0.26 + 0.62 * key + 0.22 * fill + rim;
+    vec3 rgb = v_color * shade;
+
+    // Aerial perspective. A 3000-atom receptor drawn at a useful zoom is a
+    // solid mass of overlapping spheres, and depth is the only cue that says
+    // which ones are in front. Fog restores it, and it is cheap.
+    float f = clamp((v_depth - fog_range.x) / max(fog_range.y - fog_range.x, 1e-4),
+                    0.0, 1.0);
+    f = f * f;                       // ease in: near geometry stays crisp
+    rgb = mix(rgb, fog_color, f);
+    out_color = vec4(rgb, opacity);
 }
 """
 
 LINE_VERTEX_SHADER = """
 #version 330 core
 uniform mat4 mvp;
+uniform mat4 mv;
 layout (location = 0) in vec3 in_position;
 layout (location = 1) in vec3 in_color;
 out vec3 v_color;
+out float v_depth;
 void main() {
     v_color = in_color;
+    v_depth = -(mv * vec4(in_position, 1.0)).z;
     gl_Position = mvp * vec4(in_position, 1.0);
 }
 """
@@ -90,11 +118,57 @@ void main() {
 LINE_FRAGMENT_SHADER = """
 #version 330 core
 in vec3 v_color;
+in float v_depth;
 uniform float opacity;
+uniform vec3 fog_color;
+uniform vec2 fog_range;
 out vec4 out_color;
-void main() { out_color = vec4(v_color, opacity); }
+void main() {
+    // Lines get a weaker fog than the spheres do. A contact line is the
+    // annotation on the picture; fogging it as hard as the protein it is drawn
+    // over would make the far side of the interface unreadable for the sake of
+    // a consistency that helps nobody.
+    float f = clamp((v_depth - fog_range.x) / max(fog_range.y - fog_range.x, 1e-4),
+                    0.0, 1.0);
+    f = f * f * 0.55;
+    out_color = vec4(mix(v_color, fog_color, f), opacity);
+}
 """
 
+#: A fullscreen gradient behind the scene, so the background is not one flat
+#: colour meeting the molecule with a hard line.
+BACKGROUND_VERTEX_SHADER = """
+#version 330 core
+out vec2 v_uv;
+void main() {
+    // One oversized triangle rather than a quad: no diagonal seam, one fewer
+    // vertex, and there is nothing to interpolate across it anyway.
+    vec2 p = vec2((gl_VertexID == 1) ? 3.0 : -1.0, (gl_VertexID == 2) ? 3.0 : -1.0);
+    v_uv = p * 0.5 + 0.5;
+    gl_Position = vec4(p, 0.0, 1.0);
+}
+"""
+
+BACKGROUND_FRAGMENT_SHADER = """
+#version 330 core
+in vec2 v_uv;
+uniform vec3 top_color;
+uniform vec3 bottom_color;
+out vec4 out_color;
+void main() {
+    out_color = vec4(mix(bottom_color, top_color, v_uv.y), 1.0);
+}
+"""
+
+#: Background gradient, fog colour and MSAA sample count, in one place because
+#: the fog colour has to be the colour the geometry fades *into*; a fog tinted
+#: differently from the background draws a visible seam across the model.
+BACKGROUND_TOP = (0.055, 0.062, 0.082)
+BACKGROUND_BOTTOM = (0.125, 0.140, 0.175)
+FOG_COLOR = (0.095, 0.105, 0.130)
+#: Multisampling. 4x is the point where edges visibly settle; 8x costs real
+#: frame time for a difference nobody can see on a shaded sphere.
+MSAA_SAMPLES = 4
 
 def _mat4(m: np.ndarray) -> np.ndarray:
     """Flatten a 4x4 matrix the way a GLSL ``mat4`` uniform wants it.
@@ -125,7 +199,7 @@ class SphereMesh:
 
 
 def build_programs(ctx):
-    """Compile the two shader programs on `ctx`."""
+    """Compile the shader programs on `ctx`."""
     sphere = ctx.program(
         vertex_shader=SPHERE_VERTEX_SHADER,
         fragment_shader=SPHERE_FRAGMENT_SHADER,
@@ -134,7 +208,44 @@ def build_programs(ctx):
         vertex_shader=LINE_VERTEX_SHADER,
         fragment_shader=LINE_FRAGMENT_SHADER,
     )
-    return sphere, lines
+    background = ctx.program(
+        vertex_shader=BACKGROUND_VERTEX_SHADER,
+        fragment_shader=BACKGROUND_FRAGMENT_SHADER,
+    )
+    return sphere, lines, background
+
+
+def set_frame_uniforms(prog, view: np.ndarray, near: float, far: float) -> None:
+    """Push the per-frame uniforms every program shares.
+
+    The view matrix and the fog range change when the camera moves, and they
+    change for the whole frame rather than per object, so they are set once
+    here instead of being threaded through every draw call.
+    """
+    if "mv" in prog:
+        prog["mv"].write(_mat4(view))
+    if "fog_color" in prog:
+        prog["fog_color"].value = tuple(float(v) for v in FOG_COLOR)
+    if "fog_range" in prog:
+        prog["fog_range"].value = (float(near), float(far))
+
+
+def draw_background(ctx, prog, vao, width: int, height: int) -> None:
+    """Fill the frame with the gradient before anything else is drawn.
+
+    Depth writes are off for the pass: this is a backdrop, and letting it
+    write depth would make every atom behind it fail the depth test and
+    vanish. The VAO is passed in rather than looked up, because it is what the
+    program is bound to -- `prog["vao"] = ...` raises `KeyError`, since a
+    program's mapping holds uniforms and nothing else.
+    """
+    import moderngl
+
+    ctx.disable(moderngl.DEPTH_TEST)
+    prog["top_color"].value = tuple(float(v) for v in BACKGROUND_TOP)
+    prog["bottom_color"].value = tuple(float(v) for v in BACKGROUND_BOTTOM)
+    vao.render(moderngl.TRIANGLES, vertices=3)
+    ctx.enable(moderngl.DEPTH_TEST)
 
 
 def draw_spheres(ctx, prog, mesh: SphereMesh, mol, mvp) -> None:
@@ -279,17 +390,36 @@ class Viewport(QOpenGLWidget):
         super().__init__(parent)
         self.setMinimumSize(640, 480)
         self.setFocusPolicy(QtCore.Qt.FocusPolicy.StrongFocus)
+        # Multisampling is a property of the surface, so it has to be asked for
+        # before the context exists. Qt answers with the count it actually
+        # granted, which is not always the one that was requested, so the real
+        # value is kept for the status bar rather than the wish.
+        fmt = QtGui.QSurfaceFormat()
+        fmt.setSamples(MSAA_SAMPLES)
+        fmt.setDepthBufferSize(24)
+        self.setFormat(fmt)
+        self.samples_granted = fmt.samples()
         self.camera = Camera()
         self.molecules: list[MoleculeView] = []
         self.box_center = np.zeros(3, np.float32)
         self.box_size = np.asarray([22.0, 22.0, 22.0], np.float32)
         self.show_box = True
+        #: Pose/receptor interactions, as returned by `contacts.find_contacts`.
+        #: Empty means "not computed", which the status bar says out loud
+        #: rather than leaving an empty list to be read as "no interactions".
+        self.contacts: list = []
+        self.show_contacts = True
+        #: True once `contacts` has been computed for the current pair, so the
+        #: panel can distinguish "none found" from "never looked".
+        self.contacts_valid = False
         #: One of ``REPRESENTATION_KEYS``. Set through :meth:`set_representation`
         #: so the status bar can be told about it.
         self.representation = "spheres"
         self._ctx = None
         self._sphere_prog = None
         self._line_prog = None
+        self._bg_prog = None
+        self._bg_vao = None
         self._n_mesh_indices = 0
         self._dragging: QtCore.Qt.MouseButton | None = None
         self._last_mouse = (0.0, 0.0)
@@ -314,7 +444,11 @@ class Viewport(QOpenGLWidget):
             self.setToolTip(f"OpenGL unavailable: {exc}")
             return
 
-        self._sphere_prog, self._line_prog = build_programs(self._ctx)
+        self._sphere_prog, self._line_prog, self._bg_prog = build_programs(self._ctx)
+        # The backdrop has no attributes, so it needs a bare VAO before it can
+        # be drawn: moderngl refuses to render a program with no enabled
+        # vertex array, and the symptom is a black screen rather than an error.
+        self._bg_vao = self._ctx.vertex_array(self._bg_prog, [])
         verts, faces = _icosphere(1)
         self._mesh = SphereMesh(verts, faces)
         self._n_mesh_indices = self._mesh.n_indices
@@ -337,7 +471,18 @@ class Viewport(QOpenGLWidget):
         target.clear(0.10, 0.11, 0.13, 1.0)
 
         aspect = target.size[0] / max(target.size[1], 1)
-        mvp = self.camera.projection(aspect) @ self.camera.view_matrix()
+        view = self.camera.view_matrix()
+        mvp = self.camera.projection(aspect) @ view
+
+        # Fog is scaled to how far away the scene actually is. A fixed range
+        # would either do nothing on a 30 000-atom receptor or black out a
+        # ligand viewed up close, and the camera distance is the one number
+        # that tracks both.
+        span = max(self.camera.distance * 0.55, 8.0)
+        near, far = span * 0.55, span * 2.1
+        set_frame_uniforms(self._sphere_prog, view, near, far)
+        set_frame_uniforms(self._line_prog, view, near, far)
+        draw_background(ctx, self._bg_prog, self._bg_vao, target.size[0], target.size[1])
 
         for mol in self.molecules:
             if not mol.visible or len(mol.coords) == 0:
@@ -345,6 +490,8 @@ class Viewport(QOpenGLWidget):
             self._draw_molecule(mol, mvp)
         if self.show_box:
             self._draw_box(mvp)
+        if self.show_contacts and self.contacts:
+            self._draw_contacts(mvp)
 
         # Leave the default framebuffer bound, as Qt expects.
         ctx.screen.use()
@@ -415,6 +562,43 @@ class Viewport(QOpenGLWidget):
 
     def _draw_lines(self, positions, colors, mvp, opacity) -> None:  # pragma: no cover
         draw_lines(self._ctx, self._line_prog, positions, colors, mvp, opacity)
+
+    def _draw_contacts(self, mvp) -> None:  # pragma: no cover - GUI
+        """Draw the pose/receptor interaction lines.
+
+        Solved against the molecules currently in the scene by role rather than
+        against indices captured when the contacts were computed, so a structure
+        that has since been reloaded cannot leave the lines pointing at
+        whatever moved into that slot. A contact whose atom no longer exists is
+        dropped rather than clamped to a neighbour.
+        """
+        from . import COLOR_CONTACT
+        from .geometry import dashed_segments
+
+        pose = next((m for m in self.molecules if m.role == "pose"), None)
+        receptor = next((m for m in self.molecules if m.role == "receptor"), None)
+        if pose is None or receptor is None:
+            return
+
+        starts, ends, colors = [], [], []
+        for c in self.contacts:
+            if not (0 <= c.self_index < len(pose.coords)):
+                continue
+            if not (0 <= c.partner_index < len(receptor.coords)):
+                continue
+            starts.append(pose.coords[c.self_index])
+            ends.append(receptor.coords[c.partner_index])
+            colors.append(COLOR_CONTACT.get(c.kind, COLOR_CONTACT["close"]))
+        if not starts:
+            return
+
+        segs, group = dashed_segments(
+            np.asarray(starts, np.float32), np.asarray(ends, np.float32)
+        )
+        # `group` says which contact each dash came from, so every dash of one
+        # hydrogen bond is that bond's colour rather than a gradient along it.
+        rgb = np.asarray(colors, np.float32)[group]
+        self._draw_lines(segs, rgb, mvp, 0.95)
 
     def _draw_box(self, mvp) -> None:  # pragma: no cover
         from . import COLOR_BOX
@@ -501,6 +685,36 @@ class Viewport(QOpenGLWidget):
         radius = float(np.linalg.norm(allpts - self.camera.center, axis=1).max())
         self.camera.distance = max(5.0, radius * 2.6)
         self.update()
+
+    def focus_residue(self, residue: str) -> bool:  # pragma: no cover - GUI
+        """Move the camera onto a residue's contacts. True if it moved.
+
+        Zooms to the span of the atoms actually making contact rather than to
+        the whole residue, which for a buried side chain is the difference
+        between the interaction filling the window and being a few pixels wide
+        in it. A residue with no contacts found leaves the camera alone and says
+        so, rather than jumping somewhere arbitrary.
+        """
+        pose = next((m for m in self.molecules if m.role == "pose"), None)
+        receptor = next((m for m in self.molecules if m.role == "receptor"), None)
+        if pose is None or receptor is None:
+            return False
+        pts: list[np.ndarray] = []
+        for c in self.contacts:
+            if c.partner_residue != residue:
+                continue
+            if 0 <= c.self_index < len(pose.coords):
+                pts.append(pose.coords[c.self_index])
+            if 0 <= c.partner_index < len(receptor.coords):
+                pts.append(receptor.coords[c.partner_index])
+        if not pts:
+            return False
+        arr = np.asarray(pts, np.float32)
+        self.camera.center = arr.mean(axis=0)
+        radius = float(np.linalg.norm(arr - self.camera.center, axis=1).max())
+        self.camera.distance = max(6.0, radius * 5.0)
+        self.update()
+        return True
 
 
 class DockingWorker(QtCore.QObject):
@@ -602,6 +816,32 @@ class MainWindow(QtWidgets.QMainWindow):
         self.cb_box.toggled.connect(self._on_box_visibility)
         form.addRow(self.cb_box)
 
+        self.cb_contacts = QtWidgets.QCheckBox("interactions (dashed)")
+        self.cb_contacts.setChecked(True)
+        self.cb_contacts.toggled.connect(self._on_contact_visibility)
+        form.addRow(self.cb_contacts)
+
+        # A legend, because four line colours that mean nothing by themselves
+        # are a worse feature than no colours. Each swatch is painted with the
+        # same RGB the line renderer uses, read from one table, so the legend
+        # cannot drift away from the picture.
+        legend = QtWidgets.QWidget()
+        legend_row = QtWidgets.QHBoxLayout(legend)
+        legend_row.setContentsMargins(0, 0, 0, 0)
+        legend_row.setSpacing(8)
+        from . import COLOR_CONTACT, CONTACT_LABELS
+
+        for kind in ("hbond", "polar", "hydrophobic", "close"):
+            r, g, b = (int(round(v * 255)) for v in COLOR_CONTACT[kind])
+            chip = QtWidgets.QLabel("━")
+            chip.setStyleSheet(f"color: rgb({r},{g},{b}); font-weight: bold;")
+            text = QtWidgets.QLabel(CONTACT_LABELS[kind])
+            text.setStyleSheet("color: #9aa3ad;")
+            legend_row.addWidget(chip)
+            legend_row.addWidget(text)
+        legend_row.addStretch(1)
+        form.addRow("legend", legend)
+
         # The centre must accept negative coordinates. They are ordinary, not
         # exotic: a receptor whose coordinates run from -40 to +10 has a
         # centroid well below zero, and with a (0, 999) range the spin silently
@@ -643,12 +883,45 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lbl_rmsd = QtWidgets.QLabel("—")
         form.addRow("RMSD to best", self.lbl_rmsd)
 
+        # Residue-level summary of the pose/receptor interface, one row per
+        # residue. Selecting a row flies the camera to that contact, which is
+        # the whole reason the table exists: "THR 2 is hydrogen-bonded" is a
+        # fact, "THR 2 is over there" is the question you had when you clicked.
+        self.lbl_contacts = QtWidgets.QLabel("—")
+        self.lbl_contacts.setWordWrap(True)
+        form.addRow("interactions", self.lbl_contacts)
+
+        self.contact_table = QtWidgets.QTableWidget(0, 4)
+        self.contact_table.setHorizontalHeaderLabels(
+            ["residue", "H-bond", "contacts", "closest"]
+        )
+        self.contact_table.horizontalHeader().setStretchLastSection(True)
+        self.contact_table.setSelectionBehavior(
+            QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows
+        )
+        self.contact_table.setEditTriggers(
+            QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers
+        )
+        self.contact_table.setMinimumHeight(150)
+        self.contact_table.itemSelectionChanged.connect(self._on_contact_selected)
+        form.addRow(self.contact_table)
+
         self.status_label = QtWidgets.QLabel("ready — load a receptor and a ligand")
         self.status_label.setWordWrap(True)
         form.addRow(self.status_label)
 
         dock = QtWidgets.QDockWidget("Controls", self)
-        dock.setWidget(panel_widget)
+        # A plain widget in a dock is clipped, not scrolled: once the panel is
+        # taller than the window the Dock button and everything below it become
+        # unreachable, and a control you cannot reach is not a control. The
+        # contacts table alone is 150 px tall, which is what pushed it over.
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(panel_widget)
+        scroll.setHorizontalScrollBarPolicy(
+            QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        dock.setWidget(scroll)
         self.addDockWidget(QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, dock)
 
         menu = self.menuBar().addMenu("File")
@@ -769,6 +1042,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.status_label.setText(
                 f"loaded {path.name} ({len(view.coords)} atoms)"
             )
+        self._refresh_contacts()
         self.viewport.frame_all()
 
     def _best_row(self) -> int:
@@ -803,6 +1077,87 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_box_visibility(self) -> None:  # pragma: no cover - GUI
         self.viewport.show_box = self.cb_box.isChecked()
         self.viewport.update()
+
+    def _on_contact_visibility(self) -> None:  # pragma: no cover - GUI
+        self.viewport.show_contacts = self.cb_contacts.isChecked()
+        self.viewport.update()
+
+    def _refresh_contacts(self) -> None:  # pragma: no cover - GUI
+        """Recompute the pose/receptor interface and refill the table.
+
+        Called whenever either side changes, so the numbers in the table always
+        belong to the pose on screen. An empty table is only ever shown together
+        with a reason: "no receptor" and "nothing touches" are different facts
+        and the panel says which one it is.
+        """
+        from .contacts import find_contacts, residue_summary
+
+        pose = next((m for m in self.viewport.molecules if m.role == "pose"), None)
+        receptor = next(
+            (m for m in self.viewport.molecules if m.role == "receptor"), None
+        )
+
+        self.contact_table.setRowCount(0)
+        if pose is None or receptor is None:
+            self.viewport.contacts = []
+            self.viewport.contacts_valid = False
+            self.lbl_contacts.setText("load a receptor and a pose")
+            return
+
+        found = find_contacts(pose, receptor)
+        self.viewport.contacts = found
+        self.viewport.contacts_valid = True
+        summary = residue_summary(found)
+
+        kinds: dict[str, int] = {}
+        for c in found:
+            kinds[c.kind] = kinds.get(c.kind, 0) + 1
+        parts = [f"{len(found)} contacts over {len(summary)} residues"]
+        for kind in ("hbond", "polar", "hydrophobic", "close"):
+            if kinds.get(kind):
+                parts.append(f"{kinds[kind]} {kind}")
+        if not found:
+            parts.append("nothing within 4.0 A")
+        self.lbl_contacts.setText("  |  ".join(parts))
+
+        self.contact_table.setRowCount(len(summary))
+        from . import COLOR_CONTACT
+
+        for row, (residue, hbonds, total, closest) in enumerate(summary):
+            # The residue cell carries the colour of its strongest contact, so
+            # the table and the picture agree without a second lookup: the row
+            # that is tinted for a hydrogen bond is the row whose yellow-white
+            # dashes run across the middle of the model.
+            members = [c for c in found if c.partner_residue == residue]
+            top_kind = min(
+                (c.kind for c in members),
+                key=lambda k: ("hbond", "polar", "hydrophobic", "close").index(k),
+            )
+            r, g, b = (int(round(v * 255)) for v in COLOR_CONTACT[top_kind])
+            tint = f"color: rgb({r},{g},{b});"
+            for col, text in enumerate(
+                [residue, str(hbonds), str(total), f"{closest:.2f}"]
+            ):
+                item = QtWidgets.QTableWidgetItem(text)
+                if col == 0:
+                    item.setData(QtCore.Qt.ItemDataRole.UserRole, residue)
+                    item.setForeground(QtGui.QBrush(QtGui.QColor(r, g, b)))
+                    item.setToolTip(f"{top_kind} contact")
+                else:
+                    item.setForeground(QtGui.QBrush(QtGui.QColor(0xC8, 0xCE, 0xD6)))
+                self.contact_table.setItem(row, col, item)
+        self.viewport.update()
+
+    def _on_contact_selected(self) -> None:  # pragma: no cover - GUI
+        rows = self.contact_table.selectionModel().selectedRows() if self.contact_table.selectionModel() else []
+        if not rows:
+            return
+        item = self.contact_table.item(rows[0].row(), 0)
+        if item is None:
+            return
+        residue = item.data(QtCore.Qt.ItemDataRole.UserRole)
+        self.viewport.focus_residue(residue)
+        self.statusBar().showMessage(f"centred on {residue}", 4000)
 
     def _on_representation(self) -> None:  # pragma: no cover - GUI
         """Switch how the scene is drawn, and say what that means for the bonds.
@@ -870,6 +1225,7 @@ class MainWindow(QtWidgets.QMainWindow):
             f"{energy:.2f} kcal/mol" if energy is not None else "energy not in file"
         )
         self.lbl_rmsd.setText("—" if rmsd is None else f"{rmsd:.2f} Å")
+        self._refresh_contacts()
         self.viewport.update()
 
     def _rmsd_to_best(self, row: int):  # pragma: no cover - GUI

@@ -786,6 +786,134 @@ def main() -> int:
     else:
         skip("a ribbon on a real protein", f"{crambin.name} is not present")
 
+    # ------------------------------------------------- 11. interactions panel
+    section("11. pose/receptor interactions")
+    win4 = MainWindow(receptor=rec)
+    win4.resize(1100, 800)
+    win4.show()
+    QTest.qWaitForWindowExposed(win4, 5000)
+    app.processEvents()
+
+    check("no receptor interactions are claimed before a pose is loaded",
+          not win4.viewport.contacts_valid or not win4.viewport.contacts,
+          f"contacts={len(win4.viewport.contacts)} valid={win4.viewport.contacts_valid}")
+    check("the panel says so instead of showing an empty table",
+          "load" in win4.lbl_contacts.text().lower()
+          or win4.contact_table.rowCount() == 0,
+          win4.lbl_contacts.text())
+
+    # The example receptor is a synthetic blob whose residues are all called
+    # REC, so it has contacts but no residue to attribute them to. That is a
+    # different situation from "nothing is touching", and the two must not look
+    # the same: the headline still counts the contacts, and the table is empty
+    # rather than filled with the word "REC" seven times.
+    if poses.is_file():
+        win4.load_structure(poses, "poses")
+        app.processEvents()
+        QTest.qWait(200)
+        app.processEvents()
+        anonymous = win4.viewport.contacts
+        check("a receptor with no residue names still reports its contacts",
+              len(anonymous) > 0, f"{len(anonymous)}")
+        check("but no residue is invented for them",
+              all(not c.partner_residue for c in anonymous),
+              f"{sum(1 for c in anonymous if c.partner_residue)} named")
+        check("and the table stays empty rather than filling with placeholders",
+              win4.contact_table.rowCount() == 0,
+              f"{win4.contact_table.rowCount()} rows")
+        check("the headline still counts the contacts it found",
+              str(len(anonymous)) in win4.lbl_contacts.text(),
+              win4.lbl_contacts.text())
+        win4.close()
+        app.processEvents()
+    else:
+        skip("contacts on a receptor with no residue names", f"{poses.name} missing")
+
+    crambin_pose = EXAMPLES / "crambin_pose.pdbqt"
+    if not (crambin.is_file() and crambin_pose.is_file()):
+        skip("interactions on a docked pose",
+             "crambin and its pose are not both present")
+    else:
+        win5 = MainWindow(receptor=crambin, poses=crambin_pose)
+        win5.resize(1100, 800)
+        win5.show()
+        QTest.qWaitForWindowExposed(win5, 5000)
+        app.processEvents()
+        QTest.qWait(200)
+        app.processEvents()
+
+        found = win5.viewport.contacts
+        check("a pose in a real protein produces contacts", len(found) > 0, f"{len(found)}")
+        check("the viewport knows they were computed", win5.viewport.contacts_valid)
+        named = {c.partner_residue for c in found if c.partner_residue}
+        check("and they are attributed to real residues", len(named) > 0,
+              f"{len(named)} residues")
+        check("the table has one row per residue involved",
+              win5.contact_table.rowCount() == len(named),
+              f"{win5.contact_table.rowCount()} rows vs {len(named)} residues")
+        check("the headline counts add up to the contacts shown",
+              str(len(found)) in win5.lbl_contacts.text(),
+              win5.lbl_contacts.text())
+        check("at least one hydrogen bond is found in a docked pose",
+              any(c.kind == "hbond" for c in found),
+              f"{sum(1 for c in found if c.kind == 'hbond')} h-bonds")
+        check("the interaction toggle is on by default", win5.cb_contacts.isChecked())
+
+        from opendocking.workbench.geometry import dashed_segments
+
+        pose_mol = next(m for m in win5.viewport.molecules if m.role == "pose")
+        rec_mol = next(m for m in win5.viewport.molecules if m.role == "receptor")
+        segs, group = dashed_segments(
+            np.asarray([pose_mol.coords[c.self_index] for c in found], np.float32),
+            np.asarray([rec_mol.coords[c.partner_index] for c in found], np.float32),
+        )
+        check("one contact becomes more than one dash",
+              len(segs) > len(found), f"{len(found)} contacts -> {len(segs)} dashes")
+        check("every dash maps back to a real contact",
+              len(group) == len(segs) and int(group.max()) < len(found),
+              f"{len(group)} groups over {len(found)} contacts")
+
+        # Selecting a row has to move the camera onto that contact. The claim
+        # is about where the camera looks, so this compares the *centre*; a
+        # comparison of distances would pass for free whenever the new radius
+        # happened to equal the old one, which it did here -- 16.2 A both ways.
+        before_centre = np.array(win5.viewport.camera.center, np.float64)
+        before_dist = win5.viewport.camera.distance
+        win5.contact_table.selectRow(0)
+        app.processEvents()
+        after_centre = np.array(win5.viewport.camera.center, np.float64)
+        shifted = float(np.linalg.norm(after_centre - before_centre))
+        check("selecting a residue moves the camera centre onto it", shifted > 0.5,
+              f"moved {shifted:.2f} A")
+        check("and ends up no further out than framing the whole scene",
+              win5.viewport.camera.distance <= before_dist + 1e-6,
+              f"{before_dist:.1f} -> {win5.viewport.camera.distance:.1f}")
+        top = (win5.contact_table.item(0, 0).text()
+               if win5.contact_table.rowCount() else "")
+        check("the status bar names the residue it centred on",
+              bool(top) and top in win5.statusBar().currentMessage(),
+              win5.statusBar().currentMessage())
+
+        members = [c for c in found if c.partner_residue == top]
+        if members:
+            pts = np.asarray(
+                [pose_mol.coords[c.self_index] for c in members]
+                + [rec_mol.coords[c.partner_index] for c in members], np.float32
+            )
+            off = float(np.linalg.norm(pts.mean(axis=0)
+                                        - after_centre.astype(np.float32)))
+            check("the camera is over that residue's contacts, not the protein's middle",
+                  off < 1.0, f"{off:.2f} A from the contact centroid")
+
+        win5.cb_contacts.setChecked(False)
+        app.processEvents()
+        check("unchecking interactions stops the lines being drawn",
+              win5.viewport.show_contacts is False)
+        win5.cb_contacts.setChecked(True)
+        app.processEvents()
+        check("re-checking brings them back", win5.viewport.show_contacts is True)
+        win5.close()
+        app.processEvents()
     # ---------------------------------------------------------------- report
     section("summary")
     npass = sum(1 for r in results if r[0] == "PASS")

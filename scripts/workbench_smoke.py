@@ -258,8 +258,8 @@ def check_renderer(errors: list[str]) -> bool:
     import opendocking.workbench.app as wb
 
     try:
-        sphere_prog, line_prog = wb.build_programs(ctx)
-        print("  both shader programs compiled")
+        sphere_prog, line_prog, bg_prog = wb.build_programs(ctx)
+        print("  all three shader programs compiled")
     except Exception as exc:
         errors.append(f"shader compile failed: {type(exc).__name__}: {exc}")
         print(f"  shader compile FAILED: {exc}")
@@ -281,7 +281,19 @@ def check_renderer(errors: list[str]) -> bool:
     # Use the same camera the workbench uses, so the picture is the one a user
     # would see rather than a raw wireframe at the origin.
     camera = Camera(distance=26.0, yaw=0.7, pitch=0.45)
-    mvp = camera.projection(W / H) @ camera.view_matrix()
+    view = camera.view_matrix()
+    mvp = camera.projection(W / H) @ view
+
+    # The per-frame uniforms are what the viewport sets each paint. Without
+    # them the shaders still compile and still draw -- `mv` defaults to zero,
+    # so the fog factor is zero and the backdrop is never drawn -- which means
+    # a smoke test that skipped them would pass while the real window showed
+    # something else entirely.
+    span = max(camera.distance * 0.55, 8.0)
+    wb.set_frame_uniforms(sphere_prog, view, span * 0.55, span * 2.1)
+    wb.set_frame_uniforms(line_prog, view, span * 0.55, span * 2.1)
+    bg_vao = ctx.vertex_array(bg_prog, [])
+    wb.draw_background(ctx, bg_prog, bg_vao, W, H)
 
     rec_p = EXAMPLES / "rec_prep.pdbqt"
     pose_p = EXAMPLES / "poses.pdbqt"
@@ -343,7 +355,12 @@ def check_renderer(errors: list[str]) -> bool:
 
     out = REPO / "dist" / "workbench_render.ppm"
     out.parent.mkdir(parents=True, exist_ok=True)
-    rgb = np.ascontiguousarray(data[:, :, ::-1])
+    # `fbo.read(components=3)` hands back RGB in that order, and both writers
+    # below expect RGB. This used to reverse the channels, so every screenshot
+    # the smoke test produced had its red and blue swapped -- which made a
+    # carbon-grey protein look blue and a red oxygen look blue, and sent anyone
+    # reading the image looking for a colour bug that was in the harness.
+    rgb = np.ascontiguousarray(data)
     try:
         import imageio.v2 as imageio
 

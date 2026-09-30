@@ -211,7 +211,7 @@ macOS（Metal）、Linux（Vulkan）、AMD 独显、Intel 核显、Apple Silicon
 ## 3. 验证过程中发现并修复的 bug
 
 以下每一项都是**跑出来**的，不是读代码想出来的。
-共 78 条，按性质分组。
+共 83 条，按性质分组。
 
 ### 3.1 正确性
 
@@ -884,6 +884,50 @@ if len(drawn) == 3:
 通过数与 CI 实测的 61 完全一致，多出的那一项明确显示为 SKIP 并写明原因。
 真实显示环境下仍是 `75 passed, 0 failed, 0 skipped`。
 
+### 3.20 接触分析：让查看器从「看形状」变成「读结果」
+
+在此之前，姿势放进受体的画面里，**埋在疏水沟里的姿势和粘在蛋白表面的姿势长得一模一样**。
+区分它们的是打分函数，而画面上没有任何东西表达这件事。
+
+新增 `opendocking.workbench.contacts`（纯几何，无 Qt、无显示）：
+
+- **氢键**：H···受体 <= 2.6 A 且 D–H···A 夹角 >= 120°，**两个方向都查**——
+  对接姿势里供体通常是**受体**（骨架 NH、丝氨酸 OH 伸向配体羰基），
+  只看配体侧会漏掉大部分。
+- **近接触**：重原子对 <= 4.0 A，排除氢（否则每个 C–H 都会报告一条）。
+- 每个接触都带回距离和角度，**阈值可以收紧而不必相信它**。
+- 父原子定不下来的氢**一律不画氢键**——没有角度可算的键就是没验证过的键。
+
+实测：布洛芬对接到 crambin（9 个姿势，最优 **-5.5 kcal/mol**），
+**THR 2 的羟基氢 donate 给配体羧酸根**（2.55 A / 137.6°）被识别为氢键并排在残基表首位，
+共 48 个接触、7 个残基。
+
+#### 这一轮挖出的五个缺陷
+
+| # | 现象 | 根因 | 修复 |
+|---|---|---|---|
+| 79 | `find_contacts(..., hbond_max=2.0)` 传了等于没传 | `_hbonds` 内部直接读模块常量 `HBOND_MAX` / `HBOND_MIN_ANGLE`，**形参从未传进去**。只有 `close_max` 真的生效 | 阈值改为传参。**一个看起来存在、实际不生效的控制手段比没有更糟**：调用者收紧阈值复核边界姿势时，会被告知「已生效」 |
+| 80 | 冒烟测试截图中蛋白是蓝的、氧也是蓝的 | `data[:, :, ::-1]` 把 `fbo.read` 已返回的 RGB 又翻成 BGR 才写 PNG | 去掉多余翻转。**看图的人会去追一个在测试工具里的颜色 bug** |
+| 81 | 窗口不够高时，Dock 按钮和它下面的一切**够不着** | 控件面板是 dock 里的裸 `QWidget`，被裁剪而不是滚动。接触表 150 px 高把它顶过了 | 包进 `QScrollArea`。够不着的控件不是控件 |
+| 82 | 疏水接触画成灰色，铺在灰色蛋白上——真实姿势 48 个接触里有 16 个**看不见** | 配色没有对照「画在什么上面」来选 | 疏水改紫，氢键改近白（避开搜索框的黄色）。**看不见的接触等于没有报告** |
+| 83 | 交互检查只把 `examples/` 放进 `sys.path`，`opendocking` 解析到**已安装的 wheel** | 脚本路径没指到 `dock-py/python` | 显式插入源码树，并在文档里写明：**装 wheel 后再跑交互检查**，否则测的是上一次构建 |
+
+第 79 和第 83 是同一件事的两层：**一个恒真的断言，和一个没在看它声称要看的东西的检查。**
+第 80、81、82 都不是逻辑错误，是「做出来的东西好不好用」——而这三样，
+任何单元断言都不会发现，只有把图打开、把窗口缩到 900 px 才知道。
+
+#### 验证
+
+| 脚本 | 检查数 | 关键断言 |
+|---|---|---|
+| `scripts/contacts_check.py` | **39 / 39** | 合成氢键按已知几何构造，**逐度、逐埃**跨过两个阈值；恰好落在阈值上算接受；无父原子的氢不算氢键；**两个方向分别只放宽一个判据**做反向验证；姿势平移 400 A 后接触数必须为 **0**；crambin 真实姿势里每个残基名都必须是 crambin 真有的残基；残基表计数与接触总数对得上 |
+| `scripts/workbench_interaction_check.py` | **96 / 96**（原 75） | 无残基名的受体**如实报告「有 48 个接触但无法归属残基」**，而不是把表格填满 `REC`；有残基的 crambin 配对里表格行数 = 涉及残基数；点击行后**相机中心**移动（不是距离——本例两者都恰好是 16.2 A，比距离会白送通过）且落在该残基接触点的质心 1 A 内 |
+
+#### 必须看图
+
+`scripts/contacts_screenshot.py` 输出两张图（全景 + 聚焦到 THR 2）。
+**疏水接触的配色问题就是看出来的**——断言全过时，48 条里有 16 条是隐形的。
+
 ---
 
 ## 4. 复现本报告
@@ -910,8 +954,10 @@ python scripts\workbench_interaction_check.py   # GUI 布局 + 交互 + 行为 +
 python scripts\viewport_framing_check.py        # 内容是否真的居中
 python scripts\structure_bond_check.py          # 键感知：残基分组、肽键、无跨残基键、RDKit 交叉验证，36 项
 python scripts\representation_geometry_check.py # 圆柱 / 双色键 / 条带几何，21 项
+python scripts\contacts_check.py                # 氢键判据与残基归属，含反向验证，39 项
 python scripts\x11_window_parse_check.py         # 启动检查的 X11 窗口查找与关窗判定，11 项，不需要 X server
 python scripts\odgui_launch_check.py            # 真实启动 odgui 子进程并关窗
+python scripts\contacts_screenshot.py           # 接触分析的两张截图（看图用，不是断言）
 python scripts\check_doc_encoding.py            # 8 个中文文档的 UTF-8 完整性
 python scripts\check_repo_docs.py               # 链接完整性 + 本机路径泄露
 cd examples
@@ -953,7 +999,12 @@ python scripts\check_repo_docs.py
 
 > `examples/` 与 `scripts/` 在**包外**，不在 `pytest` 的收集范围内。
 > 改名或重构时最容易漏掉的就是它们（§3.10 的两条就是这么漏的）——
-> 改完务必把上面列出的**全部 10 个 `scripts/` 与 5 个 `examples/` 脚本**重跑一遍。
+> 改完务必把上面列出的**全部 11 个 `scripts/` 与 5 个 `examples/` 脚本**重跑一遍。
+
+> **`workbench_interaction_check.py` 测的是装好的 wheel，不是源码树**（§3.20 #83）。
+> 改了 `dock-py/python` 下的任何东西，必须先 `pip install --force-reinstall`
+> 那个 wheel 再跑它，否则跑的是上一次构建，**而且看起来完全正常**。
+> 其余 `scripts/*.py` 都把 `dock-py/python` 插进了 `sys.path`，测的是当前源码。
 
 ---
 
