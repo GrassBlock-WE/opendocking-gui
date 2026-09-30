@@ -12,25 +12,34 @@ So the two platforms get their own mechanism and the same verdict:
 
 * **Windows** -- `FindWindowW` for the handle, `ImageGrab` for the screenshot,
   `PostMessage(WM_CLOSE)` to close.
-* **X11** -- `xdotool search` to find the window, `xdotool windowclose` to send
-  it a `WM_DELETE_WINDOW` client message. There is no screenshot: capturing one
-  needs ImageMagick, and the interaction check already covers rendering, so the
-  report says so rather than pretending it looked.
+* **X11** -- `xdotool search` to find the window, `wmctrl -c` to ask the window
+  manager to close it. There is no screenshot: capturing one needs ImageMagick,
+  and the interaction check already covers rendering, so the report says so
+  rather than pretending it looked.
 
-`xdotool` is the mechanism that matters, and the reason is that CI runs this
-under `xvfb-run`, which starts a display with **no window manager**. `wmctrl`
-asks the window manager for the client list over EWMH, so with no WM it finds
-nothing and the loop above it can only spin until the deadline. `xdotool`
-walks the X tree with `XQueryTree` and addresses the window directly, so it
-works with or without a WM. That is also why `xdotool windowclose` is the
-right analogue of `PostMessage(WM_CLOSE)`: both deliver a close request to the
-window itself rather than asking someone else to deliver it, so both land on
-Qt's `closeEvent`. `wmctrl` is kept as a fallback, and `xwininfo` as a way to
-at least prove the window exists when neither of the others is installed.
+Getting this right took two corrections, both found by running it and neither
+by reading it.
 
-If nothing can ask the window to close, the script says the graceful close
-could not be checked and falls back to proving only that the process stayed
-alive. That is a weaker claim and it is reported as one.
+The first guess was `wmctrl` for everything. It asks the window manager for the
+client list over EWMH, and CI runs this under `xvfb-run`, which starts a
+display with **no window manager** -- so it found nothing and the loop ran out
+its deadline. Finding is now `xdotool search`, which walks the X tree with
+`XQueryTree` and needs no window manager.
+
+The second guess was `xdotool windowclose`, on the theory that it delivers the
+same event as `PostMessage(WM_CLOSE)`. It does not: it destroys the X window
+outright, so Qt never runs `closeEvent` and the process keeps running with
+nothing on screen. The log showed the window found at 0.6 s and the process
+still alive at 20.6 s, which is a destroyed window rather than a slow close.
+Closing therefore goes through `wmctrl -c`, which needs a window manager -- so
+CI now starts a minimal one, because a real desktop has one and the check is
+supposed to model a real desktop. `xdotool windowclose` is kept only to clean up
+a window that could not be closed politely, and is never counted as a verified
+shutdown.
+
+If nothing can ask the window to close, the script says so and falls back to
+proving only that the process stayed alive. That is a weaker claim and it is
+reported as one.
 """
 
 from __future__ import annotations
@@ -146,21 +155,32 @@ def find_window_x11() -> tuple[str | None, str | None]:
 def close_window_x11(wid: str) -> str:
     """Ask the window to close the way a person would. Returns what worked.
 
-    `xdotool windowclose` sends WM_DELETE_WINDOW straight to the window, which
-    is the same event `PostMessage(WM_CLOSE)` delivers on Windows and the same
-    one that runs Qt's `closeEvent`.
+    Only `wmctrl -c` counts, and the reason matters. `xdotool windowclose` looks
+    like the obvious alternative and is not: it destroys the X window outright
+    instead of sending `WM_DELETE_WINDOW`, so Qt never runs `closeEvent` and
+    the process sits there with no window. That is not a slower close, it is a
+    different event entirely -- and CI proved it, holding the process alive for
+    the full 20 s after the window had already gone. So it is used only to
+    clean up a window we are about to abandon, and it is reported as what it is
+    rather than as a shutdown that was verified.
     """
-    if shutil.which("xdotool") is not None:
+    if shutil.which("wmctrl") is not None:
         proc = subprocess.run(
-            ["xdotool", "windowclose", wid], capture_output=True, timeout=20
+            ["wmctrl", "-i", "-c", wid], capture_output=True, timeout=20
         )
         if proc.returncode == 0:
-            return "xdotool windowclose (WM_DELETE_WINDOW -> closeEvent)"
-        print(f"xdotool windowclose failed: {proc.stderr.decode('utf-8', 'replace')[:200]}")
-    if shutil.which("wmctrl") is not None:
-        subprocess.run(["wmctrl", "-i", "-c", wid], timeout=20, check=False)
-        return "wmctrl -i -c (window manager close request)"
+            return "wmctrl -i -c (window manager close request -> closeEvent)"
+        print(f"wmctrl close failed: {proc.stderr.decode('utf-8', 'replace')[:200]}")
     return "none"
+
+
+def abandon_window_x11(wid: str) -> None:
+    """Destroy a window we could not close politely, so nothing is left mapped."""
+    if shutil.which("xdotool") is not None:
+        subprocess.run(
+            ["xdotool", "windowclose", wid], capture_output=True, timeout=20,
+            check=False,
+        )
 
 
 try:
@@ -225,13 +245,18 @@ try:
                         print(f"screenshot unavailable ({exc}); continuing")
                 else:
                     print("no screenshot tool (imagemagick) installed; skipping capture")
+                # Let startup finish before closing. A close request delivered
+                # while the GL context is still coming up is not a fair test of
+                # the close path.
+                time.sleep(3.0)
                 close_mechanism = close_window_x11(wid)
                 if close_mechanism == "none":
                     print(
-                        "neither xdotool nor wmctrl is available, so nothing can "
-                        "ask the window to close",
+                        "wmctrl is unavailable or failed, so nothing can ask the "
+                        "window to close through its window manager",
                         file=sys.stderr,
                     )
+                    abandon_window_x11(wid)
                 else:
                     print(f"asking the window to close via {close_mechanism}…", flush=True)
                 try:

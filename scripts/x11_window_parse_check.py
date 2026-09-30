@@ -19,6 +19,11 @@ Two of these cases are regressions for specific defects:
 * ``xwininfo -root -tree`` puts the window id on its own line and the title
   indented beneath it, so the id has to be carried down from the parent.
 
+A third pins the close path: ``xdotool`` being installed must not be mistaken
+for a way to close a window. ``xdotool windowclose`` destroys the X window, so
+Qt never runs ``closeEvent`` and the process survives with nothing on screen --
+a different event from the one being tested, not a slower version of it.
+
 Run:  python scripts/x11_window_parse_check.py
 """
 
@@ -132,14 +137,28 @@ def main() -> int:
 
     print("\n=== the close path refuses to claim success it cannot deliver ===")
     close = ns["close_window_x11"]
-    ns["shutil"] = shutil  # keep the real module in scope for close_window_x11
-    original_which = shutil.which
+    real_shutil = ns["shutil"]
+
+    class Only:
+        def __init__(self, names):
+            self.names = names
+
+        def which(self, name):
+            return f"/usr/bin/{name}" if name in self.names else None
+
     try:
-        shutil.which = lambda name: None
-        check("no xdotool and no wmctrl means no close mechanism",
+        ns["shutil"] = Only(set())
+        check("no tools at all means no close mechanism", close("0x1"), "none")
+
+        # The defect this pins: `xdotool windowclose` destroys the X window
+        # instead of asking Qt to close, so having it is not having a way to
+        # close. Reporting a verified shutdown here would be reporting an
+        # event that never happened.
+        ns["shutil"] = Only({"xdotool", "xwininfo"})
+        check("xdotool alone does not count as a close mechanism",
               close("0x1"), "none")
     finally:
-        shutil.which = original_which
+        ns["shutil"] = real_shutil
 
     print(f"\n{CHECKS - len(FAILURES)}/{CHECKS} passed")
     for f in FAILURES:

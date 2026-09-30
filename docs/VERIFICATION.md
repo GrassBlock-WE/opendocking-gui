@@ -211,7 +211,7 @@ macOS（Metal）、Linux（Vulkan）、AMD 独显、Intel 核显、Apple Silicon
 ## 3. 验证过程中发现并修复的 bug
 
 以下每一项都是**跑出来**的，不是读代码想出来的。
-共 76 条，按性质分组。
+共 77 条，按性质分组。
 
 ### 3.1 正确性
 
@@ -814,7 +814,7 @@ AutoDock 用**嵌套 BRANCH** 表达，而本项目的写入器把它写成了�
 这一条是看截图才发现的，任何断言都发现不了——"每个顶点都靠近 CA"
 和"画面是一根连续的带"是两回事。
 
-### 3.18 推送后的 CI 抓到的三个缺陷：一个从未通过的检查
+### 3.18 推送后的 CI 抓到的缺陷：一个从未通过的检查
 
 上面这一版推上去之后，CI 的 `Real launch, then close` 是红的。
 查日志发现**上一版也是红的**——这个检查从来没有通过过。
@@ -823,9 +823,15 @@ AutoDock 用**嵌套 BRANCH** 表达，而本项目的写入器把它写成了�
 
 | # | 现象 | 根因 | 修复 |
 |---|---|---|---|
-| 74 | `Real launch, then close` 在 CI 上必然超时失败（日志里 60 秒后 `exit code: -15`、`closed via: none`） | CI 用 `xvfb-run`，**只开显示、不起窗口管理器**。而 `wmctrl` 是向窗口管理器要 EWMH 的 `_NET_CLIENT_LIST`——没有 WM，它连窗口都列不出来，循环只能空转到超时 | 改用 `xdotool`：它走 `XQueryTree` 直接遍历 X 树，不需要 WM；`xdotool windowclose` 直接向窗口发 `WM_DELETE_WINDOW`，与 Windows 的 `PostMessage(WM_CLOSE)` 是同一类事件，同样落到 Qt 的 `closeEvent` |
+| 74 | `Real launch, then close` 在 CI 上必然超时失败（60 秒后 `exit code: -15`、`closed via: none`） | CI 用 `xvfb-run`，**只开显示、不起窗口管理器**。而 `wmctrl` 是向窗口管理器要 EWMH 的 `_NET_CLIENT_LIST`——没有 WM，它连窗口都列不出来，循环只能空转到超时 | **找**窗口改用 `xdotool search`：它走 `XQueryTree` 直接遍历 X 树，不需要 WM |
 | 75 | 即使有 WM，`wmctrl -l` 分支也永远匹配不上 | 输出是 `<id> <desktop> <host> <title>` 四个字段，标题里带空格。原代码用 `split(None, 4)` 后要求 `len(parts) == 5`——**四字段的行永远凑不出五个元素**，这条分支是死代码 | `split(None, 3)`，标题作为不切分余数留在 `parts[3]` |
 | 76 | 关窗机制不可用时，判定近乎空断言 | 判定写的是 `ok = rc is not None`，但那时 `odgui` 通常是被脚本自己的 `finally` 里的 `terminate()` 杀掉的——**那个退出码是脚本自己造的**，与 odgui 的健康无关 | 改为看 `exited_early`：找到窗口时进程还活着，才算 PARTIAL 通过 |
+| 77 | 换用 xdotool 后**仍然红**，但这次窗口第一次被找到了：0.6 秒找到 `2097159`，20 秒后进程仍在 | 我以为 `xdotool windowclose` 等价于 `PostMessage(WM_CLOSE)`。**不是**：它直接 `XDestroyWindow` 销毁 X 窗口，Qt 收不到关闭事件，`closeEvent` 根本没跑——窗口没了，进程还活着。这是一个**不同的事件**，不是更慢的关闭 | 关窗改回 `wmctrl -c`（经窗口管理器投递真正的关闭请求），CI 里装并启动 `openbox`；`xdotool windowclose` 降级为「放弃前清理窗口」，**不再计入已验证的关闭** |
+
+第 77 条值得单独说：**它是我照着「看起来等价」的直觉写的，而且第一次修的时候还把它写进了文档。**
+真正定案的是日志——窗口在 0.6 秒被找到、20.6 秒进程仍存活，
+这个组合只能是「窗口被销毁了」而不是「关闭很慢」。
+如果当时只是把超时从 20 秒加到 60 秒，看起来也许能"修好"，但验证的仍然是另一个事件。
 
 第 76 条是顺手发现的同类问题：只要退出码"有值"就算过，而它必定有值。
 断言写在那里是为了让检查不要失败，但一个恒真的断言不提供任何信息。
@@ -837,12 +843,15 @@ X11 那段逻辑在 Windows 上跑不了，但在 CI 上是 best-effort 的—�
 所以把解析部分单独拆出来验证：把三个工具的真实输出格式喂进去，
 断言该认出窗口 id、且**不认错近似标题**。
 
-`scripts/x11_window_parse_check.py`：**10 / 10**，不需要 X server，
-Windows 和 Linux 都能跑，已接入 workbench job。其中两项直接钉住 74 和 75。
+`scripts/x11_window_parse_check.py`：**11 / 11**，不需要 X server，
+Windows 和 Linux 都能跑，已接入 workbench job。其中三项分别钉住 74、75、77，
+最后一项断言**只装了 xdotool 不算作「有办法关窗」**。
 
-> **诚实说明**：xdotool 在真实 X server 上的行为，本地无法验证，
-> 只有 CI 的 runner 能证明。已验证的是解析逻辑与 Windows 路径
-> （本地 PASS，`1294x858`，955 种颜色，`WM_CLOSE` 后退出码 0）。
+> **诚实说明**：真实 X server 上的行为本地无法验证，只有 CI 的 runner 能证明。
+> 本地已验证的是解析逻辑（11/11）与 Windows 路径
+> （PASS，`1294x858`，955 种颜色，`WM_CLOSE` 后退出码 0）。
+> 这一条在 CI 上跑过两轮才收敛：第一轮证明了 xdotool **找得到**窗口，
+> 第二轮才暴露出它**关不掉**。
 
 ---
 
@@ -870,7 +879,7 @@ python scripts\workbench_interaction_check.py   # GUI 布局 + 交互 + 行为 +
 python scripts\viewport_framing_check.py        # 内容是否真的居中
 python scripts\structure_bond_check.py          # 键感知：残基分组、肽键、无跨残基键、RDKit 交叉验证，36 项
 python scripts\representation_geometry_check.py # 圆柱 / 双色键 / 条带几何，21 项
-python scripts\x11_window_parse_check.py         # 启动检查的 X11 窗口查找解析，10 项，不需要 X server
+python scripts\x11_window_parse_check.py         # 启动检查的 X11 窗口查找与关窗判定，11 项，不需要 X server
 python scripts\odgui_launch_check.py            # 真实启动 odgui 子进程并关窗
 python scripts\check_doc_encoding.py            # 8 个中文文档的 UTF-8 完整性
 python scripts\check_repo_docs.py               # 链接完整性 + 本机路径泄露

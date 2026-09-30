@@ -174,14 +174,21 @@ jobs:
           # that does not need a real window, instead of failing on the apt
           # line before any of them execute.
           #
-          # xdotool is here because the launch check needs it. xvfb-run starts
-          # a display with no window manager, and wmctrl asks the window
-          # manager for the client list, so with no WM it can neither find the
-          # window nor close it -- that step timed out for exactly this reason
-          # before. xdotool talks to X directly and needs no WM. x11-utils
-          # gives xwininfo, the last-resort "the window is there" probe.
+          # xdotool is here because the launch check needs it to *find* the
+          # window: xvfb-run starts a display with no window manager, and
+          # wmctrl asks the window manager for the client list, so with no WM
+          # it can find nothing. xdotool walks the X tree with XQueryTree and
+          # needs no WM. x11-utils gives xwininfo, the last-resort "the window
+          # is there" probe.
+          #
+          # openbox is here because closing the window the way a person does
+          # needs a window manager: wmctrl -c routes the close request through
+          # one, and xdotool windowclose is not a substitute -- it destroys the
+          # X window without Qt ever seeing a close event, which leaves the
+          # process running with nothing on screen. A real desktop has a WM;
+          # this runner did not, which is why the step kept failing.
           sudo apt-get install -y --no-install-recommends \
-            libxcb-cursor0 libxcb-xinerama0 wmctrl xdotool x11-utils || \
+            libxcb-cursor0 libxcb-xinerama0 wmctrl xdotool x11-utils openbox || \
             echo "::warning::Qt xcb extras unavailable; the windowed checks will be skipped"
 
       - name: Build and install the wheel with GUI extras
@@ -210,4 +217,11 @@ jobs:
         run: python scripts/x11_window_parse_check.py
 
       - name: Real launch, then close
-        run: xvfb-run -a -s "-screen 0 1280x1024x24" python scripts/odgui_launch_check.py
+        run: |
+          # A window manager is started by hand because xvfb-run does not start
+          # one, and the check closes the window the way a person does. If
+          # openbox is unavailable the subshell simply has no WM and the check
+          # reports that it could not exercise the close path, rather than
+          # failing on a missing package.
+          xvfb-run -a -s "-screen 0 1280x1024x24" sh -c \
+            'openbox >/dev/null 2>&1 & sleep 2; python scripts/odgui_launch_check.py'

@@ -36,10 +36,18 @@ The project is pre-1.0. The `0.x` line is where the interfaces still move.
   which starts a display with **no window manager**, and `wmctrl` asks the
   window manager for the client list over EWMH — with no WM it can neither find
   the window nor close it, so the loop ran out its 60 s deadline and the
-  process was killed. It now uses `xdotool`, which walks the X tree directly
-  and needs no WM, and whose `windowclose` sends `WM_DELETE_WINDOW` to the
-  window itself — the same event `PostMessage(WM_CLOSE)` delivers on Windows,
-  and the same one that runs Qt's `closeEvent`. `wmctrl` remains as a fallback.
+  process was killed. Finding the window now uses `xdotool search`, which
+  walks the X tree with `XQueryTree` and needs no window manager.
+- `xdotool windowclose` is not a way to close a window, and treating it as one
+  is worse than having no mechanism at all: it destroys the X window outright,
+  so Qt never runs `closeEvent` and the process keeps running with nothing on
+  screen. CI showed the window found at 0.6 s and the process still alive at
+  20.6 s, which is a destroyed window rather than a slow close. Closing goes
+  back through `wmctrl -c`, so the workbench job now starts a minimal window
+  manager (`openbox`) — a real desktop has one, and the check is supposed to
+  model a real desktop. `xdotool windowclose` is kept only to clean up a window
+  that could not be closed politely, and is never reported as a verified
+  shutdown.
 - The `wmctrl -l` branch was unreachable even where a window manager was
   present. That output has four fields (`<id> <desktop> <host> <title>`) and
   the title contains spaces, so it must be the unsplit remainder; the parser
@@ -53,9 +61,9 @@ The project is pre-1.0. The `0.x` line is where the interfaces still move.
 - `odgui_launch_check.py` is no longer Windows-only: it runs on X11 and
   reports which mechanism found and closed the window.
 - `scripts/x11_window_parse_check.py` (new) parses the launch check's window
-  lookup against each tool's real output format, on any platform and with no X
-  server, so a regression in that parsing cannot hide behind a best-effort
-  job. 10/10. Wired into the workbench CI job.
+  lookup against each tool's real output format, and checks that having
+  `xdotool` installed is not mistaken for having a way to close a window.
+  11/11, no X server needed, runs on either platform, wired into CI.
 - The workbench CI step was still labelled "(50 checks)" after the interaction
   check grew to 75.
 
