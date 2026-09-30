@@ -150,10 +150,22 @@ jobs:
       - name: Install system libraries
         run: |
           sudo apt-get update
+          # What the engine, the CLI and the headless GUI check need. These
+          # have to be present: if one goes missing the job is reporting a
+          # real environment problem.
           sudo apt-get install -y --no-install-recommends \
             xvfb libgl1-mesa-dri libglx-mesa0 libxkbcommon-x11-0 libegl1 \
             libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 \
             libxcb-render-util0 libxcb-shape0
+          # Qt 6.5 and later refuse to load the xcb platform plugin without
+          # libxcb-cursor0, and say so in the log. It lives in universe, which
+          # a runner image is not guaranteed to have enabled, so this group is
+          # best-effort: if it is unavailable the job still runs every step
+          # that does not need a real window, instead of failing on the apt
+          # line before any of them execute.
+          sudo apt-get install -y --no-install-recommends \
+            libxcb-cursor0 libxcb-xinerama0 || \
+            echo "::warning::Qt xcb extras unavailable; the windowed checks will be skipped"
 
       - name: Build and install the wheel with GUI extras
         run: |
