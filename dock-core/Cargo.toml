@@ -1,0 +1,37 @@
+[package]
+name = "dock-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Open Docking core engine: molecular types, kinematics, grid maps, Vina/Vinardo scoring, and parallel conformational search"
+
+[dependencies]
+nalgebra.workspace = true
+rayon.workspace = true
+rand.workspace = true
+rand_pcg.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+log.workspace = true
+env_logger.workspace = true
+
+wgpu = { workspace = true, optional = true }
+pollster = { workspace = true, optional = true }
+bytemuck = { workspace = true, optional = true, features = ["derive"] }
+
+[features]
+default = []
+# Cross-platform GPU compute backend (Vulkan / Metal / DirectX 12).
+# Kept opt-in: it substantially increases build time and requires an adapter.
+gpu = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]
+
+[dev-dependencies]
+approx = "0.5"
+
+[[bench]]
+name = "docking_bench"
+harness = false

@@ -1,0 +1,9 @@
+REMARK  Prepared by Open Docking (odock)
+REMARK  6 atoms, 0 rotatable bonds
+TORSDOF 0
+ATOM      1  C1  UNL     1      -0.855  -1.102   0.009  1.00  0.00     0.000 A 
+ATOM      2  C2  UNL     1      -1.382   0.189   0.009  1.00  0.00     0.000 A 
+ATOM      3  C3  UNL     1      -0.527   1.291  -0.001  1.00  0.00     0.000 A 
+ATOM      4  C4  UNL     1       0.855   1.102  -0.009  1.00  0.00     0.000 A 
+ATOM      5  C5  UNL     1       1.382  -0.189  -0.009  1.00  0.00     0.000 A 
+ATOM      6  C6  UNL     1       0.527  -1.291   0.001  1.00  0.00     0.000 A 

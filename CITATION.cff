@@ -1,0 +1,31 @@
+# Citation metadata for Open Docking.
+#
+# `contact` is intentionally absent: add one with a monitored address before
+# publishing so that citation requests have somewhere to go.
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "Open Docking"
+abstract: >-
+  A molecular docking engine written as a pure-safe Rust core with a Python
+  chemistry front end and an interactive 3-D workbench. The engine reproduces
+  the form of the AutoDock Vina empirical scoring function with analytic
+  first-order gradients, precalculated affinity maps on a four-slot grid, an
+  iterated local search with optional island-model LGA, and an optional
+  GPU batch-scoring path. Distributed under GPL-3.0-or-later.
+type: software
+authors:
+  - name: "GrassBlock-WE"
+    email: "3365450574@qq.com"
+repository-code: "https://github.com/GrassBlock-WE/opendocking-gui"
+url: "https://github.com/GrassBlock-WE/opendocking-gui"
+license: GPL-3.0-or-later
+version: 0.1.0
+date-released: "2026-09-30"
+keywords:
+  - molecular docking
+  - cheminformatics
+  - computational chemistry
+  - autodock
+  - vina
+  - drug discovery
+  - rust

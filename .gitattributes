@@ -1,0 +1,39 @@
+# Line endings.
+#
+# Everything is checked in as LF and checked out as LF, on every platform.
+# A few hand-edited files had drifted to CRLF on Windows, which makes diffs
+# noisy and breaks text tooling that assumes LF.
+* text=auto eol=lf
+
+# Windows executables genuinely need CRLF.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Structure and chemistry files are plain text, and are worth diffing.
+*.md   text diff=markdown
+*.py   text diff=python
+*.rs   text
+*.toml text
+*.yml  text
+*.yaml text
+*.ini  text
+*.cfg  text
+*.txt  text
+*.pdb  text
+*.pdbqt text
+*.sdf  text
+LICENSE text
+
+# Genuine binaries: never line-ending translated, never diffed.
+*.png   binary
+*.ico   binary
+*.pdf   binary
+*.whl   binary
+*.pyd   binary
+*.dll   binary
+*.so    binary
+*.dylib binary
+*.lib   binary
+*.exe   binary
+*.rlib  binary

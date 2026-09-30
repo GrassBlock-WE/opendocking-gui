@@ -1,0 +1,106 @@
+name: Bug report
+description: Something behaved differently from what you expected
+title: "[bug] "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before filing, please read `docs/LIMITATIONS.md`. In particular:
+        the engine has **never been validated by redocking**, and its absolute
+        kcal/mol values have **not** been cross-checked against AutoDock Vina.
+        A "wrong score" or "wrong pose" report is usually a limitation, not a
+        bug — check the limitations document first and say so in the issue if
+        that is what you found.
+
+  - type: checkboxes
+    id: search
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched the existing issues for this.
+        - label: I read `docs/LIMITATIONS.md`.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you observed, including the full traceback if there was one.
+      placeholder: |
+        Traceback (most recent call last):
+          ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected instead
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: How to reproduce
+      description: The exact command line, and the input files.
+      render: shell
+      placeholder: |
+        odockmcode dock -r rec.pdbqt -l lig.pdbqt --center_x 0 --center_y 0 --center_z 0 --size_x 20 --size_y 20 --size_z 20 -e 8 -o poses.pdbqt
+    validations:
+      required: true
+
+  - type: textarea
+    id: inputs
+    attributes:
+      label: Input files
+      description: |
+        A docking result is only meaningful with the exact receptor, ligand and
+        search box. Attach the `.pdbqt` / `.sdf` files if you can.
+      render: text
+
+  - type: dropdown
+    id: entrypoint
+    attributes:
+      label: Which entry point
+      options:
+        - odockmcode (command line)
+        - odgui (workbench)
+        - Python API
+        - Rust crate
+        - build or packaging
+        - documentation
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Paste the output of the commands below if you can.
+      render: shell
+      placeholder: |
+        $ odockmcode info
+        $ rustc --version
+        $ python --version
+        $ cargo clippy --version
+    validations:
+      required: true
+
+  - type: input
+    id: gpu
+    attributes:
+      label: GPU
+      description: Leave blank if you are not using the GPU backend.
+      placeholder: NVIDIA GeForce RTX 3050 Laptop GPU
+
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety
+      options:
+        - label: >
+            This is a scientific or usability problem, not a security
+            vulnerability. (For a security report, follow `SECURITY.md` — do
+            not file it here.)

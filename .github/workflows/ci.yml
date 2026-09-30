@@ -1,0 +1,179 @@
+# The gate a pull request has to pass. Every command below was run locally on
+# Windows 11 / rustc 1.87 / Python 3.10 before it was written here; see
+# docs/VERIFICATION.md. The GUI job is best-effort on purpose: no verified
+# OpenGL 3.3 stack exists in a GitHub-hosted runner, so it is allowed to fail
+# without blocking a merge. It is still worth running -- it catches import and
+# layout regressions that nothing else would.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # Keep the engine byte-reproducible across runners.
+  RUSTFLAGS: "-C target-cpu=x86-64"
+
+jobs:
+  core:
+    name: engine / bindings (${{ matrix.features }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - features: default
+            cargo: ""
+          - features: gpu
+            cargo: "--features gpu"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('dock-py/pyproject.toml') }}
+
+      - name: Install system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libxkbcommon-x11-0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 \
+            libxcb-randr0 libxcb-render-util0 libxcb-shape0 libegl1
+
+      - name: Unit tests
+        run: cargo test --workspace --locked ${{ matrix.cargo }}
+
+      # Zero tolerance, in both feature configurations. The matrix already
+      # covers that; a separate job would just duplicate it.
+      - name: Clippy (deny warnings)
+        run: cargo clippy --workspace --all-targets --locked ${{ matrix.cargo }} -- -D warnings
+
+      - name: Format check
+        run: cargo fmt --all --check
+
+      - name: Build and install the wheel
+        run: |
+          python -m pip install --upgrade pip maturin
+          python -m maturin build --release --locked -m dock-py/Cargo.toml --out dist ${{ matrix.cargo }}
+          python -m pip install --force-reinstall dist/odockmcode-*.whl
+
+      # `--pyargs` runs the *installed* package, which is the point: it is the
+      # artifact a user gets. Editing Python sources without rebuilding the
+      # wheel tests the old code -- that mistake was made once already.
+      - name: Python tests against the installed wheel
+        run: |
+          python -m pip install pytest
+          python -m pytest --pyargs odockmcode.tests -q
+
+      - name: Entry points resolve
+        run: |
+          odockmcode --version
+          odockmcode info
+          odgui --help
+          odgui --check
+
+      # A regression that would silently put the `odock` command name back.
+      - name: The reserved `odock` name must stay free
+        run: |
+          if command -v odock >/dev/null 2>&1; then
+            echo "::error::an 'odock' command exists; that name belongs to another project"
+            exit 1
+          fi
+          if python -c "import odock" 2>/dev/null; then
+            echo "::error::an importable 'odock' package exists"
+            exit 1
+          fi
+
+  docs:
+    name: documentation hygiene
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # The Chinese documents are UTF-8. PowerShell 5.1 reads them as GBK and
+      # silently destroys them, so their integrity is checked on every push.
+      - name: Document encoding
+        run: python scripts/check_doc_encoding.py
+
+      - name: Links and local-path leakage
+        run: python scripts/check_repo_docs.py
+
+      - name: Citation metadata parses
+        run: |
+          python -m pip install pyyaml cffconvert
+          cffconvert --validate
+
+  gui:
+    name: workbench (best effort)
+    runs-on: ubuntu-latest
+    # See the header: there is no verified OpenGL 3.3 stack here yet. Remove
+    # this line once one exists and the job goes green.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            xvfb libgl1-mesa-dri libglx-mesa0 libxkbcommon-x11 libegl1 \
+            libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 \
+            libxcb-render-util0 libxcb-shape0
+
+      - name: Build and install the wheel with GUI extras
+        run: |
+          python -m pip install --upgrade pip maturin
+          python -m maturin build --release --locked -m dock-py/Cargo.toml --out dist
+          python -m pip install --force-reinstall dist/odockmcode-*.whl
+          python -m pip install "PyQt6>=6.4" "moderngl>=5.8"
+
+      - name: GUI stack check (no display needed)
+        run: odgui --check
+
+      - name: OpenGL context probe
+        run: xvfb-run -a -s "-screen 0 1280x1024x24" python scripts/qt_gl_probe.py
+
+      - name: Layout, interaction and behaviour (50 checks)
+        env:
+          LIBGL_ALWAYS_SOFTWARE: "1"
+          QT_QPA_PLATFORM: xcb
+        run: xvfb-run -a -s "-screen 0 1280x1024x24" python scripts/workbench_interaction_check.py
+
+      - name: Real launch, then close
+        run: xvfb-run -a -s "-screen 0 1280x1024x24" python scripts/odgui_launch_check.py

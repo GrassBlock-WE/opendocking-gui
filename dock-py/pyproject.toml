@@ -1,0 +1,59 @@
+[build-system]
+requires = ["maturin>=1.4,<2.0"]
+build-backend = "maturin"
+
+[project]
+# The distribution name, the import name and the console scripts are all
+# distinct from `odock`, which is reserved by another project on this machine.
+# `odgui` does not depend on the `odock` name existing at all.
+name = "odockmcode"
+version = "0.1.0"
+description = "Open Docking: a modern, open-source molecular docking engine"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "GPL-3.0-or-later" }
+authors = [{ name = "Open Docking Contributors" }]
+keywords = ["docking", "molecular-dynamics", "cheminformatics", "autodock", "vina"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+    "Topic :: Scientific/Engineering :: Chemistry",
+]
+dependencies = [
+    "numpy>=1.22",
+    "rdkit>=2022.9",
+]
+
+[project.optional-dependencies]
+gui = ["PyQt6>=6.4", "moderngl>=5.8", "numpy-stl>=2.0"]
+dev = ["pytest>=7.0"]
+
+[project.scripts]
+# `odgui`     the 3-D workbench; bare `odgui` opens it
+# `odockmcode` the full command-line interface (prep / grid / dock / info)
+#
+# There is deliberately no `odock` entry: that name belongs to another project
+# and must stay free. Adding it back would silently take the name over again
+# on the next install.
+odgui = "odockmcode.workbench.launcher:main"
+odockmcode = "odockmcode.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/GrassBlock-WE/opendocking-gui"
+Repository = "https://github.com/GrassBlock-WE/opendocking-gui"
+Issues = "https://github.com/GrassBlock-WE/opendocking-gui/issues"
+
+[tool.maturin]
+# The Python package lives beside the Rust extension rather than inside it,
+# which is what maturin's `python-source` expects.
+python-source = "python"
+module-name = "odockmcode._dockpy"
+features = ["pyo3/extension-module"]
+strip = true
+# Byte-code caches are build output, not source. Shipping them bloats the wheel
+# and risks a stale .pyc shadowing an edited module.
+exclude = ["**/__pycache__/**", "**/*.pyc", "**/.pytest_cache/**"]

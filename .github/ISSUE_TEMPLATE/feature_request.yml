@@ -1,0 +1,76 @@
+name: Feature request
+description: Suggest a capability or an improvement
+title: "[feature] "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Read `CONTRIBUTING.md` before filing. It lists what would move this
+        project most, and the top three items are all validation work rather
+        than new code:
+
+        1. a redocking benchmark
+        2. cross-checking against AutoDock Vina
+        3. macOS and Linux CI
+
+        If that is what you are proposing, say which of those you mean — it
+        will be taken more seriously than another scoring-function knob.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: >
+        What are you trying to do that you cannot do today? Describe the task,
+        not the proposed API.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you considered
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Which area
+      options:
+        - scoring function
+        - search / optimisation
+        - grid maps
+        - CLI
+        - workbench / GUI
+        - Python API
+        - preparation / RDKit
+        - GPU backend
+        - packaging and distribution
+        - documentation
+        - validation / benchmark
+    validations:
+      required: true
+
+  - type: textarea
+    id: compatibility
+    attributes:
+      label: Backward compatibility
+      description: >
+        Would this break existing scripts? The engine is pre-1.0 and interfaces
+        still move, but say what you expect to change.
+
+  - type: checkboxes
+    id: contribution
+    attributes:
+      label: Contribution
+      options:
+        - label: I would be willing to implement this, with guidance.
+        - label: I am not asking for this to be implemented right now.

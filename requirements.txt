@@ -1,0 +1,54 @@
+# Open Docking — Python dependencies
+#
+#   python -m pip install -r requirements.txt
+#
+# The engine is Rust. This file covers only the Python side: the bindings, the
+# RDKit-based chemistry front end, the build toolchain, and the optional 3-D
+# workbench. There is no pre-built wheel in this repository — you build one.
+#
+# Verified on Windows 11 x86_64, Python 3.10.6, rustc 1.87.0. The exact
+# versions in the "verified with" comments are what the claims in
+# docs/VERIFICATION.md were produced with. Newer versions are very likely fine;
+# if something breaks, that comment is the first place to look.
+#
+# ---------------------------------------------------------------- runtime --
+# Required to import odockmcode at all. The engine cannot run without these.
+numpy>=1.22
+rdkit>=2022.9
+
+# ----------------------------------------------------------------- build ---
+# maturin drives the Rust <-> Python build. You need this to produce the
+# extension module; a source checkout is not importable without it.
+#
+#   python -m maturin build --release -m dock-py/Cargo.toml --out dist
+#   python -m pip install dist/odockmcode-*.whl
+maturin>=1.4,<2.0
+
+# ------------------------------------------------------- workbench (GUI) ---
+# Only needed for `odgui` and the 3-D viewport. The seven CLI subcommands run
+# without any of these: they need no graphics stack at all.
+#
+#   odgui --check      # reports whether the GUI stack is usable
+PyQt6>=6.4
+moderngl>=5.8
+numpy-stl>=2.0
+
+# ------------------------------------------------------------------ dev ---
+pytest>=7.0
+
+# ----------------------------------------------------------------------
+# Verified with (Windows 11, Python 3.10.6, rustc 1.87.0):
+#   numpy 2.2.6 | rdkit 2026.03.1 | PyQt6 6.11.0 | moderngl 5.12.0
+#   numpy-stl 4.0.1 | maturin 1.15.0 | pytest 9.1.1
+#
+# Not part of the project's declared dependencies, but pulled in by the GUI
+# extras above and worth pinning if you want a reproducible environment:
+#   PyQt6-Qt6 | PyQt6-sip | glcontext
+#
+# GPU support is a Rust feature, not a Python package: build the wheel with
+#   python -m maturin build --release -m dock-py/Cargo.toml --out dist-gpu --features gpu
+# and check `odockmcode info` afterwards.
+#
+# On Linux, the GUI also needs the system libraries Qt and wgpu load at
+# runtime (libgl1, libegl1, libxkbcommon-x11-0, libxcb-*). See
+# .github/workflows/ci.yml for the exact list this project installs.
