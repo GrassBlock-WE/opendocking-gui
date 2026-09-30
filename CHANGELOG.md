@@ -13,6 +13,37 @@ The project is pre-1.0. The `0.x` line is where the interfaces still move.
 
 ### Added
 
+- **The site is drawn, so it can be checked.** The workbench renders the
+  selected site's own grid points as a translucent cloud, and the `site volume`
+  toggle gates it. A table row saying "groove at (12.8, 7.2, 0.1), lined by
+  ARG 17A, ASN 14A, THR 2A" is a claim; a magenta volume sitting between those
+  atoms is the reader's own check on it, and no amount of table columns
+  provides one. The cloud is drawn with depth testing off — a site is by
+  definition inside protein, so a depth-tested one is hidden by the very atoms
+  that make it a site, and in space-filling about half of it disappeared.
+  `pockets_check.py` asserts the cloud and the table describe the same
+  geometry: one point per voxel, the same extent, the same centre, and every
+  point within reach of a lining residue.
+- **`odcli sites` says what a null result means.** "No sealed cavity" is a
+  statement about the probe, not about the protein, and the two are easy to
+  confuse. T4 lysozyme L99A has a cavity *deliberately engineered* into it and
+  this search reports **zero** sealed cavities there, because a 1.4 Å probe
+  inflates every atom enough to fill a 100 Å³ hole. When nothing sealed is
+  found, the command now reports what a smaller probe would find
+  (`1.4 A -> 0, 1.1 A -> 0, 0.9 A -> 1, …`) and says plainly that a smaller
+  probe also invents spurious pockets, which is why it is not the default. An
+  empty result you cannot act on is just a sentence.
+- **`scripts/pocket_benchmark.py`**: the search run over seven real structures
+  from RCSB — crambin, T4 lysozyme L99A, trypsin, streptavidin, myoglobin,
+  haemoglobin and a metalloproteinase — printing what came out, including the
+  unflattering parts. Deliberately **not** a CI gate: it needs a network, and
+  there is no ground truth here that a pass/fail could be honestly measured
+  against. `pockets_check.py` is the gate and needs none.
+- **The search no longer freezes the window.** It runs on a worker thread.
+  Measured across the benchmark set: 0.07 s for crambin's 382 atoms, 2.0 s for
+  streptavidin, **11.0 s for haemoglobin's 4779** — and that last one ran
+  inline, so loading a large receptor froze the window for eleven seconds with
+  the status text set and the event loop unable to paint it.
 - **The search box stops being a guess.** Loading a receptor used to centre the
   box on the receptor's centroid — the arithmetic mean of every atom, which for
   a globular protein is inside the dense core. The search region was therefore
@@ -23,14 +54,13 @@ The project is pre-1.0. The `0.x` line is where the interfaces still move.
   `opendocking.workbench.pockets` finds candidate sites on a grid in the
   LIGSITE family — protein-solvent-protein events, plus a flood fill from the
   grid boundary to tell a sealed cavity from an open groove — with no Qt and
-  no display. Each site carries its bounding geometry, a burial score, and the
-  residues lining it, so "there is a groove near (12, 7, 0)" becomes
-  "ARG 17A, ASN 14A, THR 2A, GLU 23A".
+  no display. Each site carries its bounding geometry, a burial score, its own
+  grid points, and the residues lining it.
   - The workbench lists the sites, selects the first, places the box on it and
-    flies the camera there. Selecting any other row moves both, through the
-    spin boxes, so the numbers on screen and the numbers the engine gets
-    cannot disagree. A receptor with no site says so and leaves the box alone
-    rather than implying one was found.
+    flies the camera there. Selecting any other row moves the box, the three
+    spins and the camera together, so the numbers on screen and the numbers
+    the engine gets cannot disagree. A receptor with no site says so and
+    leaves the box alone rather than implying one was found.
   - `odcli sites -r RECEPTOR` prints the list, with lining residues and both
     the site size and the box built from it. `--json` for machines.
   - `odcli dock` and `odcli rec-grid` accept `--auto-box N` to take the Nth
@@ -42,9 +72,6 @@ The project is pre-1.0. The `0.x` line is where the interfaces still move.
     automatic box is widened to the engine's own floor (`2 x radius + 1 A`) and
     the widening is reported. A box you set yourself is left alone and gets the
     engine's exact message.
-  - `scripts/pockets_check.py` verifies the geometry and every threshold
-    headlessly (67/67), and `scripts/pockets_screenshot.py` produces the two
-    screenshots.
 
 - **Pose/receptor interaction analysis.** The workbench can now say what the
   pose is doing: a residue-level table of the interface, dashed lines between
@@ -227,6 +254,17 @@ The project is pre-1.0. The `0.x` line is where the interfaces still move.
   no window manager tool is installed rather than claiming a clean shutdown it
   never tested.
 
+### Fixed
+
+- **Crystal waters and buffer additives are no longer reported as the residues
+  lining a pocket.** The lining list is meant to answer "what is the wall of
+  this site", and a water is a lattice artefact rather than a wall: across
+  seven structures, streptavidin had more waters than residues in its top
+  site's lining. Cofactors are a different case and are deliberately kept —
+  "this pocket is lined by the haem" is real chemistry and worth knowing.
+- **Clearing the site selection no longer leaves the previous site's volume
+  cloud on screen**, sitting inside whatever the new selection put there.
+
 ### Changed
 
 - The `dock-core` test fixture for the GPU CPU-fallback path replicated butane
@@ -257,6 +295,18 @@ The project is pre-1.0. The `0.x` line is where the interfaces still move.
   merge a protein's entire outer surface into lumps of 1700–3600 Å³, which then
   outrank every real groove. It is a parameter, not a derived quantity, and
   nothing here justifies the particular number.
+- **A small sealed cavity will not be found at the default probe.** T4 lysozyme
+  L99A has one built in on purpose, and this search reports zero sealed
+  cavities in it: the cavity is about 100 Å³ and a 1.4 Å probe inflates every
+  atom enough to fill it. Lowering the default would be worse — a 0.5 Å probe
+  closes surface grooves into dozens of spurious pockets — so the default
+  stands and `odcli sites` reports what a smaller probe would find instead of
+  leaving a null result to sit there.
+- **The pocket search gets slower quickly with the size of the protein.** The
+  grid grows with the cube of the extent and the flood fill iterates to a fixed
+  point: 0.16 s for crambin's 327 atoms, 1.9 s for a 1436-atom protein, and
+  **11.0 s for haemoglobin's 4779**. It runs on a worker thread so the window
+  stays usable, but a very large receptor will still take a while.
 - The docked-pose writer lists the atoms of a `BRANCH` as a chain, as the
   PDBQT format requires, but a forked group — a carboxyl carbon with two
   oxygens — is not a chain. Such groups need nested `BRANCH` records. Until

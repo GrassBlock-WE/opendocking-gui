@@ -432,6 +432,7 @@ def _cmd_sites(args: argparse.Namespace) -> int:
         print(f"no enclosed site found in {args.receptor.name}")
         return 0
     print(f"{len(found)} candidate site(s) in {args.receptor.name}\n")
+    sealed = [p for p in found if p.kind == "cavity"]
     for i, p in enumerate(found):
         lining = ", ".join(f"{r} ({n})" for r, n in p.lining[:8]) or "-"
         centre, size = p.box_center_and_size(padding)
@@ -443,6 +444,31 @@ def _cmd_sites(args: argparse.Namespace) -> int:
               f"({centre[0]:7.2f}, {centre[1]:7.2f}, {centre[2]:7.2f})  "
               f"(+{padding:g} A padding each side)")
         print(f"   lined by {lining}\n")
+
+    # "No sealed cavity" is not a statement about the protein, it is a
+    # statement about the probe. T4 lysozyme L99A has a cavity built into it on
+    # purpose and reports zero at 1.4 A, because a 1.4 A probe inflates every
+    # atom enough to fill a 100 A^3 hole. Saying so here turns a null result
+    # into something the user can act on instead of a dead end.
+    if not sealed:
+        from .workbench import MoleculeView
+
+        view = MoleculeView.from_pdbqt(
+            args.receptor, args.receptor.name, (0.6, 0.7, 0.9), 0.30, role="receptor"
+        )
+        sweep = P.cavity_sensitivity(view.coords, view.elements)
+        got = ", ".join(f"{p:g} A -> {n}" for p, n in sweep)
+        print(f"No sealed cavity at the default {P.DEFAULT_PROBE:g} A probe. "
+              f"Against a smaller probe: {got}")
+        if any(n for _, n in sweep):
+            print("A smaller probe finds them, and also turns surface grooves")
+            print("into spurious pockets, so it is not the default. Run again")
+            print("with --probe if you want to look at the smaller-radius answer.")
+        else:
+            print("No probe in that range finds one either, so this structure")
+            print("most likely has no enclosed space at all -- only grooves.")
+        print()
+
     print("A site is enclosed space, not a binding site. Nothing here knows which")
     print("one your ligand wants; --auto-box N takes the Nth from this list.")
     return 0

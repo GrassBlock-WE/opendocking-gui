@@ -91,8 +91,30 @@ if win.pocket_table.rowCount() > 1:
         app.processEvents()
     print(f"\nafter selecting row 1: camera dist {vp.camera.distance:.1f}, "
           f"centre {np.round(vp.camera.center, 2)}")
+    print(f"site cloud: {len(vp.pocket_points)} points, "
+          f"radius {vp.pocket_point_radius}, opacity {vp.pocket_opacity}, "
+          f"shown={vp.show_pocket}")
     win.grab().save(str(OUT / "shot_pockets_site.png"))
     print(f"wrote {OUT / 'shot_pockets_site.png'}")
+
+    # The same picture with the cloud switched off. The question the cloud has
+    # to answer is "does this volume sit in a crevice, between those atoms",
+    # and a screenshot that always includes it cannot answer that -- there is
+    # nothing to compare it against.
+    win.cb_pocket_volume.setChecked(False)
+    for _ in range(4):
+        app.processEvents()
+        QtCore.QThread.msleep(80)
+        app.processEvents()
+    print(f"cloud hidden: shown={vp.show_pocket}, "
+          f"points still held {len(vp.pocket_points)}")
+    win.grab().save(str(OUT / "shot_pockets_nocloud.png"))
+    print(f"wrote {OUT / 'shot_pockets_nocloud.png'}")
+    win.cb_pocket_volume.setChecked(True)
+    for _ in range(3):
+        app.processEvents()
+        QtCore.QThread.msleep(60)
+        app.processEvents()
 
 win.close()
 app.processEvents()

@@ -105,6 +105,26 @@ COLOR_LIGAND = (0.35, 0.75, 0.95)
 COLOR_BEST_POSE = (0.40, 0.90, 0.45)
 COLOR_BOX = (0.95, 0.75, 0.20)
 
+#: The selected pocket's own grid points, drawn as a translucent cloud. Chosen
+#: to be unmistakable against both the grey protein and the yellow box: a warm
+#: magenta reads as neither, and the cloud is usually *inside* the box, so a
+#: colour close to the box's would vanish into it.
+COLOR_POCKET = (0.85, 0.35, 0.75)
+
+#: Residue names that are not a residue: crystal water, heavy water, the
+#: placeholders the writers emit for ligands, and the handful of cryoprotectant
+#: and buffer additives that turn up in crystal structures often enough to
+#: matter. Excluded from residue labelling, and so from pocket lining and
+#: contact attribution. See `MoleculeView.residue_labels`.
+NON_RESIDUE_LABELS = frozenset({
+    "HOH", "DOD", "WAT", "H2O",  # water, heavy water, some writers' spelling
+    "UNL", "REC", "UNK", "LIG",  # this project's own placeholders
+    "GOL", "EDO", "PEG", "PG4", "PGE", "1PE",  # ethylene glycol and PEG fragments
+    "SO4", "PO4", "CL", "NA", "K", "MG", "CA", "ZN", "MN", "FE",
+    "ACT", "ACY", "DMS", "TRS", "FMT", "IPA", "BME", "CIT", "NO3",
+    "MES", "EPE", "TLA", "FLC", "GOL", "MRD",
+})
+
 #: Interaction lines, by the class `contacts.find_contacts` assigns.
 #:
 #: The colours are chosen against the two things these lines are drawn over: a
@@ -377,14 +397,23 @@ class MoleculeView:
         ``UNL`` and ``REC`` are the placeholders the writers use for "this is
         not a named residue", and they get ``""`` -- naming a ligand
         ``"UNL 1"`` in one panel and nothing in another is worse than a blank.
+
+        Crystal waters and the other things a structure file carries that are
+        not a residue get ``""`` as well. Measured across six proteins, a
+        pocket listing ``lined by HOH 180A, HEM 155A, ASN 12A`` is answering a
+        different question than the one asked: a water is a lattice artefact
+        and a cofactor is a ligand someone put there on purpose, and neither is
+        a wall of the protein. Worse, on streptavidin waters outnumbered real
+        residues in the lining list outright, so the useful part of the answer
+        was buried under its own noise.
         """
         structure = self.structure
         atoms = getattr(structure, "atoms", None) if structure is not None else None
         out: list[str] = []
         for i in range(len(self.coords)):
             rec = atoms[i] if atoms is not None and i < len(atoms) else None
-            resname = (getattr(rec, "resname", "") or "").strip() if rec else ""
-            if not resname or resname in ("UNL", "REC"):
+            resname = (getattr(rec, "resname", "") or "").strip().upper() if rec else ""
+            if not resname or resname in NON_RESIDUE_LABELS:
                 out.append("")
                 continue
             chain = (getattr(rec, "chain", "") or "").strip() if rec else ""

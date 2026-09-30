@@ -405,6 +405,14 @@ class Viewport(QOpenGLWidget):
         self.box_center = np.zeros(3, np.float32)
         self.box_size = np.asarray([22.0, 22.0, 22.0], np.float32)
         self.show_box = True
+        #: Grid points of the selected pocket, drawn as a cloud so the site's
+        #: claim can be seen rather than only read.
+        self.pocket_points = np.zeros((0, 3), np.float32)
+        self.show_pocket = True
+        self.pocket_point_radius = 0.42
+        #: Low on purpose. The cloud sits inside protein, so an opaque one hides
+        #: the atoms whose proximity is the reason the site was reported.
+        self.pocket_opacity = 0.34
         #: Pose/receptor interactions, as returned by `contacts.find_contacts`.
         #: Empty means "not computed", which the status bar says out loud
         #: rather than leaving an empty list to be read as "no interactions".
@@ -489,6 +497,8 @@ class Viewport(QOpenGLWidget):
             if not mol.visible or len(mol.coords) == 0:
                 continue
             self._draw_molecule(mol, mvp)
+        if self.show_pocket and len(self.pocket_points):
+            self._draw_pocket(mvp)
         if self.show_box:
             self._draw_box(mvp)
         if self.show_contacts and self.contacts:
@@ -628,6 +638,50 @@ class Viewport(QOpenGLWidget):
             data, np.tile(np.asarray(COLOR_BOX, np.float32), (len(data), 1)), mvp, 0.9
         )
 
+    def _draw_pocket(self, mvp) -> None:  # pragma: no cover
+        """The selected site's own grid points, as a translucent cloud.
+
+        Drawn after the box and before the contacts, and deliberately small and
+        translucent: it is a claim about a place, and it has to be legible
+        *through* the protein rather than painted over it. A solid blob would
+        hide the very atoms whose proximity is the reason the site exists.
+
+        `sphere_geometry` is the function, not the module -- the same alias
+        `_draw_molecule` uses. Writing `sphere_geometry.spheres(...)` raises an
+        AttributeError *inside* `paintGL`, and an exception in a paint event
+        does not propagate out of Qt: PyQt6 aborts the process with
+        0xC0000409 and no traceback. That is what a first attempt at this did,
+        and it looks exactly like a driver crash.
+
+        Depth testing is off for this one draw. A site is by definition inside
+        protein, so a depth-tested cloud is hidden by the very atoms that make
+        it a site: in space-filling, which is the default, the screenshot
+        showed about half the volume. Drawing it through the protein turns the
+        cloud into an x-ray overlay, and "is this volume surrounded by atoms?"
+        is the question the picture exists to answer -- which the occluded half
+        could not. Depth is restored immediately after, so the box and the
+        contacts still draw in the right order relative to everything else.
+        """
+        import moderngl
+
+        from .geometry import spheres as sphere_geometry
+
+        pts = np.asarray(self.pocket_points, np.float32).reshape(-1, 3)
+        if len(pts) == 0:
+            return
+        from . import COLOR_POCKET
+
+        data = sphere_geometry(
+            pts,
+            float(self.pocket_point_radius),
+            np.tile(np.asarray(COLOR_POCKET, np.float32), (len(pts), 1)),
+        )
+        self._ctx.disable(moderngl.DEPTH_TEST)
+        try:
+            draw_mesh(self._ctx, self._sphere_prog, data, mvp, self.pocket_opacity)
+        finally:
+            self._ctx.enable(moderngl.DEPTH_TEST)
+
     # -- Interaction -------------------------------------------------------
 
     def mousePressEvent(self, event) -> None:  # pragma: no cover - GUI
@@ -732,6 +786,46 @@ class Viewport(QOpenGLWidget):
         return True
 
 
+class PocketWorker(QtCore.QObject):
+    """Runs a pocket search off the GUI thread.
+
+    The search is pure numpy, but pure numpy is still work: measured on this
+    machine it takes 0.07 s for crambin's 382 atoms, 2.0 s for streptavidin and
+    **12.0 s for haemoglobin's 4779**. Run inline, that last one froze the
+    window for twelve seconds on load, with the status text set and the event
+    loop unable to run and paint it -- so the app looked hung rather than busy.
+
+    That is the same mistake `DockingWorker` was written to avoid, and the
+    lesson had already been paid for once in this file. It is a heuristic
+    search over a grid that grows with the cube of the protein's extent, so
+    there is no size below which the freeze stops mattering.
+    """
+
+    finished = QtCore.pyqtSignal(object, float)
+    failed = QtCore.pyqtSignal(str)
+
+    def __init__(self, coords, elements, residues, probe=None):
+        super().__init__()
+        self.coords = coords
+        self.elements = elements
+        self.residues = residues
+        self.probe = probe
+
+    @QtCore.pyqtSlot()
+    def run(self) -> None:  # pragma: no cover - exercised interactively
+        try:
+            from . import pockets as P
+
+            started = time.perf_counter()
+            kwargs = {"probe": self.probe} if self.probe else {}
+            found = P.find_pockets(
+                self.coords, self.elements, residues=self.residues, **kwargs
+            )
+            self.finished.emit(found, (time.perf_counter() - started) * 1000.0)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
 class DockingWorker(QtCore.QObject):
     """Runs a docking job off the GUI thread.
 
@@ -796,6 +890,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._pose_view: MoleculeView | None = None
         self._pose_models: list[tuple[str, float]] = []
         self._pocket_models: list = []
+        self._pocket_thread: QtCore.QThread | None = None
+        self._pocket_worker: PocketWorker | None = None
         self._maps = None
         self._worker = None
         self._thread = None
@@ -889,6 +985,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.pocket_table.setMinimumHeight(120)
         self.pocket_table.itemSelectionChanged.connect(self._on_pocket_selected)
         form.addRow(self.pocket_table)
+
+        self.cb_pocket_volume = QtWidgets.QCheckBox("site volume")
+        self.cb_pocket_volume.setChecked(True)
+        self.cb_pocket_volume.setToolTip(
+            "Draw the selected site's own grid points as a translucent cloud, "
+            "so the table's claim can be checked against the protein"
+        )
+        self.cb_pocket_volume.toggled.connect(self._on_pocket_visibility)
+        form.addRow(self.cb_pocket_volume)
 
         # The centre must accept negative coordinates. They are ordinary, not
         # exotic: a receptor whose coordinates run from -40 to +10 has a
@@ -1088,7 +1193,14 @@ class MainWindow(QtWidgets.QMainWindow):
                 # suggests a binding site, so the box now goes on the first
                 # pocket the search offers -- visibly, with the row selected,
                 # so the user can see where it came from and choose another.
-                found = self.find_pockets()
+                # Synchronous on purpose. Loading a receptor is the one moment
+                # where the window may block: the alternative is a box sitting
+                # at the old position with a search running behind it, and the
+                # user starts a docking run against a box nobody chose. The
+                # button and every repeat search go through the worker instead,
+                # so the twelve-second haemoglobin case cannot freeze a session
+                # the user is already using.
+                found = self.find_pockets_now()
                 if found:
                     self.pocket_table.selectRow(0)
                 else:
@@ -1258,41 +1370,99 @@ class MainWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage("  |  ".join(parts))
 
     def find_pockets(self) -> list:  # pragma: no cover - GUI
-        """Search the receptor for candidate sites and list them.
+        """Search the receptor for candidate sites, off the GUI thread.
 
-        Runs on load and on demand. It is not a docking job, so it does not
-        need a worker thread: the grid is cubic in the receptor's extent and a
-        382-atom crambin takes 0.07 s, which is fast enough that a thread would
-        cost more in ceremony than it saves. A very large receptor is slower
-        still, so the elapsed time goes in the status bar rather than being
-        hidden.
+        Returns the previous result, or an empty list, and fills in the table
+        when the answer arrives. Callers that need the sites *now* -- which
+        only means the load path selecting the first row -- use
+        `find_pockets_now` instead.
+
+        Nothing about the answer changes by being computed on a worker thread;
+        what changes is that a twelve-second search no longer takes the window
+        with it.
         """
-        from . import pockets as P
-
         receptor = next((m for m in self.viewport.molecules if m.role == "receptor"), None)
         if receptor is None:
             self._fill_pockets([], "load a receptor first")
             return []
+        if self._pocket_thread is not None and self._pocket_thread.isRunning():
+            # A second search while one is in flight: drop it rather than queue.
+            # The user asked twice within a few seconds, which means they want
+            # the newest answer, and the older one is already out of date.
+            return self._pocket_models
+        self.lbl_pockets.setText("searching…")
+        self.btn_pockets.setEnabled(False)
+        self._pocket_thread = QtCore.QThread(self)
+        self._pocket_worker = PocketWorker(
+            np.asarray(receptor.coords, np.float32),
+            list(receptor.elements),
+            receptor.residue_labels(),
+        )
+        self._pocket_worker.moveToThread(self._pocket_thread)
+        self._pocket_thread.started.connect(self._pocket_worker.run)
+        self._pocket_worker.finished.connect(self._on_pockets_finished)
+        self._pocket_worker.failed.connect(self._on_pockets_failed)
+        self._pocket_worker.finished.connect(self._pocket_thread.quit)
+        self._pocket_worker.failed.connect(self._pocket_thread.quit)
+        self._pocket_thread.start()
+        return self._pocket_models
+
+    def _on_pockets_finished(self, found, elapsed_ms) -> None:  # pragma: no cover - GUI
+        self.btn_pockets.setEnabled(True)
+        self._fill_pockets(
+            found,
+            f"{len(found)} site(s) in {elapsed_ms:.0f} ms" if found
+            else "no enclosed site found — place the box by hand",
+        )
+        if found and not self.pocket_table.selectionModel().selectedRows():
+            # Only auto-select when nothing is selected. A search the user
+            # asked for while reading the list should not move the box out from
+            # under them, which is exactly what load-time selection would do.
+            self.pocket_table.selectRow(0)
+
+    def _on_pockets_failed(self, message: str) -> None:  # pragma: no cover - GUI
+        self.btn_pockets.setEnabled(True)
+        self._fill_pockets([], f"pocket search failed: {message}")
+
+    def find_pockets_now(self) -> list:  # pragma: no cover - GUI
+        """Synchronous search, for the load path and for headless checks.
+
+        Blocking is only acceptable where the caller can afford it: loading a
+        receptor, where the alternative is a box nobody chose, and a test that
+        wants the answer before it asserts on it. The button and any repeat
+        search go through `find_pockets` and do not block.
+        """
+        receptor = next((m for m in self.viewport.molecules if m.role == "receptor"), None)
+        if receptor is None:
+            self._fill_pockets([], "load a receptor first")
+            return []
+        from . import pockets as P
+
         started = time.perf_counter()
         try:
             found = P.find_pockets(
                 receptor.coords, receptor.elements, residues=receptor.residue_labels()
             )
-        except Exception as exc:  # pragma: no cover - GUI
+        except Exception as exc:
             self._fill_pockets([], f"pocket search failed: {exc}")
             return []
         elapsed = (time.perf_counter() - started) * 1000.0
-        summary = (
-            f"{len(found)} site(s) in {elapsed:.0f} ms"
-            if found
-            else "no enclosed site found — place the box by hand"
+        self._fill_pockets(
+            found,
+            f"{len(found)} site(s) in {elapsed:.0f} ms" if found
+            else "no enclosed site found — place the box by hand",
         )
-        self._fill_pockets(found, summary)
         return found
 
     def _fill_pockets(self, found, summary: str) -> None:  # pragma: no cover - GUI
         self._pocket_models = list(found)
         self.lbl_pockets.setText(summary)
+        # No selection means no site, and no site means nothing to draw. The
+        # cloud is cleared rather than left showing the previously selected
+        # site's points, which would put one site's volume inside another's
+        # box and look like a mistake in the search rather than in the view.
+        if not self.pocket_table.selectionModel() or not self.pocket_table.selectionModel().selectedRows():
+            self.viewport.pocket_points = np.zeros((0, 3), np.float32)
         self.pocket_table.blockSignals(True)
         self.pocket_table.setRowCount(len(found))
         for row, p in enumerate(found):
@@ -1317,8 +1487,18 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.pocket_table.setItem(row, col, item)
         self.pocket_table.blockSignals(False)
 
+    def _on_pocket_visibility(self, checked: bool) -> None:  # pragma: no cover - GUI
+        self.viewport.show_pocket = bool(checked)
+        self.viewport.update()
+
     def _on_pocket_selected(self) -> None:  # pragma: no cover - GUI
         """Put the box on the selected site and look at it.
+
+        Also the single place the site volume is cleared. That reset used to
+        live in `_fill_pockets`, which only runs when a *new search* fills the
+        table -- so clearing the selection by hand left the previous site's
+        cloud on screen, inside whatever the new selection put there, showing a
+        site the table no longer listed.
 
         The spins are updated rather than bypassed, so the numbers on screen
         and the numbers the engine gets cannot disagree -- an earlier design
@@ -1327,9 +1507,13 @@ class MainWindow(QtWidgets.QMainWindow):
         """
         model = self.pocket_table.selectionModel()
         rows = model.selectedRows() if model else []
-        if not rows or not getattr(self, "_pocket_models", None):
+        index = rows[0].row() if rows else -1
+        models = getattr(self, "_pocket_models", None)
+        if not models or not 0 <= index < len(models):
+            self.viewport.pocket_points = np.zeros((0, 3), np.float32)
+            self.viewport.update()
             return
-        index = rows[0].row()
+        pocket = models[index]
         if not 0 <= index < len(self._pocket_models):
             return
         pocket = self._pocket_models[index]
@@ -1341,6 +1525,9 @@ class MainWindow(QtWidgets.QMainWindow):
         for spin, value in zip(self.size_spins, size):
             spin.setValue(float(value))
         self._on_box_changed()
+        self.viewport.pocket_points = np.asarray(
+            getattr(pocket, "points", np.zeros((0, 3), np.float32)), np.float32
+        ).reshape(-1, 3)
         # Frame the *box*, not the site, and by its diagonal rather than its
         # longest side. The site is 7 A across and the box 15 A; framing the
         # site put the camera 18 A out, which is inside the protein's own
@@ -1505,15 +1692,21 @@ class MainWindow(QtWidgets.QMainWindow):
         self.status_label.setText(f"docking failed: {message}")
 
     def closeEvent(self, event) -> None:  # pragma: no cover - GUI
-        """Stop a running search before the window goes away.
+        """Stop running searches before the window goes away.
 
         A `QThread` that is still running when its owner is destroyed aborts the
         process with "QThread: Destroyed while thread is still running". Closing
         the window during a search used to be exactly that.
         """
-        if self._thread is not None and self._thread.isRunning():
-            self._thread.quit()
-            self._thread.wait(3000)
+        for name in ("_thread", "_pocket_thread"):
+            thread = getattr(self, name, None)
+            if thread is not None and thread.isRunning():
+                thread.quit()
+                # The pocket search is a bounded numpy loop, not a cancellable
+                # one, so `quit()` only takes effect between slots. A long wait
+                # is better than an abort: the user asked to close, and the
+                # alternative used to be a crash on the way out.
+                thread.wait(15000 if name == "_pocket_thread" else 3000)
         super().closeEvent(event)
 
 

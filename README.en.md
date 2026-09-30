@@ -209,6 +209,17 @@ protein on both sides) and the **residues lining it** — which turns "there is 
 groove near (12, 7, 0)" into something a person can check. A ligand lying flat
 on the protein surface scores zero and is never listed.
 
+The selected site is also **drawn**: its own grid points, as a translucent
+volume you can switch off with `site volume`. A table row reading "groove,
+lined by ARG 17A / ASN 14A / THR 2A" is a *claim*; a magenta volume sitting
+between those atoms is the reader's own check on it, and no number of extra
+columns provides one. Crystal waters and buffer additives are not lining
+residues; cofactors are, because they are real chemistry.
+
+The search runs on a **worker thread**. Measured: 0.16 s for crambin's 327
+atoms, 1.6 s for streptavidin's 1001, and **11.0 s for haemoglobin's 4779**.
+A large receptor takes a while, but the window stays usable.
+
 ## Things to know before you use the results
 
 - **The search box must be given** — either the six numbers, or `--auto-box N`.
@@ -228,6 +239,17 @@ on the protein surface scores zero and is never listed.
   there because single-voxel surface events become connected after one dilation
   and merge a protein's whole outer surface into lumps of 1700–3600 Å³, which
   then outrank every real groove.
+- **A small sealed cavity will not be found at the default probe.** T4 lysozyme
+  L99A has one built in on purpose, and this search reports zero sealed
+  cavities there: the cavity is about 100 Å³ and a 1.4 Å probe inflates every
+  atom enough to fill it. Lowering the default would be worse — a 0.5 Å probe
+  closes surface grooves into dozens of spurious pockets — so the default
+  stands and `odcli sites` reports what a smaller probe would find
+  (`1.4 A -> 0, 1.1 A -> 0, 0.9 A -> 1, …`). An empty result you cannot act on
+  is just a sentence.
+- **The search slows down quickly with protein size**: 11 seconds for
+  haemoglobin's 4779 atoms. It runs on a worker thread so the window stays
+  usable, but it does take a while.
 - **Option names use underscores**: `--center_x`, not `--center-x`.
 - **`use_gpu` defaults to False.** The GPU accumulates in `f32` and differs from
   the CPU by about 1e-6; a default that varies with the hardware would break

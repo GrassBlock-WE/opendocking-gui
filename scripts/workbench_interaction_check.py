@@ -26,6 +26,7 @@ import contextlib
 import io
 import sys
 import tempfile
+import time
 import traceback
 from pathlib import Path
 
@@ -1146,6 +1147,42 @@ def main() -> int:
             )
             pw.pocket_table.clearSelection()
             app.processEvents()
+            check(
+                "clearing the selection clears the site volume, rather than "
+                "leaving one site's cloud inside another's box",
+                len(pw.viewport.pocket_points) == 0,
+                f"{len(pw.viewport.pocket_points)} points still held",
+            )
+            pw.pocket_table.selectRow(1)
+            app.processEvents()
+            check(
+                "reselecting puts it back",
+                len(pw.viewport.pocket_points) > 0,
+                f"{len(pw.viewport.pocket_points)} points",
+            )
+            # The toggle has to actually gate the draw, not just the checkbox.
+            shown_before = pw.viewport.show_pocket
+            before, _ = shot(pw, "pockets_cloud_on")
+            pw.cb_pocket_volume.setChecked(False)
+            app.processEvents()
+            check(
+                "the site-volume checkbox gates the draw",
+                pw.viewport.show_pocket is False and shown_before is True,
+                f"show_pocket {shown_before} -> {pw.viewport.show_pocket}",
+            )
+            after, _ = shot(pw, "pockets_cloud_off")
+            check(
+                "and the picture really changed, not just the flag",
+                not np.array_equal(before, after),
+                f"{int((before != after).any(axis=-1).sum())} pixels differ",
+            )
+            pw.cb_pocket_volume.setChecked(True)
+            app.processEvents()
+            check(
+                "switching it back restores the cloud",
+                pw.viewport.show_pocket is True
+                and len(pw.viewport.pocket_points) > 0,
+            )
     finally:
         pw.close()
         app.processEvents()
@@ -1184,6 +1221,97 @@ def main() -> int:
         finally:
             empty.close()
             app.processEvents()
+
+    section("11d. the pocket search does not block the window")
+    # Measured, not guessed: the search takes 0.07 s for crambin's 382 atoms,
+    # 2.0 s for streptavidin and 12.0 s for haemoglobin's 4779. Run on the GUI
+    # thread that last one froze the window for twelve seconds on load.
+    #
+    # The proof that it is off-thread is an ordering, not a duration: the call
+    # returns while the work is still outstanding, so the label still reads
+    # "searching…" and the button is still disabled at the moment control
+    # comes back. A threshold on elapsed time would be a threshold on how fast
+    # the runner is; this holds on any machine, and it fails immediately if
+    # someone puts the search back inline.
+    from opendocking.workbench import MoleculeView  # noqa: PLC0415
+
+    axis = np.arange(-18.0, 18.1, 1.6)
+    blob = np.asarray(
+        [
+            (x, y, z)
+            for x in axis
+            for y in axis
+            for z in axis
+            if (x * x + y * y + z * z) ** 0.5 % 3.0 < 1.2
+        ],
+        np.float32,
+    )
+    tw = MainWindow()
+    tw.resize(800, 600)
+    tw.show()
+    try:
+        tw.viewport.molecules = [
+            MoleculeView(
+                name="synthetic", coords=blob,
+                elements=["C"] * len(blob),
+                color=(0.6, 0.7, 0.9), radius=0.15, role="receptor",
+            )
+        ]
+        check(
+            "the fixture is big enough for the answer to be observable",
+            len(blob) > 2000,
+            f"{len(blob)} atoms",
+        )
+        tw.find_pockets()
+        mid_label = tw.lbl_pockets.text()
+        mid_enabled = tw.btn_pockets.isEnabled()
+        check(
+            "find_pockets() returns before the search has finished",
+            "searching" in mid_label.lower(),
+            f"label immediately after the call: {mid_label!r}",
+        )
+        check(
+            "and the button is disabled meanwhile, so a second search cannot start",
+            not mid_enabled,
+            f"enabled={mid_enabled}",
+        )
+        # Pump the loop and count turns. A search on this thread would leave
+        # this counter at one or two.
+        turns = 0
+        deadline = time.perf_counter() + 0.5
+        while time.perf_counter() < deadline:
+            app.processEvents()
+            turns += 1
+            time.sleep(0.001)
+        check(
+            "the event loop keeps turning while the search runs",
+            turns > 5,
+            f"{turns} turns in 0.5 s",
+        )
+        wait_until = time.perf_counter() + 120
+        while time.perf_counter() < wait_until and tw._pocket_thread is not None \
+                and tw._pocket_thread.isRunning():
+            app.processEvents()
+            time.sleep(0.005)
+        for _ in range(20):
+            app.processEvents()
+            time.sleep(0.01)
+        check(
+            "the result arrives and the button comes back",
+            "site(s)" in tw.lbl_pockets.text() and tw.btn_pockets.isEnabled(),
+            f"label {tw.lbl_pockets.text()!r}, {tw.pocket_table.rowCount()} rows",
+        )
+    finally:
+        # Closing with a search in flight used to abort the process with
+        # "QThread: Destroyed while thread is still running".
+        t_close = time.perf_counter()
+        tw.close()
+        app.processEvents()
+        check(
+            "closing the window during a search does not abort",
+            time.perf_counter() - t_close < 20.0,
+            f"closed in {time.perf_counter() - t_close:.2f} s",
+        )
 
     # ---------------------------------------------------------------- report
     section("summary")

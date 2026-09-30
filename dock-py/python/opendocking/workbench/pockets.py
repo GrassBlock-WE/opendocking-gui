@@ -75,6 +75,10 @@ __all__ = [
     "DEFAULT_SPACING",
     "DEFAULT_PADDING",
     "DEFAULT_MAX_VOLUME",
+    "KIND_LABELS",
+    "kind_label",
+    "cavity_sensitivity",
+    "DEFAULT_PROBE_SWEEP",
 ]
 
 #: Van der Waals radii, ångström. Pockets are about where a solvent can and
@@ -112,6 +116,65 @@ def kind_label(kind: str) -> str:
     return KIND_LABELS.get(kind, kind)
 
 
+#: Probe radii, Å, that :func:`cavity_sensitivity` tries.
+DEFAULT_PROBE_SWEEP = (1.4, 1.1, 0.9, 0.7, 0.5)
+
+
+def cavity_sensitivity(
+    coords,
+    elements,
+    probes=DEFAULT_PROBE_SWEEP,
+    **kwargs,
+):
+    """``[(probe, n_sealed), ...]`` — how many sealed cavities each probe finds.
+
+    This exists because "no sealed cavity" is not a useful thing to say on its
+    own, and for a good reason. T4 lysozyme L99A (1L96) has a cavity
+    *deliberately engineered* into it by replacing a bulky residue with
+    alanine, and at the default 1.4 A probe this search reports **zero** sealed
+    cavities in it. The cavity is roughly 100 A^3, and a 1.4 A probe inflates
+    every atom by that much, so the inflated surface simply fills it in.
+
+    The cavity is not missed because the search is bad at small cavities. It is
+    missed because the probe is blunt, and a blunt probe is the right default:
+    a 0.5 A probe closes up surface grooves into dozens of "sealed" pockets,
+    which is a worse answer than none. The honest response to a null result is
+    not to lower the default quietly, but to say what the answer would be at a
+    probe that sees it — so the user can choose to look.
+
+    Only the flood fill runs per probe; the grid is built once at the smallest
+    radius asked for, because shrinking an already-built solid mask is not the
+    same operation as building it and would give a different answer.
+    """
+    pts = np.asarray(coords, np.float32).reshape(-1, 3)
+    if len(pts) == 0:
+        return [(float(p), 0) for p in probes]
+    els = list(elements) if elements is not None else ["C"] * len(pts)
+    els = els + ["C"] * max(0, len(pts) - len(els))
+    radii = np.asarray([VDW_RADII.get(e, 1.70) for e in els], np.float32)
+    spacing = kwargs.get("spacing", DEFAULT_SPACING)
+    margin = kwargs.get("margin", 6.0)
+    lo, shape = _grid_for(pts, spacing, margin)
+    window = max(int(round(3.0 / spacing)), 1)
+
+    out: list[tuple[float, int]] = []
+    for probe in probes:
+        solid = _splat_solid(pts, radii + np.float32(probe), lo, shape, spacing)
+        free = ~solid
+        sealed = free & ~_flood_from_border(free)
+        if not sealed.any():
+            out.append((float(probe), 0))
+            continue
+        count = 0
+        for comp in _components(sealed):
+            extent = (comp.max(axis=0) - comp.min(axis=0) + 1) * spacing
+            if len(comp) >= kwargs.get("min_voxels", MIN_VOXELS) and \
+                    float(extent.min()) >= kwargs.get("min_extent", 2.0 * spacing):
+                count += 1
+        out.append((float(probe), count))
+    return out
+
+
 #: Ceiling on a site's bounding-box volume, Å³. A drug binding pocket runs a
 #: few hundred cubic ångström; anything much past that is a merged surface
 #: rather than a site. A heuristic, and labelled as one -- see `max_volume`.
@@ -133,6 +196,15 @@ class Pocket:
     burial: float = 0.0
     #: ``(residue, n_atoms_within_lining_max)`` pairs, most-contacted first.
     lining: list[tuple[str, int]] = field(default_factory=list)
+    #: The grid points themselves, in world coordinates, ``(voxels, 3)``.
+    #:
+    #: Carried so the site can be *looked at* rather than only read about. A
+    #: table saying "groove at (12.8, 7.2, 0.1), 5.6 x 7.2 x 5.6 A" is a
+    #: claim; a translucent cloud sitting in the crevice between the atoms the
+    #: table names is the reader's own check on it, and there is no way to get
+    #: that check from the numbers alone. Bounded by `max_pockets` and
+    #: `min_voxels`, so a few thousand points at most.
+    points: np.ndarray = field(default_factory=lambda: np.zeros((0, 3), np.float32))
 
     @property
     def rank_score(self) -> float:
@@ -470,6 +542,7 @@ def find_pockets(
                     kind=kind,
                     burial=float(score[comp[:, 0], comp[:, 1], comp[:, 2]].mean()),
                     lining=_lining(pts, res, comp, spacing, lo, LINING_MAX),
+                    points=world.astype(np.float32),
                 )
             )
 

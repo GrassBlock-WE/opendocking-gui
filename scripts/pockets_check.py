@@ -513,6 +513,152 @@ def main() -> int:
                   f"RMSD {rmsd:.2f} A from the reference pose at a similar energy. "
                   "Near-degenerate minima, not a reproduction, and not claimed as one")
 
+    section("waters and cofactors are not lining residues")
+    # Measured on six proteins fetched from RCSB: streptavidin's top site
+    # listed "HOH 354A, HOH 361A" alongside two real residues, and myoglobin
+    # listed HEM among the walls of its heme pocket. A crystal water is a
+    # lattice artefact, not a wall of the protein, and a pocket whose lining is
+    # half waters is answering a different question than the one asked.
+    #
+    # Built by hand rather than fetched: the check must not need a network, and
+    # the property is a string comparison, not a chemistry claim. `MoleculeView`
+    # is imported at module level -- re-importing it here would make Python
+    # treat the name as local to `main` for the whole function, and the later
+    # crambin section that uses it would stop finding it.
+    from opendocking.workbench.structure import parse_structure  # noqa: PLC0415
+
+    pdb = (
+        "ATOM      1  N   THR A   1      -8.000   0.000   0.000  1.00  0.00           N\n"
+        "ATOM      2  CA  THR A   1      -8.000   1.450   0.000  1.00  0.00           C\n"
+        "ATOM      3  C   THR A   1      -6.500   1.450   0.000  1.00  0.00           C\n"
+        "ATOM      4  O   THR A   1      -6.500   2.600   0.000  1.00  0.00           O\n"
+        "HETATM    5  O   HOH A 101      -8.000   2.800   0.000  1.00  0.00           O\n"
+        "HETATM    6 FE   HEM A 155      -6.000   2.000   0.000  1.00  0.00          FE\n"
+        "HETATM    7  C1  GOL A 201      -4.000   2.000   0.000  1.00  0.00           C\n"
+        "HETATM    8  C   UNL A 300      -2.000   2.000   0.000  1.00  0.00           C\n"
+        "END\n"
+    )
+    parsed = parse_structure(pdb, "mixed")
+    view = MoleculeView(
+        name="mixed",
+        coords=np.asarray(parsed.coords(), np.float32).reshape(-1, 3),
+        elements=parsed.elements(),
+        structure=parsed,
+    )
+    labels = view.residue_labels()
+    check("a real residue is labelled", labels[0] == "THR 1A", f"{labels[0]!r}")
+    check("crystal water is not", labels[4] == "", f"{labels[4]!r}")
+    check("a buffer additive is not", labels[6] == "", f"{labels[6]!r}")
+    check("the project's own UNL placeholder is not", labels[7] == "", f"{labels[7]!r}")
+    # A cofactor is a *different* case and deliberately kept. A water is a
+    # lattice artefact: it is where the crystal happened to put a solvent
+    # molecule, it says nothing about the protein's shape, and on streptavidin
+    # waters outnumbered residues in the lining list. A cofactor is real
+    # chemistry that is part of the receptor a drug has to deal with, and
+    # "this pocket is lined by the haem" is an answer worth having. Writing the
+    # exclusion as one flat list would have thrown both away, and the first
+    # version of this check asserted that they were the same -- which is how
+    # the distinction got made explicit in the first place.
+    check(
+        "a cofactor is kept, because it is chemistry and not a lattice artefact",
+        labels[5] == "HEM 155A",
+        f"{labels[5]!r}",
+    )
+    check(
+        "one label per atom, blanks included",
+        len(labels) == len(view.coords),
+        f"{len(labels)} labels for {len(view.coords)} atoms",
+    )
+    # And it has to reach the lining, which is where the noise was visible.
+    # A distinct name: this fixture is a handful of atoms and finds no sites,
+    # and reusing `sites` here quietly emptied the crambin list that the
+    # section after this one needs -- which showed up as a section that printed
+    # its heading and no checks at all, and a total that did not move.
+    mixed_sites = P.find_pockets(view.coords, view.elements, residues=labels)
+    all_lining = {name for p in mixed_sites for name, _ in p.lining}
+    check(
+        "no site lines itself with a water, an additive or a ligand",
+        not any(n.split(" ")[0] in ("HOH", "GOL", "UNL", "WAT", "EDO")
+                for n in all_lining),
+        f"lining across {len(mixed_sites)} site(s): {sorted(all_lining) or 'none'}",
+    )
+
+    section("the drawn points and the reported geometry are the same thing")
+    # The site is drawn as a cloud of its own grid points. A picture that
+    # disagrees with the table is worse than no picture, so the two are checked
+    # against each other rather than both being trusted.
+    if sites:
+        rec_pts = np.asarray(rec.coords, np.float32)
+        labels_all = rec.residue_labels()
+        for idx, pocket in enumerate(sites):
+            pts = np.asarray(pocket.points, np.float32)
+            if len(pts) != pocket.voxels:
+                check(
+                    f"site {idx + 1} carries one point per voxel",
+                    False,
+                    f"{len(pts)} points, {pocket.voxels} voxels",
+                )
+                break
+            extent = (pts.max(axis=0) - pts.min(axis=0)) + P.DEFAULT_SPACING
+            ok = bool(np.allclose(extent, np.asarray(pocket.size), atol=0.05))
+            if not ok:
+                check(
+                    f"site {idx + 1} point cloud spans exactly the reported size",
+                    False,
+                    f"points span {np.round(extent, 2)} vs reported "
+                    f"{np.round(pocket.size, 2)}",
+                )
+                break
+        else:
+            check(
+                "every site carries one point per voxel",
+                all(len(np.asarray(p.points)) == p.voxels for p in sites),
+            )
+            check(
+                "every site's point cloud spans exactly the size it reports",
+                all(
+                    bool(
+                        np.allclose(
+                            (np.asarray(p.points).max(axis=0)
+                             - np.asarray(p.points).min(axis=0)) + P.DEFAULT_SPACING,
+                            np.asarray(p.size),
+                            atol=0.05,
+                        )
+                    )
+                    for p in sites
+                ),
+                "the cloud and the table are the same geometry",
+            )
+            check(
+                "the centre is the centroid of the points that are drawn",
+                all(
+                    float(np.linalg.norm(
+                        np.asarray(p.points).mean(axis=0) - np.asarray(p.center)
+                    )) < 0.1
+                    for p in sites
+                ),
+            )
+        # And the cloud really is enclosed by what the table says lines it.
+        top = sites[0]
+        lined = {name for name, _ in top.lining}
+        atom_idx = [i for i, lab in enumerate(labels_all) if lab in lined]
+        if atom_idx:
+            cloud = np.asarray(top.points, np.float32)
+            nearest = np.linalg.norm(
+                rec_pts[atom_idx][:, None, :] - cloud[None, :, :], axis=2
+            ).min(axis=0)
+            check(
+                "every drawn point is within reach of a lining residue",
+                float(nearest.max()) <= P.LINING_MAX,
+                f"worst {float(nearest.max()):.2f} A, limit {P.LINING_MAX} A",
+            )
+        else:
+            check(
+                "every drawn point is within reach of a lining residue",
+                False,
+                f"site 1 has no lining residues to check against ({top.lining})",
+            )
+
     print(f"\n{CHECKS - len(FAILURES)}/{CHECKS} passed")
     for f in FAILURES:
         print(f"  FAILED: {f}")
