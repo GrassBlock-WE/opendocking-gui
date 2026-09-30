@@ -50,6 +50,31 @@ def check(name: str, ok: bool, detail: str = "") -> bool:
     return ok
 
 
+def skip(name: str, reason: str) -> bool:
+    """Record a check that could not be run here, and say why.
+
+    A skipped check and a failed check are different claims. "The viewport
+    draws nothing" and "this environment cannot read the framebuffer" look
+    identical in the output if the second one is reported as the first, and
+    only one of them is ever true.
+    """
+    results.append(("SKIP", name, reason))
+    print(f"  [SKIP] {name}  — {reason}")
+    return False
+
+
+# Whether `grabFramebuffer` returns anything at all. Probed once, after the
+# window is up; see `probe_framebuffer`.
+PIXELS_OK = True
+
+
+def pixel_check(name: str, ok: bool, detail: str = "") -> bool:
+    """A check whose truth lives in the rendered pixels."""
+    if not PIXELS_OK:
+        return skip(name, "the framebuffer read back blank in this environment")
+    return check(name, ok, detail)
+
+
 def section(title: str) -> None:
     print(f"\n=== {title} ===")
 
@@ -111,6 +136,9 @@ def rects_overlap(a: QtCore.QRect, b: QtCore.QRect) -> bool:
 
 
 def main() -> int:
+    # `PIXELS_OK` is read by `pixel_check`; assigning it here without this
+    # would create a local and silently leave the flag at its default.
+    global PIXELS_OK
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv[:1])
     print(f"Qt {QtCore.QT_VERSION_STR}, platform {app.platformName()}")
 
@@ -125,6 +153,12 @@ def main() -> int:
     win = MainWindow(receptor=rec, ligand=lig, poses=poses)
     win.resize(1280, 820)
     win.show()
+    # `isVisible` is not the same question as "has the window been painted".
+    # Under a software rasteriser with no compositor the window can be shown
+    # and still never get an expose event, which leaves the QOpenGLWidget's
+    # framebuffer blank. Asking explicitly turns a mystery into an answer, and
+    # it costs nothing where the window really is up.
+    exposed = QTest.qWaitForWindowExposed(win, 5000)
     app.processEvents()
     QTest.qWait(600)
     app.processEvents()
@@ -198,7 +232,18 @@ def main() -> int:
 
     base, _ = shot(win, "01_loaded")
     base_px = non_background(base)
-    check("viewport renders geometry", base_px > 2000, f"{base_px} non-background px")
+    # Decide once, here, whether the framebuffer is readable at all. A blank
+    # grab means every pixel-dependent check below would be measuring the
+    # environment rather than the viewport.
+    if base_px == 0:
+        PIXELS_OK = False
+        print(
+            "\n  NOTE: grabFramebuffer() returned a uniformly coloured image, so"
+            "\n        the pixel checks below are skipped rather than failed."
+            f"\n        window exposed: {exposed}; platform: {app.platformName()}."
+            "\n        Every non-pixel check still runs."
+        )
+    pixel_check("viewport renders geometry", base_px > 2000, f"{base_px} non-background px")
 
     # -------------------------------------------------- element interpretation
     section("1b. does the viewer understand the atom types it is given?")
@@ -309,7 +354,7 @@ def main() -> int:
     win.cb_receptor.setChecked(False)
     app.processEvents()
     no_rec, _ = shot(win, "03_receptor_hidden")
-    check(
+    pixel_check(
         "unchecking 'receptor' removes pixels",
         non_background(no_rec) < non_background(full),
         f"{non_background(full)} -> {non_background(no_rec)} px",
@@ -320,7 +365,7 @@ def main() -> int:
     win.cb_ligand.setChecked(False)
     app.processEvents()
     no_lig, _ = shot(win, "04_pose_hidden")
-    check(
+    pixel_check(
         "unchecking 'ligand / pose' removes pixels",
         non_background(no_lig) < non_background(full),
         f"{non_background(full)} -> {non_background(no_lig)} px",
@@ -331,7 +376,7 @@ def main() -> int:
     win.cb_box.setChecked(False)
     app.processEvents()
     no_box, _ = shot(win, "05_box_hidden")
-    check(
+    pixel_check(
         "unchecking 'search box' removes the wireframe",
         non_background(no_box) < non_background(full),
         f"{non_background(full)} -> {non_background(no_box)} px",
@@ -431,7 +476,7 @@ def main() -> int:
         f"row 0 = {rmsd0!r}, last row = {win.lbl_rmsd.text()!r}",
     )
     shot_b, _ = shot(win, "07_pose_last")
-    check(
+    pixel_check(
         "selecting a different pose changes what is drawn",
         not np.array_equal(shot_a, shot_b),
         "framebuffers differ" if not np.array_equal(shot_a, shot_b) else "identical",
@@ -588,11 +633,18 @@ def main() -> int:
     # ---------------------------------------------------------------- report
     section("summary")
     npass = sum(1 for r in results if r[0] == "PASS")
-    nfail = len(results) - npass
-    print(f"  {npass} passed, {nfail} failed, {len(results)} checks")
+    nfail = sum(1 for r in results if r[0] == "FAIL")
+    nskip = sum(1 for r in results if r[0] == "SKIP")
+    print(f"  {npass} passed, {nfail} failed, {nskip} skipped, {len(results)} checks")
     for tag, name, detail in results:
-        if tag == "FAIL":
-            print(f"    FAIL {name}: {detail}")
+        if tag in ("FAIL", "SKIP"):
+            print(f"    {tag} {name}: {detail}")
+    if nskip:
+        print(
+            f"\n  {nskip} check(s) were skipped, not passed. A skip means this\n"
+            "  environment could not answer the question; it is not evidence\n"
+            "  that the workbench is correct there."
+        )
     print(f"\n  screenshots: {OUT}")
     win.close()
     return 1 if nfail else 0

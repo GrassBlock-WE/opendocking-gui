@@ -11,7 +11,49 @@ The project is pre-1.0. The `0.x` line is where the interfaces still move.
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+
+- `Ligand.from_pdbqt_str` did not work at all. It called the file-opening
+  reader with the document text, so the PDBQT was treated as a filename and
+  every call failed — `os error 123` on Windows, a search for a file named
+  after the whole document elsewhere. `Receptor.from_pdbqt_str` was unaffected
+  and always went through the in-memory parser. Nothing caught this because the
+  only callers pass deliberately malformed text, where a parser rejection and a
+  failed file open look identical.
+- A ligand with two atoms on the same coordinate was accepted silently. Every
+  number came out finite, so docking returned plausible-looking poses built
+  from geometry that does not exist. Ligands are now refused when any two
+  atoms are closer than 0.5 Å, with the offending atom names in the error. The
+  floor is far below the shortest real bond (H–H at 0.74 Å) and a test pins
+  that it cannot reject a real structure.
+- The CPU/GPU agreement test compared raw absolute errors against a fixed
+  `1e-4`. The conformations it scores reach ~10³ kcal/mol, where a single
+  f32 ulp is already ~1e-4, so the threshold was smaller than the arithmetic it
+  was checking and passed only on the machine it was written on. It is now a
+  relative criterion, reverse-verified to still reject an injected 1e-3
+  relative error and to still reject a 0.01 absolute error at realistic docked
+  energies.
+- `docs/ARCHITECTURE.md` claimed the GPU path returns bit-for-bit the same
+  numbers as the CPU path. It does not: the kernel accumulates in single
+  precision and the measured relative difference is ~1e-7, varying with the
+  shader compiler. Only the intramolecular term is bit-identical. The matching
+  claim in the `evaluate_conformations` docstring is corrected too.
+- `examples/robustness_check.py` decoded its child processes' stderr with the
+  system code page. On a non-UTF-8 locale the decode failed inside the reader
+  thread, stderr was left unset, and the guard raised `TypeError` instead of
+  reporting a verdict.
+- Three example scripts defaulted to bare filenames, so they only ran after a
+  `cd examples`. They now resolve their inputs next to the script.
+- The `workbench` CI job requested `libxkbcommon-x11` instead of
+  `libxkbcommon-x11-0`, and did not install `libxcb-cursor0`, without which Qt
+  6.5+ refuses to load its xcb platform plugin.
+
+### Changed
+
+- The `dock-core` test fixture for the GPU CPU-fallback path replicated butane
+  40 times 0.1 Å apart, which placed atoms on identical coordinates. It now
+  uses a 4×4×3 lattice at 3.0 Å pitch, so every atom pair is physically
+  possible.
 
 ---
 
@@ -55,7 +97,7 @@ Initial release of the engine, the Python front end, and the 3-D workbench.
   charges, and polar-hydrogen placement for donors and acceptors.
 - A single 79-column PDBQT writer and reader pair, used by both the CLI and the
   workbench, so anything written can be read back.
-- `opendocking` command line: `prep-receptor`, `prep-ligand`, `rec-grid`,
+- `odcli`, the command line: `prep-receptor`, `prep-ligand`, `rec-grid`,
   `dock`, `split`, `info`, `workbench`.
 - `odgui`, a standalone entry point for the interactive workbench that does not
   depend on any particular command name and imports neither Qt nor moderngl at

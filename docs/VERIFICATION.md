@@ -211,7 +211,7 @@ macOS（Metal）、Linux（Vulkan）、AMD 独显、Intel 核显、Apple Silicon
 ## 3. 验证过程中发现并修复的 bug
 
 以下每一项都是**跑出来**的，不是读代码想出来的。
-共 68 条，按性质分组。
+共 69 条，按性质分组。
 
 ### 3.1 正确性
 
@@ -696,6 +696,56 @@ CI 不跑 `examples/`，所以这条路径在 CI 上从来没有被覆盖过。
 结果它距另一端碳 0.45 Å——正好低于我刚设的下限，被自己的断言抓住。
 另外 `closest_atom_pair` 在"没有近距离对"时返回 `None`，我第一版写成
 `.expect("no close pair in real geometry")`，断言方向写反了。两条都是当场改掉的。
+
+### 3.16 把 CI 的 GUI job 真正跑起来，以及它能证明什么
+
+前面写的"GitHub runner 上没有可用的 OpenGL 3.3 环境"是**没有验证过的假设**。
+补上 `libxcb-cursor0` 之后实测如下：
+
+| 步骤 | 结果 |
+|---|---|
+| `odgui --check`（无需显示） | ✅ 通过 |
+| xvfb + `LIBGL_ALWAYS_SOFTWARE=1` 下的 OpenGL 上下文探测 | ✅ **通过** |
+| 布局 / 交互 / 行为 50 项 | ⚠️ **45 通过，5 失败** |
+| 真实启动再关闭 | 被上一步挡住未执行 |
+
+也就是说 runner 上**是有可用 OpenGL 上下文的**。5 个失败全是同一类——
+以渲染像素为判据的检查：
+
+```
+[FAIL] viewport renders geometry              — 0 non-background px
+[FAIL] unchecking 'receptor' removes pixels   — 0 -> 0 px
+[FAIL] unchecking 'ligand / pose' removes px  — 0 -> 0 px
+[FAIL] unchecking 'search box' removes wire   — 0 -> 0 px
+[FAIL] selecting a different pose changes it  — identical
+```
+
+`grabFramebuffer()` 在无头软件光栅化下返回**整片单一颜色**（0 个非背景像素）。
+其余 45 项——相机旋转、平移、缩放、微调框、位姿列表、对接、场景记账——全部通过，
+它们不依赖像素回读。
+
+| # | 现象 | 根因 | 修复 |
+|---|---|---|---|
+| 69 | 无头 runner 上 5 项像素检查报 FAIL，**看起来像产品坏了** | `grabFramebuffer()` 在无合成器的软件光栅化下回读为空白。`win.show()` + `qWait(600)` 并不能保证窗口真的被暴露 | 改为：先探测帧缓冲是否可读（并显式调用 `qWaitForWindowExposed`），读不到就把这 5 项记为 **SKIP 并写明原因**，而不是 FAIL。汇总里 SKIP 单独计数、单独打印、**不计入通过**，且不决定退出码 |
+
+**这一条和 §3.14.1 是同一个形状。** 一个测不出东西的检查报 FAIL，等于宣称
+"产品有问题"；而实际的事实是"这个环境回答不了这个问题"。两句话只有一句为真，
+所以必须分开写。
+
+改这条的时候我自己也犯了一次同类错误，而且**只有反向验证才能发现**：
+`main()` 里写 `PIXELS_OK = False` 创建的是**局部变量**，模块全局仍是 `True`，
+skip 分支根本不会触发——脚本看起来改好了，实际行为一点没变。
+用一个驱动脚本把 `shot()` 换成返回单色图，复现 CI 的条件，验证：
+
+| 断言 | 结果 |
+|---|---|
+| 空白帧缓冲 → 退出码 0 | ✅ |
+| 0 个 FAIL、恰好 5 个 SKIP | ✅ |
+| SKIP 的正是那 5 项 | ✅ |
+| 其余 45 项**仍然运行且仍然通过** | ✅ |
+| 本机正常路径仍是 50/50、0 SKIP | ✅ |
+
+最后一条是关键的对照：**如果 skip 机制在真机上把通过项也吞掉了，这条会红。**
 
 ---
 
