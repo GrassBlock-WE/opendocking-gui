@@ -249,12 +249,20 @@ def check_small_molecule() -> None:
     st_b = st_mod.parse_structure(
         (EXAMPLES / "biotin_prep.pdbqt").read_text(encoding="utf-8"), "biotin"
     )
-    check(
-        "perceived bonds match RDKit's own perception",
-        len(st_b.bond_pairs()) == truth,
-        f"{len(st_b.bond_pairs())} perceived, {truth} from RDKit, "
-        f"{len(st_b.atoms)} atoms",
-    )
+    if truth is None:
+        skip(
+            "perceived bonds match RDKit's own perception",
+            "RDKit is not installed, so there is no independent oracle here. "
+            "This is the only check in the file that compares against something "
+            "written by other people.",
+        )
+    else:
+        check(
+            "perceived bonds match RDKit's own perception",
+            len(st_b.bond_pairs()) == truth,
+            f"{len(st_b.bond_pairs())} perceived, {truth} from RDKit, "
+            f"{len(st_b.atoms)} atoms",
+        )
 
     deg = [len(a.bonds) for a in st.atoms]
     check(
@@ -292,7 +300,7 @@ def check_small_molecule() -> None:
     )
 
 
-def _rdkit_bond_count(prepared: Path) -> int:
+def _rdkit_bond_count(prepared: Path) -> int | None:
     """How many bonds RDKit perceives in the *prepared* file itself.
 
     The oracle has to be run on the same file the check reads. Comparing bonds
@@ -302,8 +310,20 @@ def _rdkit_bond_count(prepared: Path) -> int:
     reason that has nothing to do with either perception being wrong. RDKit
     reading the prepared file applies its own distance rules to the same atoms,
     which is the comparison worth making.
+
+    Returns None when RDKit is not installed rather than raising.
+
+    That is a narrow safety net, not a licence to run this file without RDKit:
+    `prepare_receptor` imports it too, so the script cannot get this far on a
+    machine that lacks it. What it does buy is that the *oracle* reports itself
+    as unavailable instead of the whole file dying on an import inside a
+    helper, and it is what lets a caller turn a missing oracle into a stated
+    skip rather than a silently absent assertion.
     """
-    from rdkit import Chem
+    try:
+        from rdkit import Chem
+    except ImportError:
+        return None
 
     mol = Chem.MolFromPDBFile(str(prepared), removeHs=False, sanitize=False)
     if mol is None:

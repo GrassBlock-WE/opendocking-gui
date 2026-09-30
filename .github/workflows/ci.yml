@@ -197,6 +197,13 @@ jobs:
           python -m maturin build --release --locked -m dock-py/Cargo.toml --out dist
           python -m pip install --force-reinstall dist/opendocking-*.whl
           python -m pip install "PyQt6>=6.4" "moderngl>=5.8"
+          # RDKit is here for one assertion, and it is the most valuable one in
+          # the bond check: it is the only comparison in the suite against a
+          # perception written by somebody else. Installing it keeps that
+          # oracle from being a thing that only runs on the maintainer's
+          # machine, where a check that nobody else can run is a note, not a
+          # gate. The check skips with a reason if it is ever missing.
+          python -m pip install rdkit
 
       - name: GUI stack check (no display needed)
         run: odgui --check
@@ -204,11 +211,23 @@ jobs:
       - name: OpenGL context probe
         run: xvfb-run -a -s "-screen 0 1280x1024x24" python scripts/qt_gl_probe.py
 
-      - name: Layout, interaction and behaviour (75 checks)
+      - name: Layout, interaction and behaviour (96 checks)
         env:
           LIBGL_ALWAYS_SOFTWARE: "1"
           QT_QPA_PLATFORM: xcb
         run: xvfb-run -a -s "-screen 0 1280x1024x24" python scripts/workbench_interaction_check.py
+
+      - name: Pose/receptor interaction criteria
+        # No display needed, and it has to be a gate rather than a note: the
+        # hydrogen-bond thresholds were once accepted as arguments and then
+        # ignored, and nothing noticed until a check loosened one criterion at
+        # a time and the answers did not change.
+        run: python scripts/contacts_check.py
+
+      - name: Bond perception and representation geometry
+        run: |
+          python scripts/structure_bond_check.py
+          python scripts/representation_geometry_check.py
 
       - name: X11 window lookup parses each tool's real output
         # No display needed: this stubs the helpers with the formats they
