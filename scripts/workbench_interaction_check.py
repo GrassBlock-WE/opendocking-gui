@@ -275,6 +275,12 @@ def main() -> int:
             f"H radius {radii[hydrogens[0]]:.3f} vs C radius {radii[carbons[0]]:.3f} A"
             + ("" if max(radii[i] for i in hydrogens) < min(radii[i] for i in carbons) else "  <-- same size"),
         )
+    else:
+        skip(
+            "hydrogens are drawn smaller than carbons",
+            f"the pose has {len(hydrogens)} H and {len(carbons)} C atoms, so "
+            "there are no radii of both to compare",
+        )
     check(
         "AutoDock 'A' is mapped to carbon",
         PDBQT_TYPE_ELEMENT.get("A") == "C" and PDBQT_TYPE_ELEMENT.get("OA") == "O"
@@ -763,6 +769,15 @@ def main() -> int:
                 abs(drawn["ribbon"] - drawn["ball_and_stick"]) > 500,
                 f"ribbon {drawn['ribbon']} px vs ball-and-stick "
                 f"{drawn['ball_and_stick']} px",
+            )
+        else:
+            # Registering this only when it can run makes the total silently
+            # smaller, and a smaller total is indistinguishable from a smaller
+            # scope. A check that did not happen has to say so.
+            skip(
+                "the protein ribbon is a different picture from its atoms",
+                "no framebuffer was readable, so there were no pixel counts to "
+                "compare",
             )
         msg = win3.statusBar().currentMessage()
         check("the status bar names the template source for the protein",

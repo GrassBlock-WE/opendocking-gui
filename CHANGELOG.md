@@ -66,6 +66,15 @@ The project is pre-1.0. The `0.x` line is where the interfaces still move.
   11/11, no X server needed, runs on either platform, wired into CI.
 - The workbench CI step was still labelled "(50 checks)" after the interaction
   check grew to 75.
+- Two interaction checks could silently stop existing. Both were guarded by an
+  `if` on their own precondition, so when it did not hold the check was never
+  registered — not passed, not skipped, simply absent. On a headless runner
+  that made the total read 74 instead of 75, and a smaller total is
+  indistinguishable from a smaller scope. Both now record a SKIP with the
+  reason, and the total is 75 in every environment. Reverse-verified by forcing
+  `PIXELS_OK` off to reproduce the runner's condition: 61 passed, 0 failed,
+  14 skipped, 75 checks — the same 61 passes CI reports, plus the one that used
+  to vanish.
 
 - `Ligand.from_pdbqt_str` did not work at all. It called the file-opening
   reader with the document text, so the PDBQT was treated as a filename and
