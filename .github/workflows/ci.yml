@@ -173,8 +173,15 @@ jobs:
           # best-effort: if it is unavailable the job still runs every step
           # that does not need a real window, instead of failing on the apt
           # line before any of them execute.
+          #
+          # xdotool is here because the launch check needs it. xvfb-run starts
+          # a display with no window manager, and wmctrl asks the window
+          # manager for the client list, so with no WM it can neither find the
+          # window nor close it -- that step timed out for exactly this reason
+          # before. xdotool talks to X directly and needs no WM. x11-utils
+          # gives xwininfo, the last-resort "the window is there" probe.
           sudo apt-get install -y --no-install-recommends \
-            libxcb-cursor0 libxcb-xinerama0 wmctrl || \
+            libxcb-cursor0 libxcb-xinerama0 wmctrl xdotool x11-utils || \
             echo "::warning::Qt xcb extras unavailable; the windowed checks will be skipped"
 
       - name: Build and install the wheel with GUI extras
@@ -190,11 +197,17 @@ jobs:
       - name: OpenGL context probe
         run: xvfb-run -a -s "-screen 0 1280x1024x24" python scripts/qt_gl_probe.py
 
-      - name: Layout, interaction and behaviour (50 checks)
+      - name: Layout, interaction and behaviour (75 checks)
         env:
           LIBGL_ALWAYS_SOFTWARE: "1"
           QT_QPA_PLATFORM: xcb
         run: xvfb-run -a -s "-screen 0 1280x1024x24" python scripts/workbench_interaction_check.py
+
+      - name: X11 window lookup parses each tool's real output
+        # No display needed: this stubs the helpers with the formats they
+        # really print. It guards the step below, which is best-effort and so
+        # has never reported a check that could not find a window.
+        run: python scripts/x11_window_parse_check.py
 
       - name: Real launch, then close
         run: xvfb-run -a -s "-screen 0 1280x1024x24" python scripts/odgui_launch_check.py

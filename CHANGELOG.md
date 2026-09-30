@@ -31,6 +31,34 @@ The project is pre-1.0. The `0.x` line is where the interfaces still move.
 
 ### Fixed
 
+- The `Real launch, then close` check could never pass on CI, and had been
+  failing on every run since it was introduced. CI runs it under `xvfb-run`,
+  which starts a display with **no window manager**, and `wmctrl` asks the
+  window manager for the client list over EWMH — with no WM it can neither find
+  the window nor close it, so the loop ran out its 60 s deadline and the
+  process was killed. It now uses `xdotool`, which walks the X tree directly
+  and needs no WM, and whose `windowclose` sends `WM_DELETE_WINDOW` to the
+  window itself — the same event `PostMessage(WM_CLOSE)` delivers on Windows,
+  and the same one that runs Qt's `closeEvent`. `wmctrl` remains as a fallback.
+- The `wmctrl -l` branch was unreachable even where a window manager was
+  present. That output has four fields (`<id> <desktop> <host> <title>`) and
+  the title contains spaces, so it must be the unsplit remainder; the parser
+  split at most five and then required exactly five, which no four-field line
+  can produce.
+- When no close mechanism existed, the verdict was `rc is not None` — but by
+  then `odgui` had usually been killed by the check's own cleanup, so that
+  exit code was manufactured by the check and said nothing about the
+  application. It now requires that the process was still running when its
+  window was found.
+- `odgui_launch_check.py` is no longer Windows-only: it runs on X11 and
+  reports which mechanism found and closed the window.
+- `scripts/x11_window_parse_check.py` (new) parses the launch check's window
+  lookup against each tool's real output format, on any platform and with no X
+  server, so a regression in that parsing cannot hide behind a best-effort
+  job. 10/10. Wired into the workbench CI job.
+- The workbench CI step was still labelled "(50 checks)" after the interaction
+  check grew to 75.
+
 - `Ligand.from_pdbqt_str` did not work at all. It called the file-opening
   reader with the document text, so the PDBQT was treated as a filename and
   every call failed — `os error 123` on Windows, a search for a file named

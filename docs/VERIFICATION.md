@@ -211,7 +211,7 @@ macOS（Metal）、Linux（Vulkan）、AMD 独显、Intel 核显、Apple Silicon
 ## 3. 验证过程中发现并修复的 bug
 
 以下每一项都是**跑出来**的，不是读代码想出来的。
-共 73 条，按性质分组。
+共 76 条，按性质分组。
 
 ### 3.1 正确性
 
@@ -814,6 +814,36 @@ AutoDock 用**嵌套 BRANCH** 表达，而本项目的写入器把它写成了�
 这一条是看截图才发现的，任何断言都发现不了——"每个顶点都靠近 CA"
 和"画面是一根连续的带"是两回事。
 
+### 3.18 推送后的 CI 抓到的三个缺陷：一个从未通过的检查
+
+上面这一版推上去之后，CI 的 `Real launch, then close` 是红的。
+查日志发现**上一版也是红的**——这个检查从来没有通过过。
+
+它之所以看起来和通过的检查一样，是因为所在 job 是 best-effort。
+
+| # | 现象 | 根因 | 修复 |
+|---|---|---|---|
+| 74 | `Real launch, then close` 在 CI 上必然超时失败（日志里 60 秒后 `exit code: -15`、`closed via: none`） | CI 用 `xvfb-run`，**只开显示、不起窗口管理器**。而 `wmctrl` 是向窗口管理器要 EWMH 的 `_NET_CLIENT_LIST`——没有 WM，它连窗口都列不出来，循环只能空转到超时 | 改用 `xdotool`：它走 `XQueryTree` 直接遍历 X 树，不需要 WM；`xdotool windowclose` 直接向窗口发 `WM_DELETE_WINDOW`，与 Windows 的 `PostMessage(WM_CLOSE)` 是同一类事件，同样落到 Qt 的 `closeEvent` |
+| 75 | 即使有 WM，`wmctrl -l` 分支也永远匹配不上 | 输出是 `<id> <desktop> <host> <title>` 四个字段，标题里带空格。原代码用 `split(None, 4)` 后要求 `len(parts) == 5`——**四字段的行永远凑不出五个元素**，这条分支是死代码 | `split(None, 3)`，标题作为不切分余数留在 `parts[3]` |
+| 76 | 关窗机制不可用时，判定近乎空断言 | 判定写的是 `ok = rc is not None`，但那时 `odgui` 通常是被脚本自己的 `finally` 里的 `terminate()` 杀掉的——**那个退出码是脚本自己造的**，与 odgui 的健康无关 | 改为看 `exited_early`：找到窗口时进程还活着，才算 PARTIAL 通过 |
+
+第 76 条是顺手发现的同类问题：只要退出码"有值"就算过，而它必定有值。
+断言写在那里是为了让检查不要失败，但一个恒真的断言不提供任何信息。
+
+#### 给它加了守卫
+
+X11 那段逻辑在 Windows 上跑不了，但在 CI 上是 best-effort 的——
+**一个从未成功的检查和一个成功的检查，在 Actions 列表里长得一模一样**。
+所以把解析部分单独拆出来验证：把三个工具的真实输出格式喂进去，
+断言该认出窗口 id、且**不认错近似标题**。
+
+`scripts/x11_window_parse_check.py`：**10 / 10**，不需要 X server，
+Windows 和 Linux 都能跑，已接入 workbench job。其中两项直接钉住 74 和 75。
+
+> **诚实说明**：xdotool 在真实 X server 上的行为，本地无法验证，
+> 只有 CI 的 runner 能证明。已验证的是解析逻辑与 Windows 路径
+> （本地 PASS，`1294x858`，955 种颜色，`WM_CLOSE` 后退出码 0）。
+
 ---
 
 ## 4. 复现本报告
@@ -838,6 +868,9 @@ python scripts\workbench_smoke.py               # workbench 两级渲染验证
 python scripts\qt_gl_probe.py                   # 6 条 GL 上下文路径
 python scripts\workbench_interaction_check.py   # GUI 布局 + 交互 + 行为 + 显示方式，75 项
 python scripts\viewport_framing_check.py        # 内容是否真的居中
+python scripts\structure_bond_check.py          # 键感知：残基分组、肽键、无跨残基键、RDKit 交叉验证，36 项
+python scripts\representation_geometry_check.py # 圆柱 / 双色键 / 条带几何，21 项
+python scripts\x11_window_parse_check.py         # 启动检查的 X11 窗口查找解析，10 项，不需要 X server
 python scripts\odgui_launch_check.py            # 真实启动 odgui 子进程并关窗
 python scripts\check_doc_encoding.py            # 8 个中文文档的 UTF-8 完整性
 python scripts\check_repo_docs.py               # 链接完整性 + 本机路径泄露
@@ -870,13 +903,17 @@ python -m maturin build --release -m dock-py\Cargo.toml --out dist
 python -m pip install --force-reinstall --no-deps dist\opendocking-0.1.0-cp38-abi3-win_amd64.whl
 python -m pytest --pyargs opendocking.tests -q
 python scripts\workbench_interaction_check.py
+python scripts\structure_bond_check.py
+python scripts\representation_geometry_check.py
+python scripts\x11_window_parse_check.py
+python scripts\odgui_launch_check.py
 python scripts\check_doc_encoding.py
 python scripts\check_repo_docs.py
 ```
 
 > `examples/` 与 `scripts/` 在**包外**，不在 `pytest` 的收集范围内。
 > 改名或重构时最容易漏掉的就是它们（§3.10 的两条就是这么漏的）——
-> 改完务必把这 6 个脚本全部重跑一遍。
+> 改完务必把上面列出的**全部 10 个 `scripts/` 与 5 个 `examples/` 脚本**重跑一遍。
 
 ---
 
