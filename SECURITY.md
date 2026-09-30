@@ -23,7 +23,7 @@ The project parses untrusted files. Please report:
   `examples/robustness_check.py` exists to police this and is part of the CI
   gate;
 - a **path traversal** or arbitrary file write reachable from a `.pdbqt`,
-  `.pdb`, `.sdf` or map file, or from a directory passed to `odockmcode dock`;
+  `.pdb`, `.sdf` or map file, or from a directory passed to `odcli dock`;
 - a **resource exhaustion** issue reachable without the caller opting in — for
   example an allocation that ignores an explicit size argument;
 - anything that would let a prepared file execute code.
@@ -57,7 +57,7 @@ otherwise.
 ## Hardening notes for users of this software
 
 - The engine runs your input. Treat `.pdbqt` files as untrusted input, and
-  prefer converting your own structure files with `odockmcode prep-receptor` /
+  prefer converting your own structure files with `odcli prep-receptor` /
   `prep-ligand` rather than consuming third-party `.pdbqt` directly.
 - Search boxes are explicit on purpose. A box covering a whole protein needs
   tens of gigabytes; there is a hard cap (`MAX_GRID_POINTS`) and exceeding it

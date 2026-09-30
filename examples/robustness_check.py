@@ -23,7 +23,7 @@ import numpy as np
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-import odockmcode  # noqa: E402
+import opendocking  # noqa: E402
 
 GOOD_RECEPTOR = None
 GOOD_LIGAND = None
@@ -95,21 +95,21 @@ def main() -> int:
         print("run from the examples directory after preparing the sample data")
         return 2
 
-    receptor = odockmcode.Receptor.from_pdbqt(GOOD_RECEPTOR)
-    ligand = odockmcode.Ligand.from_pdbqt(GOOD_LIGAND)
-    box = odockmcode.GridBox.from_center_size((0.0, 0.0, 0.0), (20.0, 20.0, 20.0))
+    receptor = opendocking.Receptor.from_pdbqt(GOOD_RECEPTOR)
+    ligand = opendocking.Ligand.from_pdbqt(GOOD_LIGAND)
+    box = opendocking.GridBox.from_center_size((0.0, 0.0, 0.0), (20.0, 20.0, 20.0))
     maps = receptor.precalculate(box, scoring="vina", spacing=0.375)
 
     print("PDBQT parsing")
-    expect_error("empty file", lambda: odockmcode.Receptor.from_pdbqt_str(""))
-    expect_error("header only", lambda: odockmcode.Ligand.from_pdbqt_str("REMARK nothing\n"))
+    expect_error("empty file", lambda: opendocking.Receptor.from_pdbqt_str(""))
+    expect_error("header only", lambda: opendocking.Ligand.from_pdbqt_str("REMARK nothing\n"))
     expect_error(
         "truncated atom line",
-        lambda: odockmcode.Ligand.from_pdbqt_str("ROOT\nATOM      1  C1  UNL     1  \n"),
+        lambda: opendocking.Ligand.from_pdbqt_str("ROOT\nATOM      1  C1  UNL     1  \n"),
     )
     expect_error(
         "two atoms on top of each other",
-        lambda: odockmcode.Ligand.from_pdbqt_str(
+        lambda: opendocking.Ligand.from_pdbqt_str(
             "ROOT\n"
             "ATOM      1  C1  UNL     1       0.000   0.000   0.000  1.00  0.00     0.000 C\n"
             "ATOM      2  C2  UNL     1       0.000   0.000   0.000  1.00  0.00     0.000 C\n"
@@ -119,7 +119,7 @@ def main() -> int:
     # An unrecognised type is deliberately *accepted* — refusing the file would
     # make the engine unusable with tools that emit types AutoDock never defined. The
     # requirement is that it be visible rather than a silent downgrade.
-    exotic = odockmcode.Receptor.from_pdbqt_str(
+    exotic = opendocking.Receptor.from_pdbqt_str(
         "ATOM      1  C1  REC     1       0.000   0.000   0.000  1.00  0.00     0.000 C\n"
         "ATOM      2  X1  REC     1       3.000   0.000   0.000  1.00  0.00     0.000 ZZ\n"
     )
@@ -141,14 +141,14 @@ def main() -> int:
 
     print("\nbox and parameters")
     expect_error(
-        "inverted box", lambda: odockmcode.GridBox.from_center_size((0, 0, 0), (-5, 5, 5))
+        "inverted box", lambda: opendocking.GridBox.from_center_size((0, 0, 0), (-5, 5, 5))
     )
-    expect_error("zero-size box", lambda: odockmcode.GridBox.from_center_size((0, 0, 0), (0, 5, 5)))
+    expect_error("zero-size box", lambda: opendocking.GridBox.from_center_size((0, 0, 0), (0, 5, 5)))
     expect_error(
-        "nan corner", lambda: odockmcode.GridBox.from_center_size((0, 0, 0), (float("nan"), 5, 5))
+        "nan corner", lambda: opendocking.GridBox.from_center_size((0, 0, 0), (float("nan"), 5, 5))
     )
     expect_error(
-        "inf corner", lambda: odockmcode.GridBox.from_center_size((0, 0, 0), (float("inf"), 5, 5))
+        "inf corner", lambda: opendocking.GridBox.from_center_size((0, 0, 0), (float("inf"), 5, 5))
     )
     # Zero spacing is a documented convenience: `Receptor::precalculate` falls
     # back to the default. Negative is not, and must be rejected.
@@ -181,36 +181,36 @@ def main() -> int:
     print("\nconformation shapes")
     expect_error(
         "wrong dof count",
-        lambda: odockmcode.score_conformation(ligand, maps, [0.0] * (ligand.num_dof + 1)),
+        lambda: opendocking.score_conformation(ligand, maps, [0.0] * (ligand.num_dof + 1)),
     )
     expect_error(
         "short batch",
-        lambda: odockmcode.evaluate_conformations(ligand, maps, np.zeros((4, 2))),
+        lambda: opendocking.evaluate_conformations(ligand, maps, np.zeros((4, 2))),
     )
     expect_error(
         "one-dimensional batch",
-        lambda: odockmcode.evaluate_conformations(ligand, maps, np.zeros(ligand.num_dof)),
+        lambda: opendocking.evaluate_conformations(ligand, maps, np.zeros(ligand.num_dof)),
     )
     expect_error(
         "nan in a conformation",
-        lambda: odockmcode.score_conformation(
+        lambda: opendocking.score_conformation(
             ligand, maps, np.full(ligand.num_dof, float("nan"))
         ),
     )
     expect_error(
         "conformation_coordinates wrong length",
-        lambda: odockmcode.conformation_coordinates(ligand, np.zeros(3)),
+        lambda: opendocking.conformation_coordinates(ligand, np.zeros(3)),
     )
     expect_error(
         "pose index out of range",
-        lambda: odockmcode.dock(ligand, maps, exhaustiveness=1, num_modes=1, seed=1).pose_coords(99),
+        lambda: opendocking.dock(ligand, maps, exhaustiveness=1, num_modes=1, seed=1).pose_coords(99),
     )
     expect_error(
         "box too small for the ligand",
-        lambda: odockmcode.dock(
+        lambda: opendocking.dock(
             ligand,
             receptor.precalculate(
-                odockmcode.GridBox.from_center_size((0, 0, 0), (12.0, 12.0, 12.0)), "vina", 0.5
+                opendocking.GridBox.from_center_size((0, 0, 0), (12.0, 12.0, 12.0)), "vina", 0.5
             ),
             exhaustiveness=1,
             num_modes=1,
@@ -220,13 +220,13 @@ def main() -> int:
 
     print("\nnumeric extremes must stay finite")
     wild = np.full((32, ligand.num_dof), 1e6)
-    energies = odockmcode.evaluate_conformations(ligand, maps, wild)
+    energies = opendocking.evaluate_conformations(ligand, maps, wild)
     if np.all(np.isfinite(energies)):
         print("  ok   energies at 1e6 stay finite")
     else:
         failures.append("non-finite energies")
         print(f"  FAIL energies at 1e6: {energies[:3]}")
-    e, g = odockmcode.score_conformation(ligand, maps, wild[0])
+    e, g = opendocking.score_conformation(ligand, maps, wild[0])
     if math.isfinite(e) and np.all(np.isfinite(g)):
         print("  ok   single-conformation energy and gradient stay finite")
     else:
@@ -236,16 +236,16 @@ def main() -> int:
     print("\nprocess death (a Rust panic would abort the interpreter)")
     run_in_subprocess(
         "panic on garbage pdbqt",
-        "import odockmcode; odockmcode.Ligand.from_pdbqt_str('\\x00\\xff not a pdbqt at all\\n')",
+        "import opendocking; opendocking.Ligand.from_pdbqt_str('\\x00\\xff not a pdbqt at all\\n')",
     )
     run_in_subprocess(
         "panic on one-atom molecule",
-        "import odockmcode; odockmcode.Ligand.from_pdbqt_str("
+        "import opendocking; opendocking.Ligand.from_pdbqt_str("
         "'ROOT\\nATOM      1  C1  UNL     1       0.000   0.000   0.000  1.00  0.00     0.000 C\\nENDROOT\\n')",
     )
     run_in_subprocess(
         "panic on self-intersecting torsions",
-        "import odockmcode; odockmcode.Ligand.from_pdbqt_str("
+        "import opendocking; opendocking.Ligand.from_pdbqt_str("
         "'ROOT\\n"
         "ATOM      1  C1  UNL     1       0.000   0.000   0.000  1.00  0.00     0.000 C\\n"
         "ATOM      2  C2  UNL     1       1.500   0.000   0.000  1.00  0.00     0.000 C\\n"

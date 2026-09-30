@@ -3,10 +3,10 @@ requires = ["maturin>=1.4,<2.0"]
 build-backend = "maturin"
 
 [project]
-# The distribution name, the import name and the console scripts are all
-# distinct from `odock`, which is reserved by another project on this machine.
-# `odgui` does not depend on the `odock` name existing at all.
-name = "odockmcode"
+# Two console scripts, deliberately: `odgui` opens the viewer, `odcli` runs the
+# full command-line interface. Nothing else is installed, and neither command
+# depends on the other existing.
+name = "opendocking"
 version = "0.1.0"
 description = "Open Docking: a modern, open-source molecular docking engine"
 readme = "README.md"
@@ -33,14 +33,12 @@ gui = ["PyQt6>=6.4", "moderngl>=5.8", "numpy-stl>=2.0"]
 dev = ["pytest>=7.0"]
 
 [project.scripts]
-# `odgui`     the 3-D workbench; bare `odgui` opens it
-# `odockmcode` the full command-line interface (prep / grid / dock / info)
-#
-# There is deliberately no `odock` entry: that name belongs to another project
-# and must stay free. Adding it back would silently take the name over again
-# on the next install.
-odgui = "odockmcode.workbench.launcher:main"
-odockmcode = "odockmcode.cli:main"
+# Exactly two commands, and they are deliberately different things:
+#   odgui   the 3-D workbench; bare `odgui` opens it
+#   odcli   the full command-line interface (prep / grid / dock / info)
+# Adding a third alias would only give users a second name to get wrong.
+odgui = "opendocking.workbench.launcher:main"
+odcli = "opendocking.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/GrassBlock-WE/opendocking-gui"
@@ -51,7 +49,7 @@ Issues = "https://github.com/GrassBlock-WE/opendocking-gui/issues"
 # The Python package lives beside the Rust extension rather than inside it,
 # which is what maturin's `python-source` expects.
 python-source = "python"
-module-name = "odockmcode._dockpy"
+module-name = "opendocking._dockpy"
 features = ["pyo3/extension-module"]
 strip = true
 # Byte-code caches are build output, not source. Shipping them bloats the wheel

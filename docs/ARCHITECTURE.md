@@ -14,15 +14,15 @@
 
 ```
 ┌────────────────────────────────────────────────────────────────┐
-│  odockmcode.workbench    PyQt6 + ModernGL 3D 工作台            │
+│  opendocking.workbench    PyQt6 + ModernGL 3D 工作台            │
 ├────────────────────────────────────────────────────────────────┤
-│  odockmcode.cli          7 个子命令                            │
-│  odockmcode.prep         RDKit：芳香性 / 质子化 / 电荷 / 极性氢│
-│  odockmcode.pdbqt_writer 79 列 PDBQT 格式化（唯一实现）        │
+│  opendocking.cli          7 个子命令                            │
+│  opendocking.prep         RDKit：芳香性 / 质子化 / 电荷 / 极性氢│
+│  opendocking.pdbqt_writer 79 列 PDBQT 格式化（唯一实现）        │
 ├────────────────────────────────────────────────────────────────┤
-│  odockmcode.core         类型化包装层，零拷贝传 NumPy          │
+│  opendocking.core         类型化包装层，零拷贝传 NumPy          │
 ├────────────────────────────────────────────────────────────────┤
-│  odockmcode._dockpy      PyO3 扩展（cdylib）                   │
+│  opendocking._dockpy      PyO3 扩展（cdylib）                   │
 ├────────────────────────────────────────────────────────────────┤
 │  dock-core               docking grid lbfgs lga                │
 │                          gpu (wgpu / WGSL)                     │

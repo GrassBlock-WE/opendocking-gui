@@ -19,7 +19,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from odockmcode import (
+from opendocking import (
     GridBox,
     Ligand,
     Receptor,
@@ -29,7 +29,7 @@ from odockmcode import (
     load_ligand,
     score_conformation,
 )
-from odockmcode.tests.make_data import make_receptor_pdb, write_all
+from opendocking.tests.make_data import make_receptor_pdb, write_all
 
 pytest.importorskip("rdkit", reason="RDKit is required for structure preparation")
 
@@ -44,7 +44,7 @@ def data_dir(tmp_path_factory) -> Path:
     Returns the *directory*; `write_all` reports what it wrote, which is only
     useful for checking that generation actually did something.
     """
-    out = tmp_path_factory.mktemp("odockmcode-data")
+    out = tmp_path_factory.mktemp("opendocking-data")
     written = write_all(out)
     assert written, "no test structures were generated"
     assert (out / "receptor.pdbqt").is_file(), "receptor preparation produced nothing"
@@ -97,7 +97,7 @@ class TestPreparation:
     def test_receptor_preparation_keeps_atoms(self):
         import tempfile
 
-        from odockmcode.prep import prepare_receptor
+        from opendocking.prep import prepare_receptor
 
         with tempfile.TemporaryDirectory() as tmp:
             src = Path(tmp) / "rec.pdb"
@@ -163,7 +163,7 @@ class TestPreparation:
 
 
 def _prepared(data_dir, name):
-    from odockmcode.prep import prepare_ligand
+    from opendocking.prep import prepare_ligand
 
     return prepare_ligand(data_dir / f"{name}.sdf")
 
@@ -346,7 +346,7 @@ class TestDocking:
         search happens to bury the ligand — and it keeps this test from going
         vacuous, because it asserts the warning actually fires.
         """
-        from odockmcode.tests.make_data import make_solid_receptor_pdbqt
+        from opendocking.tests.make_data import make_solid_receptor_pdbqt
 
         solid = Receptor.from_pdbqt_str(make_solid_receptor_pdbqt())
         benzene = load_ligand(data_dir / "ligands" / "benzene.pdbqt")
@@ -487,7 +487,7 @@ class TestDocking:
         reloaded = Ligand.from_pdbqt(path)
         assert reloaded.num_atoms == ligand.num_atoms
 
-        from odockmcode.workbench import _parse_pdbqt_atoms
+        from opendocking.workbench import _parse_pdbqt_atoms
 
         coords, _ = _parse_pdbqt_atoms(path.read_text())
         original = result.pose_coords(0)
@@ -508,9 +508,9 @@ class TestCapabilities:
         assert isinstance(status["compiled"], bool)
 
     def test_engine_version(self):
-        import odockmcode
+        import opendocking
 
-        assert odockmcode.core.engine_version() == odockmcode.__version__
+        assert opendocking.core.engine_version() == opendocking.__version__
 
     def test_python_wrappers_only_use_names_the_extension_exports(self):
         """A typo between the two layers is a runtime error, not a compile error.
@@ -523,8 +523,8 @@ class TestCapabilities:
         import inspect
         import re
 
-        from odockmcode import _dockpy
-        from odockmcode import core as core_mod
+        from opendocking import _dockpy
+        from opendocking import core as core_mod
 
         def check(wrapper, rust_class, attr):
             exported = {n for n in dir(rust_class) if not n.startswith("_")}
@@ -542,7 +542,7 @@ class TestCapabilities:
         check(core_mod.GridMaps, _dockpy.GridMaps, "_maps")
 
     def test_docking_result_exposes_every_documented_property(self):
-        from odockmcode import core as core_mod
+        from opendocking import core as core_mod
 
         for name in (
             "num_poses",

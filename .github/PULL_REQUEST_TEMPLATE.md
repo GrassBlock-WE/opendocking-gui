@@ -14,7 +14,7 @@ and what came out?
 
     cargo test -p dock-core                    # 104 passed
     cargo clippy --workspace --all-targets -- -D warnings
-    python -m pytest --pyargs odockmcode.tests -q
+    python -m pytest --pyargs opendocking.tests -q
 
 If you touched the viewer, the CLI, or anything under `examples/`, show that
 too. Those live outside the installed package and are not collected by
@@ -30,7 +30,7 @@ too. Those live outside the installed package and are not collected by
 - [ ] `cargo clippy --workspace --all-targets -- -D warnings` is clean, **and**
       clean again with `--features gpu`
 - [ ] `cargo test -p dock-core` passes, and with `--features gpu`
-- [ ] `python -m pytest --pyargs odockmcode.tests -q` passes against a
+- [ ] `python -m pytest --pyargs opendocking.tests -q` passes against a
       **rebuilt and reinstalled** wheel
 - [ ] `examples/` and `scripts/` re-run if this touched them
 - [ ] `python scripts/check_doc_encoding.py` reports 0 damaged documents

@@ -160,7 +160,7 @@ impl GpuContext {
         // wgpu 0.20 takes the device request as a descriptor plus a trace path.
         let (device, queue) = pollster::block_on(adapter.request_device(
             &wgpu::DeviceDescriptor {
-                label: Some("odock"),
+                label: Some("opendocking"),
                 required_features: wgpu::Features::empty(),
                 required_limits: wgpu::Limits::downlevel_defaults(),
             },
@@ -169,11 +169,11 @@ impl GpuContext {
         .map_err(|e| gpu_err(&format!("could not open a device: {e}")))?;
 
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("odock-energy"),
+            label: Some("opendocking-energy"),
             source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(ENERGY_WGSL)),
         });
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("odock-layout"),
+            label: Some("opendocking-layout"),
             entries: &[
                 binding(0, wgpu::BufferBindingType::Storage { read_only: false }, 4),
                 binding(1, wgpu::BufferBindingType::Storage { read_only: true }, 4),
@@ -187,12 +187,12 @@ impl GpuContext {
             ],
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("odock-pipeline"),
+            label: Some("opendocking-pipeline"),
             bind_group_layouts: &[&bind_group_layout],
             push_constant_ranges: &[],
         });
         let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("odock-energy"),
+            label: Some("opendocking-energy"),
             layout: Some(&pipeline_layout),
             module: &module,
             entry_point: "main",
@@ -201,7 +201,7 @@ impl GpuContext {
 
         const INITIAL_CAPACITY: usize = 4096;
         let energy_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("odock-energies"),
+            label: Some("opendocking-energies"),
             size: INITIAL_CAPACITY as u64,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
@@ -245,7 +245,7 @@ impl GpuContext {
             // copy size stays valid for any batch size.
             let grown = out_bytes.next_multiple_of(4);
             self.energy_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("odock-energies"),
+                label: Some("opendocking-energies"),
                 size: grown as u64,
                 usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
                 mapped_at_creation: false,
@@ -278,34 +278,34 @@ impl GpuContext {
         let conf_buf = self
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("odock-coords"),
+                label: Some("opendocking-coords"),
                 contents: bytemuck::cast_slice(&batch.coords),
                 usage: wgpu::BufferUsages::STORAGE,
             });
         let atom_buf = self
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("odock-atom-data"),
+                label: Some("opendocking-atom-data"),
                 contents: bytemuck::cast_slice(&batch.atom_data),
                 usage: wgpu::BufferUsages::STORAGE,
             });
         let grid_buf = self
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("odock-grid"),
+                label: Some("opendocking-grid"),
                 contents: bytemuck::cast_slice(grid.raw_slice()),
                 usage: wgpu::BufferUsages::STORAGE,
             });
         let param_buf = self
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("odock-params"),
+                label: Some("opendocking-params"),
                 contents: bytemuck::bytes_of(&params),
                 usage: wgpu::BufferUsages::UNIFORM,
             });
 
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("odock-bind"),
+            label: Some("opendocking-bind"),
             layout: &self.bind_group_layout,
             entries: &[
                 binding_entry(0, &self.energy_buffer),
@@ -317,7 +317,7 @@ impl GpuContext {
         });
 
         let readback = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("odock-readback"),
+            label: Some("opendocking-readback"),
             size: out_bytes as u64,
             usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
@@ -326,11 +326,11 @@ impl GpuContext {
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("odock"),
+                label: Some("opendocking"),
             });
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("odock-pass"),
+                label: Some("opendocking-pass"),
                 timestamp_writes: None,
             });
             pass.set_pipeline(&self.pipeline);
@@ -414,7 +414,10 @@ fn binding(
     }
 }
 
-fn binding_entry(index: u32, buffer: &wgpu::Buffer) -> wgpu::BindGroupEntry {
+// The output borrows from `buffer`, so both lifetimes are named rather than
+// elided. Eliding the input while the return type carries the same lifetime
+// compiles, but newer clippy (`mismatched_lifetime_syntaxes`) rejects it.
+fn binding_entry<'a>(index: u32, buffer: &'a wgpu::Buffer) -> wgpu::BindGroupEntry<'a> {
     wgpu::BindGroupEntry {
         binding: index,
         resource: buffer.as_entire_binding(),

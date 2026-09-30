@@ -21,7 +21,7 @@ import numpy as np
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-import odockmcode  # noqa: E402
+import opendocking  # noqa: E402
 
 BOX_HALF = 9.0  # the 18 A box used below, so the centre is fixed
 CENTRE = (3.47, 6.21, 8.95)
@@ -73,11 +73,11 @@ def steepest_descent_gain(lig, maps, conf, grad) -> float:
         return 0.0
     unit = grad / norm
     conf = np.asarray(conf, dtype=np.float64)
-    e0 = odockmcode.score_conformation(lig, maps, conf, "vina")[0]
+    e0 = opendocking.score_conformation(lig, maps, conf, "vina")[0]
     best = 0.0
     for step in _LINE_SEARCH_STEPS:
         try:
-            e = odockmcode.score_conformation(lig, maps, conf - step * unit, "vina")[0]
+            e = opendocking.score_conformation(lig, maps, conf - step * unit, "vina")[0]
         except ValueError:
             continue
         best = max(best, e0 - e)
@@ -94,9 +94,9 @@ def main(
     receptor = read_pdbqt(receptor_path)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        rec = odockmcode.Receptor.from_pdbqt(receptor_path)
-    lig = odockmcode.Ligand.from_pdbqt(ligand_path)
-    box = odockmcode.GridBox.from_center_size(centre, (size, size, size))
+        rec = opendocking.Receptor.from_pdbqt(receptor_path)
+    lig = opendocking.Ligand.from_pdbqt(ligand_path)
+    box = opendocking.GridBox.from_center_size(centre, (size, size, size))
     maps = rec.precalculate(box, scoring="vina", spacing=0.375)
 
     rec_xy = np.array([[r[1], r[2], r[3]] for r in receptor])
@@ -117,7 +117,7 @@ def main(
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        result = odockmcode.dock(lig, maps, exhaustiveness=16, num_modes=5, seed=20260929)
+        result = opendocking.dock(lig, maps, exhaustiveness=16, num_modes=5, seed=20260929)
 
     print(f"poses    {result.num_poses} from {result.raw_pose_count} conformations\n")
 
@@ -150,7 +150,7 @@ def main(
         #    of opposite sign — while still being a true local minimum. A
         #    gradient-norm threshold cannot tell those apart from a failed
         #    optimisation; "no downhill step exists" can.
-        energy, grad = odockmcode.score_conformation(lig, maps, conf, "vina")
+        energy, grad = opendocking.score_conformation(lig, maps, conf, "vina")
         gnorm = float(np.max(np.abs(grad)))
         downhill = steepest_descent_gain(lig, maps, conf, grad)
         worst_gradient = max(worst_gradient, gnorm)
@@ -161,8 +161,8 @@ def main(
 
         # 3. CPU vs GPU on the real conformation
         pop = np.asarray(conf, dtype=np.float64).reshape(1, -1).repeat(4, axis=0)
-        e_cpu = odockmcode.evaluate_conformations(lig, maps, pop, "vina", use_gpu=False)
-        e_gpu = odockmcode.evaluate_conformations(lig, maps, pop, "vina", use_gpu=True)
+        e_cpu = opendocking.evaluate_conformations(lig, maps, pop, "vina", use_gpu=False)
+        e_gpu = opendocking.evaluate_conformations(lig, maps, pop, "vina", use_gpu=True)
         gpu_gap = float(np.max(np.abs(e_gpu - e_cpu)))
 
         flags = []

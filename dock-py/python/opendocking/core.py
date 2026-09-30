@@ -1,7 +1,7 @@
 """Typed Python wrappers over the compiled docking engine.
 
 Everything here is a thin layer: the heavy lifting happens in the Rust extension
-module :mod:`odockmcode._dockpy`. The wrappers exist to give the library a coherent
+module :mod:`opendocking._dockpy`. The wrappers exist to give the library a coherent
 Python surface — one import location, a consistent docstring style, and objects
 that are pleasant to use interactively — not to add behaviour that does not
 belong in a language binding.
@@ -24,7 +24,7 @@ except ImportError as exc:  # pragma: no cover - only on a broken build
         "The Open Docking native extension is not available. Build it with:\n"
         "    pip install ./python\n"
         "or, for a development build:\n"
-        "    maturin develop --release -m odockmcode._dockpy\n"
+        "    maturin develop --release -m opendocking._dockpy\n"
         f"Underlying error: {exc}"
     ) from exc
 
@@ -163,7 +163,7 @@ class Receptor:
         A well-prepared receptor has polar hydrogens on every donor. Zero is a
         strong hint that the structure was prepared with non-polar hydrogens
         merged, which costs hydrogen bonds at every serine, threonine and
-        tyrosine. :func:`odockmcode.prep.prepare_receptor` adds them for you.
+        tyrosine. :func:`opendocking.prep.prepare_receptor` adds them for you.
         """
         return self._rec.num_polar_hydrogens
 

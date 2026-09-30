@@ -21,7 +21,7 @@
 //! # Example
 //!
 //! ```python
-//! from odockmcode import core
+//! from opendocking import core
 //!
 //! receptor = core.Receptor.from_pdbqt("rec.pdbqt")
 //! box = core.GridBox.from_center_size((0., 0., 0.), (22., 22., 22.))
@@ -77,7 +77,7 @@ fn scoring_from_name(name: &str) -> PyResult<VinaScoring> {
 // ---------------------------------------------------------------------------
 
 /// An axis-aligned search box.
-#[pyclass(name = "GridBox", module = "odockmcode._dockpy")]
+#[pyclass(name = "GridBox", module = "opendocking._dockpy")]
 #[derive(Debug, Clone, Copy)]
 pub struct PyGridBox {
     inner: GridBox,
@@ -138,7 +138,7 @@ impl PyGridBox {
 // ---------------------------------------------------------------------------
 
 /// A rigid receptor prepared for map precalculation.
-#[pyclass(name = "Receptor", module = "odockmcode._dockpy")]
+#[pyclass(name = "Receptor", module = "opendocking._dockpy")]
 pub struct PyReceptor {
     inner: Receptor,
 }
@@ -230,7 +230,7 @@ impl PyReceptor {
 // ---------------------------------------------------------------------------
 
 /// Precalculated receptor affinity maps.
-#[pyclass(name = "GridMaps", module = "odockmcode._dockpy")]
+#[pyclass(name = "GridMaps", module = "opendocking._dockpy")]
 pub struct PyGridMaps {
     inner: Arc<GridMaps>,
 }
@@ -293,7 +293,7 @@ impl PyGridMaps {
 // ---------------------------------------------------------------------------
 
 /// A prepared docking ligand.
-#[pyclass(name = "Ligand", module = "odockmcode._dockpy")]
+#[pyclass(name = "Ligand", module = "opendocking._dockpy")]
 pub struct PyLigand {
     inner: Arc<Ligand>,
 }
@@ -493,7 +493,7 @@ fn default_atom_type(e: Element) -> dock_core::types::AtomType {
 // ---------------------------------------------------------------------------
 
 /// The outcome of a docking run.
-#[pyclass(name = "DockingResults", module = "odockmcode._dockpy")]
+#[pyclass(name = "DockingResults", module = "opendocking._dockpy")]
 pub struct PyDockingResults {
     result: Arc<DockingResult>,
     ligand: Arc<Ligand>,

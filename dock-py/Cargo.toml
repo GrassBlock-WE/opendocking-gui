@@ -26,5 +26,5 @@ gpu = ["dock-core/gpu"]
 
 [package.metadata.maturin]
 python-source = "python"
-module-name = "odockmcode._dockpy"
+module-name = "opendocking._dockpy"
 features = ["pyo3/extension-module"]

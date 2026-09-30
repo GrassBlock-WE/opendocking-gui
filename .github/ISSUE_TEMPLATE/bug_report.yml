@@ -47,7 +47,7 @@ body:
       description: The exact command line, and the input files.
       render: shell
       placeholder: |
-        odockmcode dock -r rec.pdbqt -l lig.pdbqt --center_x 0 --center_y 0 --center_z 0 --size_x 20 --size_y 20 --size_z 20 -e 8 -o poses.pdbqt
+        odcli dock -r rec.pdbqt -l lig.pdbqt --center_x 0 --center_y 0 --center_z 0 --size_x 20 --size_y 20 --size_z 20 -e 8 -o poses.pdbqt
     validations:
       required: true
 
@@ -65,7 +65,7 @@ body:
     attributes:
       label: Which entry point
       options:
-        - odockmcode (command line)
+        - opendocking (command line)
         - odgui (workbench)
         - Python API
         - Rust crate
@@ -81,7 +81,7 @@ body:
       description: Paste the output of the commands below if you can.
       render: shell
       placeholder: |
-        $ odockmcode info
+        $ odcli info
         $ rustc --version
         $ python --version
         $ cargo clippy --version

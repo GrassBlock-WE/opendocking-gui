@@ -1,4 +1,4 @@
-"""Allow ``python -m odockmcode`` to run the command-line interface."""
+"""Allow ``python -m opendocking`` to run the command-line interface."""
 
 import sys
 

@@ -26,7 +26,7 @@
 | 项 | 结果 |
 |---|---|
 | `maturin build --features gpu` | 成功产出 wheel |
-| `odockmcode info` | `gpu: compiled in and an adapter is available` |
+| `odcli info` | `gpu: compiled in and an adapter is available` |
 | `gpu_status()` | `{"compiled": True, "available": True}` |
 | 实际适配器 | `NVIDIA GeForce RTX 3050 Laptop GPU` |
 | 真实蛋白网格，5 / 1024 构体 GPU vs CPU 最大差 | **2.220e-06**（两种规模相同） |
@@ -43,9 +43,9 @@ GPU 后端**已经接入批量打分路径**（`evaluate_conformations(use_gpu=T
 | 项 | 结果 |
 |---|---|
 | `python -m pip install -r requirements.txt` | 依赖清单按运行时 / 构建 / GUI / 开发分组，附实测版本 |
-| `python -m pytest --pyargs odockmcode.tests -q` | **37 passed**（对**已安装的 wheel**运行） |
-| CPU wheel | `dist/odockmcode-0.1.0-cp38-abi3-win_amd64.whl` |
-| GPU wheel | `dist-gpu/odockmcode-0.1.0-cp38-abi3-win_amd64.whl` |
+| `python -m pytest --pyargs opendocking.tests -q` | **37 passed**（对**已安装的 wheel**运行） |
+| CPU wheel | `dist/opendocking-0.1.0-cp38-abi3-win_amd64.whl` |
+| GPU wheel | `dist-gpu/opendocking-0.1.0-cp38-abi3-win_amd64.whl` |
 
 > 注意 `--pyargs` 跑的是**已安装的包**。改了 `dock-py/python/` 下的 `.py`
 > 必须重新 `maturin build` + `pip install`，否则测试跑的是旧代码。踩过一次。
@@ -142,7 +142,7 @@ pose 5: E  -4.571  contacts 18/19  min-dist 2.32 A  clash 0  |grad| 4.86  downhi
 全部 7 个子命令实跑通过，含目录批量与 `--json`。
 碰撞计数已进 JSON（`rejected_pose_count`）与终端摘要（`WARNING:` 行）。
 
-CLI 的命令名是 `odockmcode`（`odockmcode` 子命令），`odgui` 是另一个独立入口点。
+CLI 的命令名是 `opendocking`（`opendocking` 子命令），`odgui` 是另一个独立入口点。
 
 注意 CLI 的 box 参数是**下划线**：`--center_x`，不是 `--center-x`。
 
@@ -447,9 +447,10 @@ pose 1: closest approach to a cell face = 0.0000 cells
 
 ### 3.9 `odgui` 入口点
 
-`odgui` 是**独立于 `odock` 命令名**的 console script
-（`odockmcode.workbench.launcher:main`），因此 `odock` 这个名字被本机另一个项目占用时
-工作台照常可用。启动器不在模块顶层 import Qt / modernGL，
+`odgui` 与 `odcli` 是两个**互相独立**的 console script
+（`opendocking.workbench.launcher:main` 与 `opendocking.cli:main`）：
+装了工作台不影响 CLI，只装 CLI 也不影响工作台。
+启动器不在模块顶层 import Qt / modernGL，
 所以 `odgui --help` 与 `odgui --check` 在没有图形栈的机器上也能给出可读的结果，
 而不是抛 traceback。
 
@@ -471,46 +472,50 @@ pose 1: closest approach to a cell face = 0.0000 cells
 
 ### 3.10 改名过程中发现并修复的 bug
 
-本机另一个项目已经占用了 `odock` 这个命令名，所以本项目改名让出它。
-改名不是纯文本替换：**第一次改名漏掉了一整类引用，而现成的验证脚本正好覆盖了它们**。
+本项目把命令名收敛成两个——`odgui` 与 `odcli`——并把包名定为 `opendocking`。
+改名不是纯文本替换：**改名漏掉了一整类引用，而现成的验证脚本正好覆盖了它们**。
 
 | # | 现象 | 根因 | 修复 |
 |---|---|---|---|
-| 50 | `examples/` 下 4 个脚本、`scripts/workbench_interaction_check.py` 全部 `NameError: name 'odock' is not defined` | 改名脚本重写了 `import odock` → `import odockmcode`，但**没有**重写 `odock.Receptor` 这类**用法**。import 成功、执行时才炸 | 逐个改为 `odockmcode.`；`examples/*.py` 与 `scripts/*.py` 现在全仓库无 `odock.` 用法 |
+| 50 | `examples/` 下 4 个脚本、`scripts/workbench_interaction_check.py` 全部 `NameError` | 改名脚本重写了 `import X` → `import opendocking`，但**没有**重写 `X.Receptor` 这类**用法**。import 成功、执行时才炸 | 逐个改为 `opendocking.`；`examples/*.py` 与 `scripts/*.py` 现在全仓库无残留用法 |
 | 51 | `robustness_check.py` 的三个 "panic 不杀进程" 用例**一直在假通过** | `run_in_subprocess` 只看 `returncode not in (0, 1)`。改名后子进程因 `ModuleNotFoundError` 退出 1，于是被当成"引擎干净地抛了可捕获异常" | 增加守卫：子进程 stderr 出现 `ModuleNotFoundError` / `NameError` 直接判 FAIL，并说明"什么都没测到" |
+| 58 | CI 的 `gpu` 配置 clippy 失败，而本机通过 | 本机 rustc 1.87 **没有** `mismatched_lifetime_syntaxes` 这条新 lint；CI 用 `@stable`（1.98）有。只有开 `--features gpu` 才编译到那段代码，所以 default 配置的 job 是绿的 | `binding_entry` 显式命名输入与输出生命周期；本机工具链升到 1.98.1 与 CI 对齐后重跑 |
 
 第 51 条比第 50 条更值得记：**一个无法区分"引擎抛了干净异常"和"脚本自己坏了"的测试，
 等于没有测试**。守卫本身也做了反向验证——故意让子进程 import 一个不存在的模块，
 确认它被判 FAIL 而不是 PASS。
 
-> 发现这两个 bug 的过程值得记下来：`odockmcode.tests` 37 项全绿，
+> 发现 50、51 的过程值得记下来：`opendocking.tests` 37 项全绿，
 > 但它们测的是**包内**代码；`examples/` 与 `scripts/` 在包外，
 > 不在任何测试的收集范围内。改名改的恰好是包外的编排层。
+>
+> 58 条则说明另一件事：**"本地绿"不等于"CI 绿"**。本地工具链比 CI 旧，
+> 新增的 lint 根本不会触发。工具链版本应当与 CI 对齐，否则验证是有缺口的。
 
-### 3.11 `odock` 名字已让出（实机核查）
+### 3.11 命名与安装状态（实机核查）
 
-三处名称是**分开的**，这是有意的：
+四处名称是**分开的**，这是有意的：
 
-| 名称 | 现在是什么 |
+| 名称 | 值 |
 |---|---|
-| distribution | `odockmcode` |
-| import 包 | `odockmcode` |
-| console script | `odgui`（工作台）、`odockmcode`（7 子命令 CLI） |
-| `odock` | **不属于本项目**，已释放 |
+| distribution | `opendocking` |
+| import 包 | `opendocking` |
+| GUI 命令 | `odgui`（工作台） |
+| CLI 命令 | `odcli`（7 子命令） |
+| PyO3 扩展 | `opendocking._dockpy` |
+
+只安装两个命令，没有第三个别名——多一个别名只会让用户多记一个名字。
 
 | 检查 | 结果 |
 |---|---|
-| `where.exe odock` | 找不到（整个 PATH 上无此命令） |
-| `import odock` | `ModuleNotFoundError: No module named 'odock'` |
-| `pip list` | 只有 `odockmcode 0.1.0`，无 invalid-distribution 警告 |
-| `site-packages` | 只有 `odockmcode/` 与 `odockmcode-0.1.0.dist-info/`，无 `odock/`、无 `~dock*` 残骸 |
-| Python 的 `Scripts` 目录 | `odgui.exe` 与 `odockmcode.exe`；**无** `odock.exe` |
-| `dist/`、`dist-gpu/` | 旧名 wheel `odock-0.1.0-*.whl` 已删除——留着就等于留了一条把名字抢回去的路 |
-| `[project.scripts]` | 源码里**没有** `odock` 条目，重新安装也不会悄悄占回去 |
+| `pip list` | 只有 `opendocking 0.1.0`，无 invalid-distribution 警告 |
+| `site-packages` | 只有 `opendocking/` 与 `opendocking-0.1.0.dist-info/`，无 `~dock*` 残骸 |
+| Python 的 `Scripts` 目录 | 恰好 `odgui.exe` 与 `odcli.exe` |
+| `dist/`、`dist-gpu/` | wheel 文件名跟随分发名，为 `opendocking-0.1.0-*.whl` |
+| `[project.scripts]` | 只有 `odgui` 与 `odcli` 两条，重新安装也不会变出第三个 |
+| CI 门禁 | 有一步专门断言"装出来的 console script 恰好是这两个" |
 
-`odgui` 的入口 `odockmcode.workbench.launcher:main` 里没有 `odock` 字样，
-因此它不依赖那个名字是否存在。`odockmcode workbench` 子命令仍保留，
-等价于 `odgui`，只为兼容既有脚本。
+`odcli workbench` 子命令仍保留，等价于 `odgui`，只为兼容既有脚本。
 
 ### 3.12 发布前的仓库体检
 
@@ -519,12 +524,12 @@ pose 1: closest approach to a cell face = 0.0000 cells
 
 | # | 现象 | 根因 | 修复 |
 |---|---|---|---|
-| 52 | `examples/maps/` 有 **40 个 `.map`、44.6 MB**，会被提交进 git | `odockmcode rec-grid` 的输出目录，之前既没进 `.gitignore`，也不在任何文档里 | 加入 `.gitignore`；`examples/multi/`、`examples/split_dir/` 同理（`dock` / `split` 的输出）。`examples/ligands/` **是**源码，保留 |
+| 52 | `examples/maps/` 有 **40 个 `.map`、44.6 MB**，会被提交进 git | `odcli rec-grid` 的输出目录，之前既没进 `.gitignore`，也不在任何文档里 | 加入 `.gitignore`；`examples/multi/`、`examples/split_dir/` 同理（`dock` / `split` 的输出）。`examples/ligands/` **是**源码，保留 |
 | 53 | 仓库**不是 rustfmt-clean** 的 | 手写代码未经 `cargo fmt` | `cargo fmt --all`；随后 104/114 测试与双配置 clippy 全部重跑，exit 0 |
 | 54 | 4 个文件行尾是 **CRLF / 混用** | 在 Windows 上手写，`dock-core/Cargo.toml`、`dock-py/README.md` 等混了 LF 与 CRLF | 新增 `.gitattributes`（`* text=auto eol=lf`），Windows 脚本单独 `eol=crlf` |
 | 55 | `dist-gpu/` 没被忽略 | `.gitignore` 只写了 `/dist/` | 补上，2.4 MB 的 GPU wheel 不再进仓库 |
 | 56 | 验证报告里漏了本机绝对路径 | 上一轮核查时直接写了本机 Python 的 `Scripts` 绝对路径 | 改成"Python 的 `Scripts` 目录"；新增 `scripts/check_repo_docs.py` 专门守这条。这条后来又抓到一次——本文早先引用这个 bug 时把原路径抄了回来 |
-| 57 | 占位仓库地址 `github.com/opendocking/odock` | 从未替换过，该仓库并不存在 | 7 个文件 11 处先改为 `<owner>/<repo>` 标 `TODO(RELEASE)`，确定账号后再统一替换为真实地址 |
+| 57 | 元数据里的仓库地址是手写的占位值 | 写元数据时还没定仓库 | 7 个文件 11 处先改为 `<owner>/<repo>` 标 `TODO(RELEASE)`，确定账号后再统一替换为真实地址 |
 
 另外补了 12 个开源社区文件此前完全缺失：
 `CONTRIBUTING.md`、`CHANGELOG.md`、`SECURITY.md`、`CODE_OF_CONDUCT.md`、
@@ -532,7 +537,7 @@ pose 1: closest approach to a cell face = 0.0000 cells
 以及 `.github/` 下的 2 个 issue 模板、PR 模板和 CI 工作流。
 
 **`odck.md` 没有进仓库。** 它是最初给 AI 的需求稿（开头是"你是一名资深科学计算
-全栈架构师…"的提示词），里面的模块名 `odock.chem.receptor` 等从未实现，
+全栈架构师…"的提示词），里面的模块名（`*.chem.receptor` 等）从未实现，
 不是用户文档。
 
 #### 发布目录的独立性验证
@@ -543,7 +548,7 @@ pose 1: closest approach to a cell face = 0.0000 cells
 - 与工作区**逐字节比对** 93/93 一致，没有漏拷也没有多拷
 - 22 个必备文件齐备，7 类禁入项（`odck.md` / 构建产物 / 缓存）一个都没有
 - 文档卫生检查**在该目录内部**重跑：0 编码损坏、0 断链、0 本机路径
-- 可执行源码里 `odock.` 残留 **0** 处
+- 可执行源码里旧包名残留 **0** 处
   （`docs/VERIFICATION.md` 里有 1 处，是**举例说明 §3.10 那个 bug**，是有意保留的）
 - **在该目录内部从零构建并测试**：rustfmt → 104/114 测试 → 双配置 clippy →
   wheel 构建安装 → 37 pytest → `odgui --check` → 3 个 examples →
@@ -565,10 +570,10 @@ cargo clippy -p dock-core --features gpu --all-targets -- -D warnings
 # wheel（CPU 与 GPU 各一次）
 python -m maturin build --release -m dock-py\Cargo.toml --out dist
 python -m maturin build --release -m dock-py\Cargo.toml --out dist-gpu --features gpu
-python -m pip install --force-reinstall --no-deps dist\odockmcode-0.1.0-cp38-abi3-win_amd64.whl
+python -m pip install --force-reinstall --no-deps dist\opendocking-0.1.0-cp38-abi3-win_amd64.whl
 
 # Python（对已安装的 wheel；改过 .py 必须先重建 wheel）
-python -m pytest --pyargs odockmcode.tests -q        # 37
+python -m pytest --pyargs opendocking.tests -q        # 37
 
 # 验证脚本
 python scripts\workbench_smoke.py               # workbench 两级渲染验证
@@ -585,9 +590,12 @@ python determinism_check.py                     # 确定性与并行
 python audit_poses.py                           # pose 物理审计
 python diagnose_clash.py                        # 打分函数偏干净还是偏重叠
 
-# `odock` 必须保持空出
-where.exe odock                                 # 期望：找不到
-python -c "import odock"                        # 期望：ModuleNotFoundError
+# 装出来的 console script 必须恰好是两个，且名字正确
+odcli --version
+odcli info
+odgui --check
+python -c "import importlib.metadata as m; print(sorted(e.name for e in m.entry_points(group='console_scripts') if 'opendocking' in (e.value or '')))"
+# 期望：['odcli', 'odgui']
 ```
 
 发布目录 `opendocking-gui/` 是上面这套命令的**独立副本**。
@@ -601,8 +609,8 @@ cargo test --workspace --features gpu
 cargo clippy --workspace --all-targets -- -D warnings
 cargo clippy --workspace --all-targets --features gpu -- -D warnings
 python -m maturin build --release -m dock-py\Cargo.toml --out dist
-python -m pip install --force-reinstall --no-deps dist\odockmcode-0.1.0-cp38-abi3-win_amd64.whl
-python -m pytest --pyargs odockmcode.tests -q
+python -m pip install --force-reinstall --no-deps dist\opendocking-0.1.0-cp38-abi3-win_amd64.whl
+python -m pytest --pyargs opendocking.tests -q
 python scripts\workbench_interaction_check.py
 python scripts\check_doc_encoding.py
 python scripts\check_repo_docs.py

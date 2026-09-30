@@ -19,7 +19,7 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 from PyQt6 import QtCore, QtGui, QtWidgets  # noqa: E402
 
-from odockmcode.workbench.app import MainWindow  # noqa: E402
+from opendocking.workbench.app import MainWindow  # noqa: E402
 
 
 def pixels(win):

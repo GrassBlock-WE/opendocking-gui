@@ -10,7 +10,7 @@ license = "GPL-3.0-or-later"
 repository = "https://github.com/GrassBlock-WE/opendocking-gui"
 homepage = "https://github.com/GrassBlock-WE/opendocking-gui"
 authors = ["GrassBlock-WE <3365450574@qq.com>"]
-description = "Open Docking (odockmcode): a modern, GPU-accelerated, open-source molecular docking engine"
+description = "Open Docking: a modern, GPU-accelerated, open-source molecular docking engine"
 
 [workspace.dependencies]
 dock-core = { path = "dock-core", version = "0.1.0" }

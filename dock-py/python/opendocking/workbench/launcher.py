@@ -1,9 +1,9 @@
 """``odgui`` -- the standalone entry point for the 3-D workbench.
 
-Separate from the ``odockmcode`` CLI on purpose. The ``odock`` command name
-belongs to another project on this machine, and a viewer that a user reaches
-for by name should not depend on which distribution installed it. Nothing here
-— or anywhere else in the package — is called ``odock``.
+Separate from the ``odcli`` command-line interface on purpose. The package ships
+exactly two console scripts, ``odgui`` for the viewer and ``odcli`` for the
+full CLI, so a user who reaches for one by name gets exactly that and nothing
+else. Neither depends on the other being present.
 
 Nothing here imports Qt or moderngl at module scope. Importing this module has
 to stay cheap and must work on a machine with no display stack, so that
@@ -97,11 +97,11 @@ def main(argv: list[str] | None = None) -> int:
             return 2
 
     if args.check:
-        import odockmcode
+        import opendocking
 
         print(f"{_BANNER}: GUI stack OK")
-        print(f"  engine  {odockmcode.engine_version()}")
-        gpu = odockmcode.gpu_status()
+        print(f"  engine  {opendocking.engine_version()}")
+        gpu = opendocking.gpu_status()
         print(
             "  gpu     "
             + (

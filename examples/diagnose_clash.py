@@ -23,7 +23,7 @@ import numpy as np
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-import odockmcode  # noqa: E402
+import opendocking  # noqa: E402
 
 CLASH = 2.0  # A; two heavy atoms closer than this cannot both be where they are
 
@@ -43,9 +43,9 @@ def main(receptor_path: str, ligand_path: str, centre, size: float, n: int) -> i
     centre = np.asarray(centre, dtype=float)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        rec = odockmcode.Receptor.from_pdbqt(receptor_path)
-    lig = odockmcode.Ligand.from_pdbqt(ligand_path)
-    box = odockmcode.GridBox.from_center_size(tuple(centre), (size, size, size))
+        rec = opendocking.Receptor.from_pdbqt(receptor_path)
+    lig = opendocking.Ligand.from_pdbqt(ligand_path)
+    box = opendocking.GridBox.from_center_size(tuple(centre), (size, size, size))
     maps = rec.precalculate(box, scoring="vina", spacing=0.375)
     rec_heavy = read_heavy(receptor_path)
 
@@ -56,14 +56,14 @@ def main(receptor_path: str, ligand_path: str, centre, size: float, n: int) -> i
     pop[:, 3:6] = rng.uniform(-np.pi, np.pi, (n, 3))
     pop[:, 6:] = rng.uniform(-np.pi, np.pi, (n, lig.num_torsions))
 
-    energies = odockmcode.evaluate_conformations(lig, maps, pop, "vina", use_gpu=True)
+    energies = opendocking.evaluate_conformations(lig, maps, pop, "vina", use_gpu=True)
 
     # Re-derive coordinates for each sampled placement through the engine, so
     # the clash test uses exactly the geometry that was scored.
     rows = []
     for i in range(n):
-        e, _ = odockmcode.score_conformation(lig, maps, pop[i], "vina")
-        xyz = odockmcode.conformation_coordinates(lig, pop[i])
+        e, _ = opendocking.score_conformation(lig, maps, pop[i], "vina")
+        xyz = opendocking.conformation_coordinates(lig, pop[i])
         d = np.linalg.norm(xyz[:, None, :] - rec_heavy[None, :, :], axis=-1).min()
         rows.append((e, float(d)))
     rows.sort(key=lambda r: r[0])

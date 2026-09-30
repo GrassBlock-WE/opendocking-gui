@@ -1,4 +1,4 @@
-//! Micro-benchmarks for the odock scoring and grid hot paths.
+//! Micro-benchmarks for the Open Docking scoring and grid hot paths.
 //!
 //! Run with `cargo bench -p dock-core`. These are deliberately small and
 //! self-contained so they work without external data files.
@@ -67,7 +67,7 @@ fn synthetic_receptor(n: usize) -> Molecule {
 }
 
 fn main() {
-    println!("odock dock-core benchmarks");
+    println!("opendocking dock-core benchmarks");
     println!("  rayon threads: {}\n", rayon::current_num_threads());
 
     let scoring = VinaScoring::new();

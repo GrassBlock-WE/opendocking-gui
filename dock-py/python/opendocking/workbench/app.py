@@ -1,6 +1,6 @@
 """The workbench application: window, OpenGL viewport, and docking thread.
 
-Separated from :mod:`odockmcode.workbench` (geometry, colours, parsing) so that
+Separated from :mod:`opendocking.workbench` (geometry, colours, parsing) so that
 importing the package does not require PyQt6 or moderngl to be installed.
 
 # How the OpenGL context is shared

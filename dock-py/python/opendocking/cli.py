@@ -50,14 +50,14 @@ def _add_box_arguments(parser: argparse.ArgumentParser) -> None:
 def build_parser() -> argparse.ArgumentParser:
     """Construct the full argument parser."""
     parser = argparse.ArgumentParser(
-        prog="odockmcode",
+        prog="odcli",
         description="Open Docking — molecular docking engine",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     from . import __version__
 
     parser.add_argument(
-        "--version", action="version", version=f"odockmcode {__version__}"
+        "--version", action="version", version=f"odcli {__version__}"
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -398,7 +398,7 @@ def _use_utf8_console() -> None:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Entry point for the ``odockmcode`` console script."""
+    """Entry point for the ``odcli`` console script."""
     _use_utf8_console()
     parser = build_parser()
     args = parser.parse_args(argv)

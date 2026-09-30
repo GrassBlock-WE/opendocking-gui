@@ -624,7 +624,7 @@ impl GridMaps {
                     slot_tag(slot)
                 ));
                 let mut text = String::with_capacity(128);
-                text.push_str("GRID_PARAMETER_FILE odock\n");
+                text.push_str("GRID_PARAMETER_FILE opendocking\n");
                 text.push_str("GRID_DATA_FILE_NONE\n");
                 text.push_str("MACROMOLECULE\n");
                 text.push_str("SPACING ");

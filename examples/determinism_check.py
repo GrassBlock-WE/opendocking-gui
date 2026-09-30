@@ -23,7 +23,7 @@ import numpy as np
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-import odockmcode  # noqa: E402
+import opendocking  # noqa: E402
 
 failures: list[str] = []
 
@@ -44,9 +44,9 @@ def main() -> int:
         print("run from the examples directory after preparing the sample data")
         return 2
 
-    receptor = odockmcode.Receptor.from_pdbqt(receptor_path)
-    ligand = odockmcode.Ligand.from_pdbqt(ligand_path)
-    box = odockmcode.GridBox.from_center_size((0.0, 0.0, 0.0), (20.0, 20.0, 20.0))
+    receptor = opendocking.Receptor.from_pdbqt(receptor_path)
+    ligand = opendocking.Ligand.from_pdbqt(ligand_path)
+    box = opendocking.GridBox.from_center_size((0.0, 0.0, 0.0), (20.0, 20.0, 20.0))
 
     print("grid precalculation is independent of the thread count")
     # 0 means "all cores"; 1 is the serial reference.
@@ -77,8 +77,8 @@ def main() -> int:
     print("\na fixed seed reproduces a run exactly")
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        a = odockmcode.dock(ligand, serial, exhaustiveness=4, num_modes=3, seed=1234)
-        b = odockmcode.dock(ligand, serial, exhaustiveness=4, num_modes=3, seed=1234)
+        a = opendocking.dock(ligand, serial, exhaustiveness=4, num_modes=3, seed=1234)
+        b = opendocking.dock(ligand, serial, exhaustiveness=4, num_modes=3, seed=1234)
     check(
         "same seed, same energy",
         np.allclose(a.energies, b.energies, atol=0.0, rtol=0.0),
@@ -97,8 +97,8 @@ def main() -> int:
     print("\nmore exhaustiveness never reports a worse valid pose")
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        low = odockmcode.dock(ligand, serial, exhaustiveness=2, num_modes=1, seed=99)
-        high = odockmcode.dock(ligand, serial, exhaustiveness=16, num_modes=1, seed=99)
+        low = opendocking.dock(ligand, serial, exhaustiveness=2, num_modes=1, seed=99)
+        high = opendocking.dock(ligand, serial, exhaustiveness=16, num_modes=1, seed=99)
     if low.rejected_pose_count == 0 and high.rejected_pose_count == 0:
         check(
             "energy is monotonic in exhaustiveness",
@@ -114,8 +114,8 @@ def main() -> int:
     print("\ndifferent seeds explore different regions")
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        s1 = odockmcode.dock(ligand, serial, exhaustiveness=4, num_modes=1, seed=1)
-        s2 = odockmcode.dock(ligand, serial, exhaustiveness=4, num_modes=1, seed=2)
+        s1 = opendocking.dock(ligand, serial, exhaustiveness=4, num_modes=1, seed=1)
+        s2 = opendocking.dock(ligand, serial, exhaustiveness=4, num_modes=1, seed=2)
     moved = float(
         np.linalg.norm(s1.pose_coords(0).mean(axis=0) - s2.pose_coords(0).mean(axis=0))
     )

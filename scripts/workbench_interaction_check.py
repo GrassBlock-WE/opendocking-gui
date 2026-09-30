@@ -36,7 +36,7 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 from PyQt6 import QtCore, QtGui, QtWidgets  # noqa: E402
 from PyQt6.QtTest import QTest  # noqa: E402
 
-from odockmcode.workbench.app import MainWindow  # noqa: E402
+from opendocking.workbench.app import MainWindow  # noqa: E402
 
 OUT = ROOT / "dist" / "workbench_interaction"
 OUT.mkdir(parents=True, exist_ok=True)
@@ -202,7 +202,7 @@ def main() -> int:
 
     # -------------------------------------------------- element interpretation
     section("1b. does the viewer understand the atom types it is given?")
-    from odockmcode.workbench import ELEMENT_COLORS, PDBQT_TYPE_ELEMENT
+    from opendocking.workbench import ELEMENT_COLORS, PDBQT_TYPE_ELEMENT
 
     for mol in win.viewport.molecules:
         unknown = sorted({e for e in mol.elements if e not in ELEMENT_COLORS})
@@ -554,8 +554,8 @@ def main() -> int:
 
     # ------------------------------------------------- negative-coordinate receptor
     section("9. a receptor at negative coordinates")
-    import odockmcode
-    from odockmcode.workbench import MoleculeView
+    import opendocking
+    from opendocking.workbench import MoleculeView
 
     shifted = EXAMPLES / "_shifted_receptor.pdbqt"
     rows = []
@@ -573,7 +573,7 @@ def main() -> int:
     app.processEvents()
     QTest.qWait(400)
     app.processEvents()
-    true_center = np.array(odockmcode.Receptor.from_pdbqt(shifted).center, dtype=float)
+    true_center = np.array(opendocking.Receptor.from_pdbqt(shifted).center, dtype=float)
     ui_center = np.array([s.value() for s in win2.center_spins], dtype=float)
     print(f"  true receptor centre : {np.round(true_center, 3)}")
     print(f"  centre shown in spins: {np.round(ui_center, 3)}")

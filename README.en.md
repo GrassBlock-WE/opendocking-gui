@@ -1,4 +1,4 @@
-# Open Docking (`odockmcode`)
+# Open Docking
 
 [English](README.en.md) | [中文](README.md)
 
@@ -34,7 +34,7 @@ python -m pip install -r requirements.txt
 
 # CPU build
 python -m maturin build --release -m dock-py/Cargo.toml --out dist
-python -m pip install dist/odockmcode-0.1.0-*.whl
+python -m pip install dist/opendocking-0.1.0-*.whl
 
 # only for the 3-D workbench (the engine needs no graphics stack at all)
 python -m pip install PyQt6 moderngl numpy-stl
@@ -44,8 +44,8 @@ Optional GPU build:
 
 ```bash
 python -m maturin build --release -m dock-py/Cargo.toml --out dist-gpu --features gpu
-python -m pip install --force-reinstall --no-deps dist-gpu/odockmcode-0.1.0-*.whl
-odockmcode info        # expect: gpu: compiled in and an adapter is available
+python -m pip install --force-reinstall --no-deps dist-gpu/opendocking-0.1.0-*.whl
+odcli info        # expect: gpu: compiled in and an adapter is available
 ```
 
 Only **Windows 11 x86_64 with an NVIDIA RTX 3050 Laptop** was actually run.
@@ -55,8 +55,7 @@ macOS, Linux, AMD discrete, Intel integrated and Apple Silicon are **untested**.
 
 ### Command line
 
-The full CLI is **`odockmcode`**. (`odock` belongs to another project on the
-maintainer's machine; this project has no such command.)
+The full CLI is **`odcli`**.
 
 | Subcommand | What it does |
 |---|---|
@@ -74,13 +73,13 @@ A complete run on the bundled example data:
 cd examples
 
 # receptor PDB -> PDBQT
-odockmcode prep-receptor -r receptor.pdb -o rec_prep.pdbqt
+odcli prep-receptor -r receptor.pdb -o rec_prep.pdbqt
 
 # ligand SDF -> PDBQT (also prints torsions, DOF count, atom classification)
-odockmcode prep-ligand -l ibuprofen.sdf -o ibuprofen_prep.pdbqt
+odcli prep-ligand -l ibuprofen.sdf -o ibuprofen_prep.pdbqt
 
 # precalculate + dock; the search box must be given explicitly
-odockmcode dock -r rec_prep.pdbqt -l ibuprofen_prep.pdbqt \
+odcli dock -r rec_prep.pdbqt -l ibuprofen_prep.pdbqt \
            --center_x 0 --center_y 0 --center_z 0 \
            --size_x 20 --size_y 20 --size_z 20 \
            -e 8 -o poses.pdbqt
@@ -102,7 +101,7 @@ Common options:
 ### Python
 
 ```python
-from odockmcode import Receptor, Ligand, GridBox, dock
+from opendocking import Receptor, Ligand, GridBox, dock
 
 receptor = Receptor.from_pdbqt("rec_prep.pdbqt")
 box_ = GridBox.from_center_size((0., 0., 0.), (20., 20., 20.))

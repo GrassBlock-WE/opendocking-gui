@@ -12,7 +12,7 @@
 # if something breaks, that comment is the first place to look.
 #
 # ---------------------------------------------------------------- runtime --
-# Required to import odockmcode at all. The engine cannot run without these.
+# Required to import opendocking at all. The engine cannot run without these.
 numpy>=1.22
 rdkit>=2022.9
 
@@ -21,7 +21,7 @@ rdkit>=2022.9
 # extension module; a source checkout is not importable without it.
 #
 #   python -m maturin build --release -m dock-py/Cargo.toml --out dist
-#   python -m pip install dist/odockmcode-*.whl
+#   python -m pip install dist/opendocking-*.whl
 maturin>=1.4,<2.0
 
 # ------------------------------------------------------- workbench (GUI) ---
@@ -47,7 +47,7 @@ pytest>=7.0
 #
 # GPU support is a Rust feature, not a Python package: build the wheel with
 #   python -m maturin build --release -m dock-py/Cargo.toml --out dist-gpu --features gpu
-# and check `odockmcode info` afterwards.
+# and check `odcli info` afterwards.
 #
 # On Linux, the GUI also needs the system libraries Qt and wgpu load at
 # runtime (libgl1, libegl1, libxkbcommon-x11-0, libxcb-*). See

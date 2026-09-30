@@ -46,7 +46,7 @@ Initial release of the engine, the Python front end, and the 3-D workbench.
 - Robustness: malformed `.pdbqt` input produces a catchable error rather than a
   `panic = "abort"` that would kill the calling interpreter.
 
-**Python bindings and front end (`dock-py`, distribution `odockmcode`)**
+**Python bindings and front end (`dock-py`, distribution `opendocking`)**
 
 - `Receptor`, `Ligand`, `GridBox`, `GridMaps`, `DockingResult` wrappers with a
   zero-copy contract: input NumPy arrays are borrowed by Rust, never copied;
@@ -55,7 +55,7 @@ Initial release of the engine, the Python front end, and the 3-D workbench.
   charges, and polar-hydrogen placement for donors and acceptors.
 - A single 79-column PDBQT writer and reader pair, used by both the CLI and the
   workbench, so anything written can be read back.
-- `odockmcode` command line: `prep-receptor`, `prep-ligand`, `rec-grid`,
+- `opendocking` command line: `prep-receptor`, `prep-ligand`, `rec-grid`,
   `dock`, `split`, `info`, `workbench`.
 - `odgui`, a standalone entry point for the interactive workbench that does not
   depend on any particular command name and imports neither Qt nor moderngl at

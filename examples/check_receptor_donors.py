@@ -16,7 +16,7 @@ from pathlib import Path
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-from odockmcode.prep import prepare_receptor  # noqa: E402
+from opendocking.prep import prepare_receptor  # noqa: E402
 
 # Side-chain donor atoms, by residue.
 DONOR_SITES = {

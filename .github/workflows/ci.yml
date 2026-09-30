@@ -81,7 +81,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip maturin
           python -m maturin build --release --locked -m dock-py/Cargo.toml --out dist ${{ matrix.cargo }}
-          python -m pip install --force-reinstall dist/odockmcode-*.whl
+          python -m pip install --force-reinstall dist/opendocking-*.whl
 
       # `--pyargs` runs the *installed* package, which is the point: it is the
       # artifact a user gets. Editing Python sources without rebuilding the
@@ -89,24 +89,24 @@ jobs:
       - name: Python tests against the installed wheel
         run: |
           python -m pip install pytest
-          python -m pytest --pyargs odockmcode.tests -q
+          python -m pytest --pyargs opendocking.tests -q
 
       - name: Entry points resolve
         run: |
-          odockmcode --version
-          odockmcode info
+          odcli --version
+          odcli info
           odgui --help
           odgui --check
 
-      # A regression that would silently put the `odock` command name back.
-      - name: The reserved `odock` name must stay free
+      # The package ships exactly two commands: one for the viewer, one for the
+      # CLI. A third entry would be a packaging mistake worth catching here.
+      - name: Exactly the two documented console scripts are installed
         run: |
-          if command -v odock >/dev/null 2>&1; then
-            echo "::error::an 'odock' command exists; that name belongs to another project"
-            exit 1
-          fi
-          if python -c "import odock" 2>/dev/null; then
-            echo "::error::an importable 'odock' package exists"
+          scripts=$(python -c "import importlib.metadata as m; print('\n'.join(sorted(e.name for e in m.entry_points(group='console_scripts') if 'opendocking' in (e.value or ''))))")
+          echo "installed: ${scripts}"
+          if [ "$scripts" != "odcli
+odgui" ]; then
+            echo "::error::expected exactly 'odcli' and 'odgui', got: ${scripts}"
             exit 1
           fi
 
@@ -160,7 +160,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip maturin
           python -m maturin build --release --locked -m dock-py/Cargo.toml --out dist
-          python -m pip install --force-reinstall dist/odockmcode-*.whl
+          python -m pip install --force-reinstall dist/opendocking-*.whl
           python -m pip install "PyQt6>=6.4" "moderngl>=5.8"
 
       - name: GUI stack check (no display needed)

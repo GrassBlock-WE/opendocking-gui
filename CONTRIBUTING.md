@@ -42,8 +42,8 @@ cargo clippy -p dock-core --features gpu --all-targets -- -D warnings
 
 python -m pip install -r requirements.txt
 python -m maturin build --release -m dock-py/Cargo.toml --out dist
-python -m pip install --force-reinstall --no-deps dist/odockmcode-*.whl
-python -m pytest --pyargs odockmcode.tests -q
+python -m pip install --force-reinstall --no-deps dist/opendocking-*.whl
+python -m pytest --pyargs opendocking.tests -q
 
 python scripts/check_doc_encoding.py           # 中文文档 UTF-8 完整性
 python scripts/check_repo_docs.py              # 链接 + 本机路径泄露

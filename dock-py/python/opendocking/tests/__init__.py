@@ -2,10 +2,10 @@
 
 The suite ships inside the installed package, so run it against the wheel:
 
-    python -m pytest --pyargs odockmcode -q
+    python -m pytest --pyargs opendocking -q
 
 To write the synthetic test structures out to a directory (for poking at the CLI
 by hand):
 
-    python -m odockmcode.tests.make_data <directory>
+    python -m opendocking.tests.make_data <directory>
 """

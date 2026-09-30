@@ -26,20 +26,20 @@ import sys
 os.environ.pop("QT_QPA_PLATFORM", None)
 REPO = pathlib.Path(__file__).resolve().parents[1]
 
-# Prefer the *installed* `odockmcode`, because that is what a user actually gets
+# Prefer the *installed* `opendocking`, because that is what a user actually gets
 # and it is the artifact the test suite should be exercising. The source tree
 # (`dock-py/python`) is only put on the path as a fallback, and only when it
 # already carries a built native module — otherwise it would shadow the
 # installed package with a copy that cannot import at all.
 _SOURCE = REPO / "dock-py" / "python"
-if (_SOURCE / "odockmcode" / "_dockpy.pyd").exists() or (
-    _SOURCE / "odockmcode" / "_dockpy.abi3.so"
+if (_SOURCE / "opendocking" / "_dockpy.pyd").exists() or (
+    _SOURCE / "opendocking" / "_dockpy.abi3.so"
 ).exists():
     sys.path.insert(0, str(_SOURCE))
 else:
-    import odockmcode as _installed  # noqa: F401
+    import opendocking as _installed  # noqa: F401
 
-    print(f"using installed odockmcode from {_installed.__file__}")
+    print(f"using installed opendocking from {_installed.__file__}")
 
 for _stream in (sys.stdout, sys.stderr):
     _reconf = getattr(_stream, "reconfigure", None)
@@ -51,7 +51,7 @@ for _stream in (sys.stdout, sys.stderr):
 
 import numpy as np  # noqa: E402
 
-from odockmcode.workbench import (  # noqa: E402
+from opendocking.workbench import (  # noqa: E402
     Camera,
     MoleculeView,
     _icosphere,
@@ -98,7 +98,7 @@ def check_pose_loading(qapp, rec_p, pose_p) -> None:
     * the RMSD readout must be populated, which it was not while
       ``setCurrentRow`` ran before the pose view existed.
     """
-    import odockmcode.workbench.app as wb
+    import opendocking.workbench.app as wb
 
     win = wb.MainWindow(
         receptor=rec_p,
@@ -144,7 +144,7 @@ def check_qt_window(errors: list[str]) -> bool:
     """
     from PyQt6 import QtWidgets
 
-    import odockmcode.workbench.app as wb
+    import opendocking.workbench.app as wb
 
     qapp = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     win = wb.MainWindow()
@@ -255,7 +255,7 @@ def check_renderer(errors: list[str]) -> bool:
     print(f"  GL renderer: {ctx.info.get('GL_RENDERER', '?')}")
     print(f"  GL version:  {ctx.info.get('GL_VERSION', '?')}")
 
-    import odockmcode.workbench.app as wb
+    import opendocking.workbench.app as wb
 
     try:
         sphere_prog, line_prog = wb.build_programs(ctx)

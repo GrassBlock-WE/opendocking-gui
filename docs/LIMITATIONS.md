@@ -126,7 +126,7 @@ crambin 没有结合口袋，不能替代 holo 结构。
 - 电荷赋值
 - 显式极性氢的增删
 
-一个具体的例子：如果你绕过 `odockmcode.prep` 直接把 RDKit 分子（**带隐式氢**）
+一个具体的例子：如果你绕过 `opendocking.prep` 直接把 RDKit 分子（**带隐式氢**）
 的坐标传进引擎，所有羟基氧的 `GetTotalNumHs() == 0`，
 于是**没有任何原子被标为 donor**。引擎照常输出结果，只是每个氢键都算错了。
 `VERIFICATION.md` §3 的第 7/8/9 条就是这一类 bug 的实例。

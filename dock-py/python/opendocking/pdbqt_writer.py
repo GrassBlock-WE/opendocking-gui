@@ -112,7 +112,7 @@ def ligand_to_pdbqt(
     handing a prepared ligand to other tools.
     """
     lines = [
-        "REMARK  Prepared by Open Docking (odockmcode)",
+        "REMARK  Prepared by Open Docking (opendocking)",
         f"REMARK  {ligand.num_atoms} atoms, {ligand.num_torsions} rotatable bonds",
         f"TORSDOF {ligand.num_torsions}",
     ]

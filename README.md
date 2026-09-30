@@ -1,4 +1,4 @@
-# Open Docking (`odockmcode`)
+# Open Docking
 
 [English](README.en.md) | [中文](README.md)
 
@@ -27,7 +27,7 @@ python -m pip install -r requirements.txt
 
 # CPU 版
 python -m maturin build --release -m dock-py/Cargo.toml --out dist
-python -m pip install dist/odockmcode-0.1.0-*.whl
+python -m pip install dist/opendocking-0.1.0-*.whl
 
 # 需要 3D 工作台时再装（引擎本身不需要任何图形栈）
 python -m pip install PyQt6 moderngl numpy-stl
@@ -37,8 +37,8 @@ python -m pip install PyQt6 moderngl numpy-stl
 
 ```bash
 python -m maturin build --release -m dock-py/Cargo.toml --out dist-gpu --features gpu
-python -m pip install --force-reinstall --no-deps dist-gpu/odockmcode-0.1.0-*.whl
-odockmcode info        # 期望：gpu: compiled in and an adapter is available
+python -m pip install --force-reinstall --no-deps dist-gpu/opendocking-0.1.0-*.whl
+odcli info        # 期望：gpu: compiled in and an adapter is available
 ```
 
 只实测过 **Windows 11 x86_64 + NVIDIA RTX 3050 Laptop**。
@@ -48,8 +48,7 @@ macOS、Linux、AMD 独显、Intel 核显、Apple Silicon **未测**。
 
 ### 命令行
 
-完整 CLI 的命令名是 **`odockmcode`**。（本机的 `odock` 属于另一个项目，
-本项目没有这个命令。）
+完整 CLI 的命令名是 **`odcli`**。
 
 | 子命令 | 作用 |
 |---|---|
@@ -67,13 +66,13 @@ macOS、Linux、AMD 独显、Intel 核显、Apple Silicon **未测**。
 cd examples
 
 # 受体 PDB -> PDBQT
-odockmcode prep-receptor -r receptor.pdb -o rec_prep.pdbqt
+odcli prep-receptor -r receptor.pdb -o rec_prep.pdbqt
 
 # 配体 SDF -> PDBQT（同时打印扭转数、自由度数、原子分类）
-odockmcode prep-ligand -l ibuprofen.sdf -o ibuprofen_prep.pdbqt
+odcli prep-ligand -l ibuprofen.sdf -o ibuprofen_prep.pdbqt
 
 # 预制表 + 对接；搜索盒必须显式给出
-odockmcode dock -r rec_prep.pdbqt -l ibuprofen_prep.pdbqt \
+odcli dock -r rec_prep.pdbqt -l ibuprofen_prep.pdbqt \
            --center_x 0 --center_y 0 --center_z 0 \
            --size_x 20 --size_y 20 --size_z 20 \
            -e 8 -o poses.pdbqt
@@ -95,7 +94,7 @@ odockmcode dock -r rec_prep.pdbqt -l ibuprofen_prep.pdbqt \
 ### Python
 
 ```python
-from odockmcode import Receptor, Ligand, GridBox, dock
+from opendocking import Receptor, Ligand, GridBox, dock
 
 receptor = Receptor.from_pdbqt("rec_prep.pdbqt")
 box_ = GridBox.from_center_size((0., 0., 0.), (20., 20., 20.))

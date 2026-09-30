@@ -1,14 +1,14 @@
-"""Open Docking (``odockmcode``) — a modern, open-source molecular docking toolkit.
+"""Open Docking (``opendocking``) — a modern, open-source molecular docking toolkit.
 
 The package is three layers:
 
-* :mod:`odockmcode.core` — thin, typed wrappers over the compiled Rust engine.
-* :mod:`odockmcode.prep` — chemistry-aware structure preparation with RDKit.
-* :mod:`odockmcode.workbench` — an interactive PyQt6 + ModernGL 3-D viewer.
+* :mod:`opendocking.core` — thin, typed wrappers over the compiled Rust engine.
+* :mod:`opendocking.prep` — chemistry-aware structure preparation with RDKit.
+* :mod:`opendocking.workbench` — an interactive PyQt6 + ModernGL 3-D viewer.
 
 Typical use::
 
-    from odockmcode import Receptor, Ligand, GridBox, dock
+    from opendocking import Receptor, Ligand, GridBox, dock
 
     receptor = Receptor.from_pdbqt("rec.pdbqt")
     box_ = GridBox.from_center_size(receptor.center, (22., 22., 22.))
@@ -19,8 +19,8 @@ Typical use::
 
 The command line offers the same operations::
 
-    odockmcode rec-grid -r rec.pdbqt -o maps/
-    odockmcode dock -r rec.pdbqt -l lig.pdbqt --center_x 0 --center_y 0 \\
+    odcli rec-grid -r rec.pdbqt -o maps/
+    odcli dock -r rec.pdbqt -l lig.pdbqt --center_x 0 --center_y 0 \\
                --center_z 0 --size_x 22 --size_y 22 --size_z 22 -o out.pdbqt
 """
 

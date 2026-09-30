@@ -1,11 +1,11 @@
 # API 参考
 
-两层 API：Rust crate `dock-core`（引擎）和 Python 包 `odockmcode`（绑定 + 化学 + GUI）。
+两层 API：Rust crate `dock-core`（引擎）和 Python 包 `opendocking`（绑定 + 化学 + GUI）。
 
 - [Rust: dock-core](#rust-dock-core)
-- [Python: odockmcode](#python-odockmcode)
-- [Python: odockmcode.prep](#python-odockmcodeprep)
-- [Python: odockmcode.workbench](#python-odockmcodeworkbench)
+- [Python: opendocking](#python-opendocking)
+- [Python: opendocking.prep](#python-opendockingprep)
+- [Python: opendocking.workbench](#python-opendockingworkbench)
 - [CLI](#cli)
 
 ---
@@ -224,14 +224,14 @@ WGSL 在 [`energy.wgsl`](../dock-core/src/gpu/energy.wgsl)。
 
 ---
 
-## Python: `odockmcode`
+## Python: `opendocking`
 
-安装：`pip install odockmcode`（本地 `pip install dist/odockmcode-*.whl`）。
+安装：`pip install opendocking`（本地 `pip install dist/opendocking-*.whl`）。
 
 ### 顶层导出
 
 ```python
-from odockmcode import (
+from opendocking import (
     Receptor, GridBox, GridMaps, Ligand, DockingResult,
     dock, score_conformation, evaluate_conformations,
     load_receptor, load_ligand, auto_box,
@@ -285,8 +285,8 @@ numpy / 现代 GL 上传，不需要自己解析 `.map` 文件。列布局见
 
 ### 独立命令 `odgui`
 
-`odgui` 是 workbench 的独立入口点，**不依赖 `odock` 这个命令名**——
-如果本机另一个项目已经占用了 `odock`，工作台照常可用。
+`odgui` 是 workbench 的独立入口点，**不依赖 `odcli`**——
+只装了工作台也能单独启动，反之亦然。
 
 ```powershell
 odgui                                        # 空窗口
@@ -362,7 +362,7 @@ info["num_conformations"]
 
 ---
 
-## Python: `odockmcode.prep`
+## Python: `opendocking.prep`
 
 RDKit 化学感知预处理。**这是把化学判断留在 Python 侧的理由**：芳香性、质子化、
 电荷、Gasteiger 系数都由 RDKit 算，Rust 引擎只接收一张表。
@@ -382,10 +382,10 @@ RDKit 化学感知预处理。**这是把化学判断留在 Python 侧的理由*
 
 ---
 
-## Python: `odockmcode.workbench`
+## Python: `opendocking.workbench`
 
 ```python
-from odockmcode.workbench import launch, Workbench, MoleculeView, Camera
+from opendocking.workbench import launch, Workbench, MoleculeView, Camera
 ```
 
 - `launch(receptor=None, ligand=None, poses=None) -> int`：CLI 入口。
@@ -395,14 +395,14 @@ from odockmcode.workbench import launch, Workbench, MoleculeView, Camera
   **与 Qt 解耦**的渲染层，可以脱离 Qt 用独立 moderngl 上下文测试
   （`scripts/workbench_smoke.py` 就是这么做的）。
 
-缺 PyQt6 / moderngl 时 `import odockmcode.workbench` 给出带安装建议的错误。
+缺 PyQt6 / moderngl 时 `import opendocking.workbench` 给出带安装建议的错误。
 
 ---
 
 ## CLI
 
 ```
-odockmcode [--version] {prep-receptor,prep-ligand,rec-grid,dock,split,info,workbench}
+odcli [--version] {prep-receptor,prep-ligand,rec-grid,dock,split,info,workbench}
 ```
 
 选项名用**下划线**（`--center_x`），不是连字符。
