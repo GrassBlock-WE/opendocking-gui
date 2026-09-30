@@ -211,7 +211,7 @@ jobs:
       - name: OpenGL context probe
         run: xvfb-run -a -s "-screen 0 1280x1024x24" python scripts/qt_gl_probe.py
 
-      - name: Layout, interaction and behaviour (116 checks)
+      - name: Layout, interaction and behaviour (117 checks)
         env:
           LIBGL_ALWAYS_SOFTWARE: "1"
           QT_QPA_PLATFORM: xcb

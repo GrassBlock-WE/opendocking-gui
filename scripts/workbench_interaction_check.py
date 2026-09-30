@@ -22,6 +22,8 @@ bugs this is looking for.
 
 from __future__ import annotations
 
+import contextlib
+import io
 import sys
 import tempfile
 import traceback
@@ -76,9 +78,58 @@ def pixel_check(name: str, ok: bool, detail: str = "") -> bool:
     return check(name, ok, detail)
 
 
+def _verify_pixel_guard():
+    """Reverse-verify the guard the pixel checks depend on.
+
+    A skip is only honest if it is reached *only* when the environment
+    genuinely cannot answer, so all three states are checked: a blank
+    framebuffer must skip, a good framebuffer with a good render must pass, and
+    a good framebuffer with a genuinely empty render must fail.
+
+    Without this, a guard that skipped unconditionally would look exactly like
+    a working one. That is precisely the bug that failed the CI workbench job
+    once already: one pixel check used `check` instead of `pixel_check` and
+    reported a headless machine's blank framebuffer as a broken viewport, while
+    its fourteen siblings skipped correctly.
+
+    Its own function because `PIXELS_OK` is a module global that `main` also
+    assigns to, and a `global` statement after that assignment is a
+    SyntaxError.
+    """
+    global PIXELS_OK, results
+    saved_flags, saved_results = PIXELS_OK, results
+    # Swap the list object, never clear it. `results.clear()` looked harmless
+    # and silently threw away every check recorded so far -- the summary went
+    # from 116 checks to 110 with no failure anywhere, which is exactly the
+    # kind of quiet loss a check suite must not have. Redirecting stdout keeps
+    # the three probe lines out of the report, where they would read as three
+    # unexplained results of their own.
+    results = []
+    seen = {}
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            for label, flag, ok in (
+                ("blank framebuffer", False, False),
+                ("good render", True, True),
+                ("empty render", True, False),
+            ):
+                PIXELS_OK = flag
+                pixel_check("guard probe", ok, label)
+                seen[label] = results[-1][0]
+    finally:
+        PIXELS_OK, results = saved_flags, saved_results
+    want = ("SKIP", "PASS", "FAIL")
+    got = tuple(seen.values())
+    return (
+        "the pixel-check guard skips only when the framebuffer cannot answer",
+        got == want,
+        f"blank framebuffer -> {got[0]}, good render -> {got[1]}, "
+        f"empty render -> {got[2]} (want {'/'.join(want)})",
+    )
+
+
 def section(title: str) -> None:
     print(f"\n=== {title} ===")
-
 
 def img_array(qimg: QtGui.QImage) -> np.ndarray:
     """QImage -> (h, w, 3) uint8, independent of stride and format."""
@@ -245,6 +296,7 @@ def main() -> int:
             "\n        Every non-pixel check still runs."
         )
     pixel_check("viewport renders geometry", base_px > 2000, f"{base_px} non-background px")
+    check(*_verify_pixel_guard())
 
     # -------------------------------------------------- element interpretation
     section("1b. does the viewer understand the atom types it is given?")
@@ -951,6 +1003,10 @@ def main() -> int:
     tiny = None
     pw = MainWindow()
     pw.resize(1500, 900)
+    # Shown, like every other window in this file: an unshown widget has no
+    # framebuffer to read, so the pixel check below would be measuring nothing
+    # even on a machine that can render.
+    pw.show()
     try:
         pw.load_structure(EXAMPLES / "1crn_prep.pdbqt", "receptor")
         app.processEvents()
@@ -1077,7 +1133,13 @@ def main() -> int:
                 f"{pw.statusBar().currentMessage()!r}",
             )
             arr, _ = shot(pw, "pockets_site_selected")
-            check(
+            # `pixel_check`, not `check`: whether `grabFramebuffer` returns
+            # anything is a property of the environment, not of the workbench,
+            # and a headless runner reports a blank framebuffer for every
+            # pixel check in this file. Using `check` here is what made the
+            # whole job fail on a machine that cannot draw -- 14 sibling
+            # checks skipped correctly and this one did not.
+            pixel_check(
                 "the selected site is actually drawn",
                 non_background(arr) > 500,
                 f"{non_background(arr)} non-background pixels",

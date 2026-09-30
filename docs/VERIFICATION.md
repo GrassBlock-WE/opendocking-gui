@@ -922,7 +922,7 @@ if len(drawn) == 3:
 | 脚本 | 检查数 | 关键断言 |
 |---|---|---|
 | `scripts/contacts_check.py` | **39 / 39** | 合成氢键按已知几何构造，**逐度、逐埃**跨过两个阈值；恰好落在阈值上算接受；无父原子的氢不算氢键；**两个方向分别只放宽一个判据**做反向验证；姿势平移 400 A 后接触数必须为 **0**；crambin 真实姿势里每个残基名都必须是 crambin 真有的残基；残基表计数与接触总数对得上 |
-| `scripts/workbench_interaction_check.py` | **116 / 116**（原 96） | 无残基名的受体**如实报告「有 48 个接触但无法归属残基」**，而不是把表格填满 `REC`；有残基的 crambin 配对里表格行数 = 涉及残基数；点击行后**相机中心**移动（不是距离——本例两者都恰好是 16.2 A，比距离会白送通过）且落在该残基接触点的质心 1 A 内。口袋部分另开窗口装 crambin：四列都有内容、**kind 列与状态栏用词一致**、衬里残基在 tooltip 里拿得到、box 距质心 **9.89 A**、**三个 spin 与 viewport 一致**（直接改 `box_center` 会留下三个描述旧 box 的数字）、点行后相机到新 box 质心 0.00 A 且距离 ≥ box 对角线 0.9 倍、**单原子受体如实报告「找不到位点」**（用 `rec_prep.pdbqt` 当夹具会**因为错误的原因通过**——它真有一个位点且恰好在质心） |
+| `scripts/workbench_interaction_check.py` | **117 / 117**（原 96） | 无残基名的受体**如实报告「有 48 个接触但无法归属残基」**，而不是把表格填满 `REC`；有残基的 crambin 配对里表格行数 = 涉及残基数；点击行后**相机中心**移动（不是距离——本例两者都恰好是 16.2 A，比距离会白送通过）且落在该残基接触点的质心 1 A 内。口袋部分另开窗口装 crambin：四列都有内容、**kind 列与状态栏用词一致**、衬里残基在 tooltip 里拿得到、box 距质心 **9.89 A**、**三个 spin 与 viewport 一致**（直接改 `box_center` 会留下三个描述旧 box 的数字）、点行后相机到新 box 质心 0.00 A 且距离 ≥ box 对角线 0.9 倍、**单原子受体如实报告「找不到位点」**（用 `rec_prep.pdbqt` 当夹具会**因为错误的原因通过**——它真有一个位点且恰好在质心）。最后一条是**像素检查守卫的反向验证**：空帧缓冲必须 SKIP、正常渲染必须 PASS、正常帧缓冲下的空渲染必须 FAIL |
 
 #### 3.5 口袋检测这一轮挖出的六个缺陷
 
@@ -934,6 +934,8 @@ if len(drawn) == 3:
 | 88 | `--auto-box 1` 直接崩：`axis y is 12.0 Å but the ligand needs at least 12.1 Å` | 口袋常常比配体的包围球小。引擎的 `monte_carlo.rs` 有 `2*radius+1` 的硬下限，但 Python 这层不知道 | `_cmd_dock` 先读一个配体算出这个下限，把自动 box 撑到下限并**说清楚撑了哪根轴、为什么**。手给的 box 不动——那是用户的选择，该给他引擎的原话 |
 | 89 | 按 Python 算出的下限夹紧到 12.071976 A，引擎仍然报「需要 12.1」 | 两层的 `ligand.radius` 不是从逐位相同的输入算出来的，末几位有差；而报错把两个数都四舍五入成 12.1，**看上去相等** | 向上取整到 0.1 A。0.1 A 不到 0.375 A 网格间距的三分之一，代价小于一个体素 |
 | 90 | 表格写 `groove`，状态栏写 `burial`——**同一个位点两个词** | 两处各自拼字符串 | `pockets.kind_label()` 单一来源，两边共用 |
+| 91 | 第一次提交后 CI 的 workbench job **失败**：`the selected site is actually drawn — 0 non-background pixels` | 新加的这条像素检查用了 `check()` 而不是本文件早就有的 `pixel_check()`。无头 runner 的 `grabFramebuffer()` 一律返回空白图，同一文件里另外 14 条像素检查都正确 SKIP 了，只有它没有 | 改用 `pixel_check()`。并补上**守卫自身的反向验证**：空帧缓冲→SKIP、正常渲染→PASS、正常帧缓冲下的空渲染→FAIL |
+| 92 | 给守卫写反向验证时，检查总数从 116 **悄悄变成 110** | 探测代码里 `results.clear()`——把此前已记录的全部检查一起抹掉了，全程没有任何 FAIL | 改成**替换 `results` 这个列表对象再还原**，并用 `redirect_stdout` 吞掉探测输出。**静默丢失已通过的检查，比误报失败更糟** |
 
 第 85 和 86/87 是同一件事的两面：**GUI 不再猜框**（85），而**它猜的东西得是对的**（86、87）。
 第 87 尤其值得记：修好之后，排行榜第一名才第一次是一个**能放下配体**的位点。
@@ -941,6 +943,11 @@ if len(drawn) == 3:
 
 第 90 看着最小，但它是这一轮里唯一一个**用户一眼就会看见**的缺陷——
 其余九个都要读文档才知道，而这一条在第一屏就写着两个矛盾的词。
+
+第 91、92 是**提交之后**才暴露的，而且都出在检查自己身上：
+一条像素检查没用对工具，把无头机器的空白帧缓冲报成了视口坏了；
+给守卫补反向验证时又用 `results.clear()` 抹掉了 6 条已通过的检查，
+总数从 116 掉到 110 而**全程没有一个 FAIL**。
 
 #### 验证
 
@@ -991,7 +998,7 @@ python -m pytest --pyargs opendocking.tests -q        # 38
 # 验证脚本
 python scripts\workbench_smoke.py               # workbench 两级渲染验证
 python scripts\qt_gl_probe.py                   # 6 条 GL 上下文路径
-python scripts\workbench_interaction_check.py   # GUI 布局 + 交互 + 行为 + 显示方式 + 口袋，116 项
+python scripts\workbench_interaction_check.py   # GUI 布局 + 交互 + 行为 + 显示方式 + 口袋，117 项
 python scripts\viewport_framing_check.py        # 内容是否真的居中
 python scripts\structure_bond_check.py          # 键感知：残基分组、肽键、无跨残基键、RDKit 交叉验证，36 项
 python scripts\representation_geometry_check.py # 圆柱 / 双色键 / 条带几何，21 项
