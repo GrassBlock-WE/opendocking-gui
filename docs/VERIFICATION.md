@@ -922,7 +922,7 @@ if len(drawn) == 3:
 | 脚本 | 检查数 | 关键断言 |
 |---|---|---|
 | `scripts/contacts_check.py` | **39 / 39** | 合成氢键按已知几何构造，**逐度、逐埃**跨过两个阈值；恰好落在阈值上算接受；无父原子的氢不算氢键；**两个方向分别只放宽一个判据**做反向验证；姿势平移 400 A 后接触数必须为 **0**；crambin 真实姿势里每个残基名都必须是 crambin 真有的残基；残基表计数与接触总数对得上 |
-| `scripts/workbench_interaction_check.py` | **129 / 129**（原 117） | 无残基名的受体**如实报告「有 48 个接触但无法归属残基」**，而不是把表格填满 `REC`；有残基的 crambin 配对里表格行数 = 涉及残基数；点击行后**相机中心**移动（不是距离——本例两者都恰好是 16.2 A，比距离会白送通过）且落在该残基接触点的质心 1 A 内。口袋部分另开窗口装 crambin：四列都有内容、**kind 列与状态栏用词一致**、衬里残基在 tooltip 里拿得到、box 距质心 **9.89 A**、**三个 spin 与 viewport 一致**、点行后相机到新 box 质心 0.00 A 且距离 ≥ box 对角线 0.9 倍、**单原子受体如实报告「找不到位点」**。另两组：`find_pockets()` **返回时**标签仍是「searching…」（次序证明，不靠计时）、0.5 s 内事件循环转了 27 圈、**搜索进行中关窗不 abort**；`site volume` 开关**真的**改变画面（21503 像素不同）而不只是改标志位、**取消选中即清空点云**。最后一条是**像素检查守卫的反向验证**：空帧缓冲必须 SKIP、正常渲染必须 PASS、正常帧缓冲下的空渲染必须 FAIL |
+| `scripts/workbench_interaction_check.py` | **131 / 131**（原 117） | 无残基名的受体**如实报告「有 48 个接触但无法归属残基」**，而不是把表格填满 `REC`；有残基的 crambin 配对里表格行数 = 涉及残基数；点击行后**相机中心**移动（不是距离——本例两者都恰好是 16.2 A，比距离会白送通过）且落在该残基接触点的质心 1 A 内。口袋部分另开窗口装 crambin：**五列都有内容**（新增的 `vol Å³` 是排序用的那个量，每行都有数字且都不超过体积上限）、**kind 列与状态栏用词一致**、衬里残基在 tooltip 里拿得到、box 距质心 **9.89 A**、**三个 spin 与 viewport 一致**、点行后相机到新 box 质心 0.00 A 且距离 ≥ box 对角线 0.9 倍、**单原子受体如实报告「找不到位点」**。另两组：`find_pockets()` **返回时**标签仍是「searching…」（次序证明，不靠计时）、0.5 s 内事件循环转了 27 圈、**搜索进行中关窗不 abort**；`site volume` 开关**真的**改变画面（21503 像素不同）而不只是改标志位、**取消选中即清空点云**。最后一条是**像素检查守卫的反向验证**：空帧缓冲必须 SKIP、正常渲染必须 PASS、正常帧缓冲下的空渲染必须 FAIL |
 
 #### 3.6 跨蛋白基准之后挖出的五个缺陷
 
@@ -1166,6 +1166,25 @@ exhaustiveness 是蒙特卡洛步数，41,000 A³ 的 box 里同样的步数摊�
 1HVR 即便如此仍然最差（21.24 A，46 原子的柔性配体 + 30×38×32 A 的 box）。
 **这个如实留着，没有调参把它弄好看。**
 
+#### 缺陷 102：一个像素检查绕过了守卫，在无头机上误报失败
+
+CI 抓到的，`workbench (best effort)` 这一步真的红过。比对上一次运行才发现
+**它上一轮就已经在失败**——不是这轮引入的，但也没人去管。
+
+`workbench_interaction_check.py` 里所有像素类检查都走 `pixel_check()`，
+它在帧缓冲读回空白时 **SKIP**——CI 的无头机正是这种情况，所以 15 项跳过。
+只有 `site volume` 那一项直接调了 `check()`，于是**同样一台渲染不出画面的机器
+上，15 项跳过、1 项报失败**：一台根本画不出东西的机器被要求证明开关改变了画面。
+
+改成走 `pixel_check()`。**守卫是双向的**——有真实 GPU 的机器上，勾选框不改变画面
+仍然 FAIL，只有环境无法作答时才 SKIP。
+
+顺带修掉这轮自己引入的那条：`the table has the four columns` 现在是五列
+（多了排序用的 `vol Å³`），断言跟着更新，并加了「每行都真的有数字、且都不超过
+体积上限」——一条空列和没有这一列是一样的。中间还写错过一次断言
+（`"88 Å³"[:-1].isdigit()` 得到的是 `"88 Å"` 而不是 `"88"`），**是测试错了不是代码错了**，
+改成按空格切开单位。
+
 ---
 
 ## 4. 复现本报告
@@ -1188,7 +1207,7 @@ python -m pytest --pyargs opendocking.tests -q        # 38
 # 验证脚本
 python scripts\workbench_smoke.py               # workbench 两级渲染验证
 python scripts\qt_gl_probe.py                   # 6 条 GL 上下文路径
-python scripts\workbench_interaction_check.py   # GUI 布局 + 交互 + 行为 + 显示方式 + 口袋，129 项
+python scripts\workbench_interaction_check.py   # GUI 布局 + 交互 + 行为 + 显示方式 + 口袋，131 项
 python scripts\viewport_framing_check.py        # 内容是否真的居中
 python scripts\structure_bond_check.py          # 键感知：残基分组、肽键、无跨残基键、RDKit 交叉验证，36 项
 python scripts\representation_geometry_check.py # 圆柱 / 双色键 / 条带几何，21 项

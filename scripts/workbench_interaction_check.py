@@ -1050,9 +1050,39 @@ def main() -> int:
             f"{pw.lbl_pockets.text()!r}",
         )
         check(
-            "the table has the four columns the rows are built from",
-            pw.pocket_table.columnCount() == 4,
-            f"{pw.pocket_table.columnCount()} columns",
+            "the table has the five columns the rows are built from",
+            pw.pocket_table.columnCount() == 5,
+            f"{pw.pocket_table.columnCount()} columns: "
+            f"{[pw.pocket_table.horizontalHeaderItem(c).text() for c in range(pw.pocket_table.columnCount())]}",
+        )
+        # The fifth column is the one the ranking is built from, and it was
+        # added because the order looked arbitrary without it. A column that
+        # is present and empty would be the same as no column, so check that
+        # it carries a number on every row, not just the first.
+        vol_col = pw.pocket_table.columnCount() - 1
+        volumes = [pw.pocket_table.item(r, vol_col).text() for r in range(rows)]
+        # "<number> Å³": split the unit off rather than trimming characters,
+        # which would leave the unit's own space in the string being tested.
+        def _is_volume(text):
+            parts = text.split()
+            return len(parts) == 2 and parts[1] == "Å³" and \
+                parts[0].replace(".", "").isdigit()
+        check(
+            "every row reports the volume the list is ranked by",
+            all(_is_volume(v) for v in volumes),
+            f"{volumes[:5]}{'...' if len(volumes) > 5 else ''}",
+        )
+        # And the number is the one the ceiling is applied to, so a column
+        # showing anything else would be a table disagreeing with the filter
+        # that produced it. Duplicates are fine and expected: two sites can
+        # round to the same whole cubic angstrom.
+        from opendocking.workbench import pockets as _pockets  # noqa: PLC0415
+        nums = [float(v.split()[0]) for v in volumes]
+        check(
+            "every volume shown is one the filter would have kept",
+            all(0 < n <= _pockets.DEFAULT_MAX_VOLUME for n in nums),
+            f"largest shown {max(nums):.0f} A3, ceiling "
+            f"{_pockets.DEFAULT_MAX_VOLUME:.0f} A3",
         )
         cells = [pw.pocket_table.item(0, c).text() for c in range(pw.pocket_table.columnCount())]
         check(
@@ -1196,7 +1226,14 @@ def main() -> int:
                 f"show_pocket {shown_before} -> {pw.viewport.show_pocket}",
             )
             after, _ = shot(pw, "pockets_cloud_off")
-            check(
+            # Through `pixel_check`, not `check`. This is the one pixel check
+            # that had been calling `check` directly, so on a headless CI box
+            # whose framebuffer read back blank the other fifteen skipped and
+            # this one reported a failure -- a false alarm about a machine
+            # that cannot render at all. `pixel_check` skips exactly when the
+            # environment cannot answer and still fails, on a machine that
+            # can, when toggling the checkbox changed nothing.
+            pixel_check(
                 "and the picture really changed, not just the flag",
                 not np.array_equal(before, after),
                 f"{int((before != after).any(axis=-1).sum())} pixels differ",
