@@ -366,6 +366,31 @@ class MoleculeView:
             dtype=np.float32,
         )
 
+    def residue_labels(self) -> list[str]:
+        """Residue label per atom, ``""`` where there is nothing to call it.
+
+        ``"THR 23"``, or ``"ASN 12A"`` with a chain. This is the one place the
+        format is decided: the contact table and the pocket lining both have to
+        name a residue the same way or the same site reads as two different
+        ones in two panels of the same window.
+
+        ``UNL`` and ``REC`` are the placeholders the writers use for "this is
+        not a named residue", and they get ``""`` -- naming a ligand
+        ``"UNL 1"`` in one panel and nothing in another is worse than a blank.
+        """
+        structure = self.structure
+        atoms = getattr(structure, "atoms", None) if structure is not None else None
+        out: list[str] = []
+        for i in range(len(self.coords)):
+            rec = atoms[i] if atoms is not None and i < len(atoms) else None
+            resname = (getattr(rec, "resname", "") or "").strip() if rec else ""
+            if not resname or resname in ("UNL", "REC"):
+                out.append("")
+                continue
+            chain = (getattr(rec, "chain", "") or "").strip() if rec else ""
+            out.append(f"{resname} {getattr(rec, 'resid', 0)}{chain}")
+        return out
+
     def bond_pairs(self) -> np.ndarray:
         """The bonds this structure was given, as an ``(n_bonds, 2)`` array.
 

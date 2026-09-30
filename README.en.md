@@ -64,6 +64,7 @@ The full CLI is **`odcli`**.
 | `prep-ligand` | any structure → ligand PDBQT + a property report |
 | `rec-grid` | precalculate maps and write AutoDock `.map` files |
 | `dock` | dock one ligand or a whole directory |
+| `sites` | list candidate binding sites in a receptor, with lining residues |
 | `split` | split a multi-model PDBQT into one file per pose |
 | `workbench` | launch the interactive 3-D viewer (same as `odgui`) |
 
@@ -78,12 +79,22 @@ odcli prep-receptor -r receptor.pdb -o rec_prep.pdbqt
 # ligand SDF -> PDBQT (also prints torsions, DOF count, atom classification)
 odcli prep-ligand -l ibuprofen.sdf -o ibuprofen_prep.pdbqt
 
-# precalculate + dock; the search box must be given explicitly
-odcli dock -r rec_prep.pdbqt -l ibuprofen_prep.pdbqt \
-           --center_x 0 --center_y 0 --center_z 0 \
-           --size_x 20 --size_y 20 --size_z 20 \
-           -e 8 -o poses.pdbqt
+# what does this receptor have to offer?
+odcli sites -r 1crn_prep.pdbqt
+
+# precalculate + dock. The box is still required: give the six numbers, or
+# take the Nth site with --auto-box
+odcli dock -r 1crn_prep.pdbqt -l ibuprofen_prep.pdbqt \
+           --auto-box 2 -e 8 -o poses.pdbqt
 ```
+
+The search box is **still mandatory** — there are just two ways to supply it.
+`odcli` has always refused to derive it from the receptor, because a
+whole-protein box is enormous in memory and useless as a search region.
+`--auto-box N` takes the Nth site from `odcli sites`, and `--box-padding`
+sets the clearance on each side (default 4 Å). A site smaller than the ligand
+is widened to the engine's floor (`2 × radius + 1 Å`) and the widening is
+reported; a box you set yourself is left exactly as you gave it.
 
 Common options:
 
@@ -96,6 +107,7 @@ Common options:
 --mode {mc,lga,both}       global search strategy
 --seed N                   fix the random seed (for reproducibility)
 --json                     machine-readable output
+--auto-box N               use the Nth site instead of the six box values
 ```
 
 ### Python
@@ -177,11 +189,45 @@ two lights plus a rim term, and a gradient background rather than one flat
 colour. The fog range follows the camera distance, so it stays out of the way
 when a ligand fills the window and does real work when a big receptor is zoomed out.
 
+**Candidate binding sites** (`Find pockets` / `site` in the control panel):
+
+When you load a receptor the workbench **searches for pockets by itself**, puts
+the search box on the first site it finds, and selects that row — so you can
+see where the box came from, and click any other row to move it. Selecting a
+row moves the box, the three coordinate spins and the camera together, and the
+numbers on screen are the numbers the engine gets.
+
+> **This used to be the receptor's centroid**, the arithmetic mean of every
+> atom. For a globular protein that is inside the dense core, so the search
+> region sat in solid protein while three spin boxes displayed the result as
+> though it were a considered answer. When no site is found the workbench says
+> so and leaves the box alone, rather than implying it found one.
+
+What it searches for is **enclosed space, not a binding site**. Each entry
+reports its centre, extent, a burial score (how many of the three axes have
+protein on both sides) and the **residues lining it** — which turns "there is a
+groove near (12, 7, 0)" into something a person can check. A ligand lying flat
+on the protein surface scores zero and is never listed.
+
 ## Things to know before you use the results
 
-- **The search box must be given explicitly.** A box covering the whole protein
-  costs tens of gigabytes and is equivalent to having no search region; aim it
-  at the pocket.
+- **The search box must be given** — either the six numbers, or `--auto-box N`.
+  A box covering the whole protein costs tens of gigabytes and is equivalent to
+  having no search region. An automatic box is far smaller: on crambin it is
+  3.8x smaller than the whole-protein box and still contains all 16 ligand atoms.
+- **The pocket search finds enclosed space, not a binding site.** A ligand lying
+  flat on the surface scores zero and is never listed, and the largest site is
+  not necessarily the one your ligand wants. It is a shortlist to choose from,
+  and choosing is the part it leaves to you.
+- **Re-docking from the automatic box reproduces crambin's reference energy but
+  not its pose.** Docking ibuprofen into the site the reference pose occupies
+  gives −5.42 kcal/mol against the reference's −5.50, at 3.93 Å RMSD. The energy
+  is reproduced; the pose is not. Crambin with ibuprofen has near-degenerate
+  binding modes, and that is a property of the energy surface, not a misplaced box.
+- **The 1500 Å³ ceiling on a site is a heuristic**, not a derived quantity. It is
+  there because single-voxel surface events become connected after one dilation
+  and merge a protein's whole outer surface into lumps of 1700–3600 Å³, which
+  then outrank every real groove.
 - **Option names use underscores**: `--center_x`, not `--center-x`.
 - **`use_gpu` defaults to False.** The GPU accumulates in `f32` and differs from
   the CPU by about 1e-6; a default that varies with the hardware would break

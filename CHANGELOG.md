@@ -13,6 +13,39 @@ The project is pre-1.0. The `0.x` line is where the interfaces still move.
 
 ### Added
 
+- **The search box stops being a guess.** Loading a receptor used to centre the
+  box on the receptor's centroid — the arithmetic mean of every atom, which for
+  a globular protein is inside the dense core. The search region was therefore
+  sitting in solid protein while three spin boxes displayed the result as
+  though it were an answer. `odcli` had always refused to guess, calling a
+  whole-protein box "useless as a search region"; the workbench now does the
+  same thing properly instead of guessing quietly.
+  `opendocking.workbench.pockets` finds candidate sites on a grid in the
+  LIGSITE family — protein-solvent-protein events, plus a flood fill from the
+  grid boundary to tell a sealed cavity from an open groove — with no Qt and
+  no display. Each site carries its bounding geometry, a burial score, and the
+  residues lining it, so "there is a groove near (12, 7, 0)" becomes
+  "ARG 17A, ASN 14A, THR 2A, GLU 23A".
+  - The workbench lists the sites, selects the first, places the box on it and
+    flies the camera there. Selecting any other row moves both, through the
+    spin boxes, so the numbers on screen and the numbers the engine gets
+    cannot disagree. A receptor with no site says so and leaves the box alone
+    rather than implying one was found.
+  - `odcli sites -r RECEPTOR` prints the list, with lining residues and both
+    the site size and the box built from it. `--json` for machines.
+  - `odcli dock` and `odcli rec-grid` accept `--auto-box N` to take the Nth
+    site instead of the six explicit values. **The six values stay mandatory
+    otherwise** — the rule moved out of argparse and into `_resolve_box`, which
+    is the only place that knows whether `--auto-box` was passed, so the error
+    can say what to do instead of "the following arguments are required".
+  - A site can be smaller than the ligand that has to fit in it, so an
+    automatic box is widened to the engine's own floor (`2 x radius + 1 A`) and
+    the widening is reported. A box you set yourself is left alone and gets the
+    engine's exact message.
+  - `scripts/pockets_check.py` verifies the geometry and every threshold
+    headlessly (67/67), and `scripts/pockets_screenshot.py` produces the two
+    screenshots.
+
 - **Pose/receptor interaction analysis.** The workbench can now say what the
   pose is doing: a residue-level table of the interface, dashed lines between
   contacting atoms coloured by class (hydrogen bond, polar, hydrophobic,
@@ -203,6 +236,27 @@ The project is pre-1.0. The `0.x` line is where the interfaces still move.
 
 ### Known limitations
 
+- **The pocket search finds enclosed space, not a binding site.** It reports
+  cavities and grooves with their geometry and lining residues, ranked by size
+  and how enclosed they are. A ligand sitting on a flat surface scores zero and
+  is never mentioned, and the largest site is not necessarily the one a given
+  ligand wants. It is a shortlist to choose from, and the caller is expected to
+  let the user choose.
+- **Re-docking from the automatic box reproduces crambin's reference energy but
+  not its pose.** Docking ibuprofen into the site crambin's reference pose
+  occupies gives −5.42 kcal/mol against the reference's −5.50, at 3.93 Å RMSD.
+  The energy is reproduced; the pose is not. Crambin with ibuprofen has
+  near-degenerate binding modes, and landing in a different one is a property
+  of the energy surface rather than evidence that the box was misplaced — the
+  box does contain all 16 ligand atoms and is lined by the residue that
+  hydrogen-bonds them. `scripts/pockets_check.py` asserts the energy and
+  *records* the RMSD without asserting anything about it, because a small RMSD
+  would be asserting that this run happened to find this minimum.
+- **The 1500 Å³ volume ceiling on a site is a heuristic.** It is there because
+  the single-voxel surface events become 6-connected after one dilation and
+  merge a protein's entire outer surface into lumps of 1700–3600 Å³, which then
+  outrank every real groove. It is a parameter, not a derived quantity, and
+  nothing here justifies the particular number.
 - The docked-pose writer lists the atoms of a `BRANCH` as a chain, as the
   PDBQT format requires, but a forked group — a carboxyl carbon with two
   oxygens — is not a chain. Such groups need nested `BRANCH` records. Until

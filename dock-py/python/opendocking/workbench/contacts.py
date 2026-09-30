@@ -143,21 +143,22 @@ def _side(mol) -> _Side:
         elements = elements + ["C"] * (n - len(elements))
 
     structure = getattr(mol, "structure", None)
-    names: list[str] = []
-    residues: list[str] = []
     atoms = getattr(structure, "atoms", None) if structure is not None else None
-    for i in range(n):
-        rec = atoms[i] if atoms is not None and i < len(atoms) else None
-        names.append(getattr(rec, "name", "") or "")
-        if rec is None:
-            residues.append("")
-            continue
-        resname = (getattr(rec, "resname", "") or "").strip()
-        if not resname or resname in ("UNL", "REC"):
-            residues.append("")
-        else:
-            chain = (getattr(rec, "chain", "") or "").strip()
-            residues.append(f"{resname} {getattr(rec, 'resid', 0)}{chain}")
+    names: list[str] = [
+        (getattr(atoms[i], "name", "") or "") if atoms is not None and i < len(atoms) else ""
+        for i in range(n)
+    ]
+    # Shared with the pocket lining so both name a residue identically. The
+    # fallback covers a duck-typed molecule with no `residue_labels`, which is
+    # what the synthetic fixtures hand in.
+    labeler = getattr(mol, "residue_labels", None)
+    residues: list[str] = (
+        list(labeler())
+        if callable(labeler)
+        else [""] * n
+    )
+    if len(residues) < n:
+        residues = residues + [""] * (n - len(residues))
 
     polar = np.asarray(
         [i for i in range(n) if elements[i] in POLAR], dtype=np.int64

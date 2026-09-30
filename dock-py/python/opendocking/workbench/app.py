@@ -17,6 +17,7 @@ from __future__ import annotations
 import math
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 import numpy as np
@@ -686,6 +687,20 @@ class Viewport(QOpenGLWidget):
         self.camera.distance = max(5.0, radius * 2.6)
         self.update()
 
+    def focus_point(self, point, radius: float) -> None:  # pragma: no cover - GUI
+        """Frame a point of known extent.
+
+        `focus_residue` cannot do this job: it only moves when the pose and
+        receptor are both loaded and the residue is among the contacts, and a
+        pocket has to be inspectable before any ligand is docked. The
+        multiplier is generous on purpose -- the thing worth seeing is the box
+        with protein around it, so a tight framing that fills the window with
+        the box's own face is not informative.
+        """
+        self.camera.center = np.asarray(point, np.float32)
+        self.camera.distance = max(12.0, float(radius) * 1.6)
+        self.update()
+
     def focus_residue(self, residue: str) -> bool:  # pragma: no cover - GUI
         """Move the camera onto a residue's contacts. True if it moved.
 
@@ -780,6 +795,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._ligand_path: Path | None = None
         self._pose_view: MoleculeView | None = None
         self._pose_models: list[tuple[str, float]] = []
+        self._pocket_models: list = []
         self._maps = None
         self._worker = None
         self._thread = None
@@ -841,6 +857,38 @@ class MainWindow(QtWidgets.QMainWindow):
             legend_row.addWidget(text)
         legend_row.addStretch(1)
         form.addRow("legend", legend)
+
+        # Pocket candidates for the receptor, offered as a list the user picks
+        # from rather than as a box that silently moved. Clicking a row places
+        # the box and flies the camera to the site; the hand-set spin boxes stay
+        # authoritative, so a click is a starting point and not a lock.
+        #
+        # The list exists because the box used to be centred on the receptor's
+        # centroid, which for a globular protein is inside the dense core: a
+        # search there is either empty or returns poses the engine itself calls
+        # implausible. `odcli` refuses to guess for the same reason.
+        self.btn_pockets = QtWidgets.QPushButton("Find pockets")
+        self.btn_pockets.clicked.connect(self.find_pockets)
+        form.addRow(self.btn_pockets)
+
+        self.lbl_pockets = QtWidgets.QLabel("—")
+        self.lbl_pockets.setWordWrap(True)
+        form.addRow("site", self.lbl_pockets)
+
+        self.pocket_table = QtWidgets.QTableWidget(0, 4)
+        self.pocket_table.setHorizontalHeaderLabels(
+            ["#", "kind", "centre", "size"]
+        )
+        self.pocket_table.horizontalHeader().setStretchLastSection(True)
+        self.pocket_table.setSelectionBehavior(
+            QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows
+        )
+        self.pocket_table.setEditTriggers(
+            QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers
+        )
+        self.pocket_table.setMinimumHeight(120)
+        self.pocket_table.itemSelectionChanged.connect(self._on_pocket_selected)
+        form.addRow(self.pocket_table)
 
         # The centre must accept negative coordinates. They are ordinary, not
         # exotic: a receptor whose coordinates run from -40 to +10 has a
@@ -1031,12 +1079,23 @@ class MainWindow(QtWidgets.QMainWindow):
             self.viewport.molecules.append(view)
             if kind == "receptor":
                 self._receptor_path = path
-                c = view.center()
-                for spin, value in zip(self.center_spins, c):
-                    spin.blockSignals(True)
-                    spin.setValue(float(value))
-                    spin.blockSignals(False)
-                self._on_box_changed()
+                # This used to put the box centre on the receptor's centroid.
+                # For a globular protein that is inside the dense core, so the
+                # search region sat in solid protein: either it came back
+                # empty or the engine returned poses it then reported as
+                # implausible, and the three spin boxes showed numbers that
+                # looked like a deliberate answer. Nothing about a centroid
+                # suggests a binding site, so the box now goes on the first
+                # pocket the search offers -- visibly, with the row selected,
+                # so the user can see where it came from and choose another.
+                found = self.find_pockets()
+                if found:
+                    self.pocket_table.selectRow(0)
+                else:
+                    self.lbl_pockets.setText(
+                        "no enclosed site found — the box is still where you "
+                        "left it, not a suggestion"
+                    )
             else:
                 self._ligand_path = path
             self.status_label.setText(
@@ -1197,6 +1256,105 @@ class MainWindow(QtWidgets.QMainWindow):
         if not parts:
             return
         self.statusBar().showMessage("  |  ".join(parts))
+
+    def find_pockets(self) -> list:  # pragma: no cover - GUI
+        """Search the receptor for candidate sites and list them.
+
+        Runs on load and on demand. It is not a docking job, so it does not
+        need a worker thread: the grid is cubic in the receptor's extent and a
+        382-atom crambin takes 0.07 s, which is fast enough that a thread would
+        cost more in ceremony than it saves. A very large receptor is slower
+        still, so the elapsed time goes in the status bar rather than being
+        hidden.
+        """
+        from . import pockets as P
+
+        receptor = next((m for m in self.viewport.molecules if m.role == "receptor"), None)
+        if receptor is None:
+            self._fill_pockets([], "load a receptor first")
+            return []
+        started = time.perf_counter()
+        try:
+            found = P.find_pockets(
+                receptor.coords, receptor.elements, residues=receptor.residue_labels()
+            )
+        except Exception as exc:  # pragma: no cover - GUI
+            self._fill_pockets([], f"pocket search failed: {exc}")
+            return []
+        elapsed = (time.perf_counter() - started) * 1000.0
+        summary = (
+            f"{len(found)} site(s) in {elapsed:.0f} ms"
+            if found
+            else "no enclosed site found — place the box by hand"
+        )
+        self._fill_pockets(found, summary)
+        return found
+
+    def _fill_pockets(self, found, summary: str) -> None:  # pragma: no cover - GUI
+        self._pocket_models = list(found)
+        self.lbl_pockets.setText(summary)
+        self.pocket_table.blockSignals(True)
+        self.pocket_table.setRowCount(len(found))
+        for row, p in enumerate(found):
+            from . import pockets as P
+
+            lining = ", ".join(name for name, _ in p.lining[:4]) or "—"
+            cells = (
+                str(row + 1),
+                P.kind_label(p.kind),
+                f"({p.center[0]:.1f}, {p.center[1]:.1f}, {p.center[2]:.1f})",
+                f"{p.size[0]:.0f} × {p.size[1]:.0f} × {p.size[2]:.0f}",
+            )
+            for col, text in enumerate(cells):
+                item = QtWidgets.QTableWidgetItem(text)
+                if col == 0:
+                    # The lining is too long for a column and too useful to
+                    # drop, so it lives in the tooltip and the status bar.
+                    item.setToolTip(
+                        f"site {row + 1}: {p.voxels} grid points, "
+                        f"buried on {p.burial:.1f} of 3 axes\nlined by {lining}"
+                    )
+                self.pocket_table.setItem(row, col, item)
+        self.pocket_table.blockSignals(False)
+
+    def _on_pocket_selected(self) -> None:  # pragma: no cover - GUI
+        """Put the box on the selected site and look at it.
+
+        The spins are updated rather than bypassed, so the numbers on screen
+        and the numbers the engine gets cannot disagree -- an earlier design
+        that moved `box_center` directly would have left three stale spin
+        boxes describing a box that no longer existed.
+        """
+        model = self.pocket_table.selectionModel()
+        rows = model.selectedRows() if model else []
+        if not rows or not getattr(self, "_pocket_models", None):
+            return
+        index = rows[0].row()
+        if not 0 <= index < len(self._pocket_models):
+            return
+        pocket = self._pocket_models[index]
+        from . import pockets as P
+
+        centre, size = pocket.box_center_and_size()
+        for spin, value in zip(self.center_spins, centre):
+            spin.setValue(float(value))
+        for spin, value in zip(self.size_spins, size):
+            spin.setValue(float(value))
+        self._on_box_changed()
+        # Frame the *box*, not the site, and by its diagonal rather than its
+        # longest side. The site is 7 A across and the box 15 A; framing the
+        # site put the camera 18 A out, which is inside the protein's own
+        # surface atoms, and the picture became a close-up of a few carbons
+        # with the box edges off screen. Framing on the longest side still cut
+        # the box off, because what has to fit on screen is the diagonal.
+        self.viewport.focus_point(centre, float(np.linalg.norm(size)))
+        names = ", ".join(name for name, _ in pocket.lining[:6])
+        self.statusBar().showMessage(
+            f"site {index + 1} ({P.kind_label(pocket.kind)}) at "
+            f"({pocket.center[0]:.1f}, {pocket.center[1]:.1f}, {pocket.center[2]:.1f})"
+            + (f" — lined by {names}" if names else ""),
+            8000,
+        )
 
     def _on_box_changed(self) -> None:  # pragma: no cover - GUI
         self.viewport.box_center = np.asarray(

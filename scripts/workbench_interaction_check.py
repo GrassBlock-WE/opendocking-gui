@@ -23,6 +23,7 @@ bugs this is looking for.
 from __future__ import annotations
 
 import sys
+import tempfile
 import traceback
 from pathlib import Path
 
@@ -626,13 +627,34 @@ def main() -> int:
     app.processEvents()
     true_center = np.array(opendocking.Receptor.from_pdbqt(shifted).center, dtype=float)
     ui_center = np.array([s.value() for s in win2.center_spins], dtype=float)
+    shown_box = np.array(win2.viewport.box_center, dtype=float)
     print(f"  true receptor centre : {np.round(true_center, 3)}")
-    print(f"  centre shown in spins: {np.round(ui_center, 3)}")
+    print(f"  box shown in spins   : {np.round(ui_center, 3)}")
+    # The reference value used to be the receptor's centroid, because loading a
+    # receptor put the centroid in the spins. It no longer does -- the box goes
+    # on the first site the pocket search finds, which is the whole point of
+    # that change -- so the check compares the spins to the box the window
+    # actually decided on. What it is really about is unchanged and is stated
+    # as its own check below: a receptor at negative coordinates must not have
+    # its position silently clamped to zero.
     check(
-        "a receptor with negative coordinates loads into the box-centre spins",
-        bool(np.abs(true_center - ui_center).max() < 0.05),
-        f"mismatch {np.abs(true_center - ui_center).max():.3f} A  <-- clamped to the spin range",
+        "the box-centre spins show the box the window chose",
+        bool(np.abs(shown_box - ui_center).max() < 0.05),
+        f"spins {np.round(ui_center, 3)} vs viewport {np.round(shown_box, 3)}, "
+        f"mismatch {np.abs(shown_box - ui_center).max():.3f} A",
     )
+    check(
+        "a receptor at negative coordinates keeps them, unclamped to zero",
+        bool(ui_center.min() < -5.0) and bool(np.abs(ui_center - true_center).max() > 0.05),
+        f"receptor centre {np.round(true_center, 3)}, box {np.round(ui_center, 3)}, "
+        f"spin range [{win2.center_spins[0].minimum()}, {win2.center_spins[0].maximum()}]",
+    )
+    # Deliberately *not* checked here: "the box is somewhere other than the
+    # centroid". This receptor is a handful of atoms whose one site happens to
+    # sit 0.09 A from its centre, so the check could only pass with its
+    # threshold loosened until it asserted nothing -- and it would be proving
+    # something section 11c already proves on crambin, where the box really is
+    # 9.9 A off the centroid. A duplicate that cannot fail teaches nothing.
     shot(win2, "10_negative_coords")
     win2.close()
 
@@ -914,6 +936,193 @@ def main() -> int:
         check("re-checking brings them back", win5.viewport.show_contacts is True)
         win5.close()
         app.processEvents()
+    section("11c. pocket search drives the box")
+    # The regression this guards is specific: loading a receptor used to put
+    # the box on the receptor's centroid, which for a globular protein is
+    # inside the dense core. The check is not "a box exists" -- there always
+    # was one -- but "the box the user is shown came from a site, and it is
+    # nowhere near the centroid it used to be handed".
+    #
+    # This section opens its own window on crambin rather than reusing the
+    # one the rest of the script has been driving. The main window holds
+    # `rec_prep.pdbqt`, a handful of atoms whose one site *is* its centroid,
+    # so on that receptor "the box moved away from the centroid" cannot fail
+    # and asserting it there would be asserting nothing.
+    tiny = None
+    pw = MainWindow()
+    pw.resize(1500, 900)
+    try:
+        pw.load_structure(EXAMPLES / "1crn_prep.pdbqt", "receptor")
+        app.processEvents()
+        receptor_view = next(
+            (m for m in pw.viewport.molecules if m.role == "receptor"), None
+        )
+        check("a receptor is loaded for the pocket search", receptor_view is not None)
+        if receptor_view is None:
+            raise RuntimeError("no receptor to check the pocket search against")
+        rows = pw.pocket_table.rowCount()
+        check("the site table is populated", rows > 0, f"{rows} rows")
+        check(
+            "the site label reports how many and how long, not just a dash",
+            "site(s)" in pw.lbl_pockets.text(),
+            f"{pw.lbl_pockets.text()!r}",
+        )
+        check(
+            "the table has the four columns the rows are built from",
+            pw.pocket_table.columnCount() == 4,
+            f"{pw.pocket_table.columnCount()} columns",
+        )
+        cells = [pw.pocket_table.item(0, c).text() for c in range(pw.pocket_table.columnCount())]
+        check(
+            "every cell in the first row has text in it",
+            all(str(t).strip() for t in cells),
+            f"{cells}",
+        )
+        check(
+            "the kind column says what the site is, in the same words everywhere",
+            all(
+                pw.pocket_table.item(r, 1).text() in ("groove", "sealed")
+                for r in range(rows)
+            ),
+            f"kinds {sorted({pw.pocket_table.item(r, 1).text() for r in range(rows)})}",
+        )
+        check(
+            "the centre column is a coordinate, not a label",
+            cells[2].count("(") == 1 and cells[2].count(",") == 2,
+            f"{cells[2]!r}",
+        )
+        check(
+            "the size column is three numbers",
+            cells[3].count("×") == 2,
+            f"{cells[3]!r}",
+        )
+        lining_tooltip = pw.pocket_table.item(0, 0).toolTip() or ""
+        check(
+            "the lining residues are reachable, not just implied",
+            "lined by" in lining_tooltip and "—" not in lining_tooltip.split("lined by")[-1],
+            f"tooltip {lining_tooltip!r}",
+        )
+
+        centroid = np.asarray(receptor_view.coords, np.float32).mean(axis=0)
+        box = np.asarray(pw.viewport.box_center, np.float32)
+        moved = float(np.linalg.norm(box - centroid))
+        check(
+            "the box is not sitting on the receptor centroid",
+            moved > 3.0,
+            f"{moved:.2f} A from the centroid it used to be given",
+        )
+        check(
+            "the spin boxes show the box the engine will use",
+            np.allclose(
+                np.array([s.value() for s in pw.center_spins], float), box, atol=0.01
+            )
+            and np.allclose(
+                np.array([s.value() for s in pw.size_spins], float),
+                np.asarray(pw.viewport.box_size, np.float32),
+                atol=0.01,
+            ),
+            f"spins {[s.value() for s in pw.center_spins]} vs viewport {box.tolist()}",
+        )
+        check(
+            "the box is a plausible size rather than the whole protein",
+            8.0 <= float(np.min(pw.viewport.box_size)) <= 40.0,
+            f"{np.round(pw.viewport.box_size, 1).tolist()}",
+        )
+
+        # Selecting a row has to move the box *and* the camera, and has to do
+        # it through the spins -- setting `box_center` directly would leave
+        # three stale numbers on screen describing a box that no longer exists.
+        if rows > 1:
+            before_centre = np.array(pw.viewport.box_center, copy=True)
+            before_dist = float(pw.viewport.camera.distance)
+            pw.pocket_table.selectRow(1)
+            app.processEvents()
+            after_centre = np.array(pw.viewport.box_center, copy=True)
+            check(
+                "selecting a row moves the box",
+                float(np.linalg.norm(after_centre - before_centre)) > 1.0,
+                f"moved {float(np.linalg.norm(after_centre - before_centre)):.2f} A",
+            )
+            check(
+                "and the spin boxes follow it",
+                np.allclose(
+                    np.array([s.value() for s in pw.center_spins], float),
+                    after_centre,
+                    atol=0.01,
+                ),
+                f"spins {[s.value() for s in pw.center_spins]}",
+            )
+            cam_off = float(
+                np.linalg.norm(
+                    np.asarray(pw.viewport.camera.center, np.float32) - after_centre
+                )
+            )
+            check(
+                "and the camera goes to the site it just selected",
+                cam_off < 1.0 and abs(float(pw.viewport.camera.distance) - before_dist) > 1e-6,
+                f"camera {before_dist:.1f} -> {float(pw.viewport.camera.distance):.1f} A, "
+                f"{cam_off:.2f} A from the new box centre",
+            )
+            check(
+                "the camera is far enough out to see the box, not inside it",
+                float(pw.viewport.camera.distance)
+                >= 0.9 * float(np.linalg.norm(np.asarray(pw.viewport.box_size, np.float32))),
+                f"distance {float(pw.viewport.camera.distance):.1f} A, box diagonal "
+                f"{float(np.linalg.norm(np.asarray(pw.viewport.box_size, np.float32))):.1f} A",
+            )
+            check(
+                "the status bar names the site and its residues",
+                "site 2" in pw.statusBar().currentMessage()
+                and "lined by" in pw.statusBar().currentMessage(),
+                f"{pw.statusBar().currentMessage()!r}",
+            )
+            arr, _ = shot(pw, "pockets_site_selected")
+            check(
+                "the selected site is actually drawn",
+                non_background(arr) > 500,
+                f"{non_background(arr)} non-background pixels",
+            )
+            pw.pocket_table.clearSelection()
+            app.processEvents()
+    finally:
+        pw.close()
+        app.processEvents()
+
+    # A structure with no enclosed site must say so rather than quietly
+    # leaving a box somewhere and calling it a suggestion. One atom: the grid
+    # around it is all solvent and the flood reaches everything, so there is
+    # genuinely nothing to report -- unlike `rec_prep.pdbqt`, which does have
+    # a site and made this check pass for the wrong reason.
+    #
+    # Written to a temporary file, not into `examples/`. A four-line fixture
+    # that a check regenerates on every run does not belong in a release tree,
+    # and that is how example directories quietly fill up.
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tiny = Path(tmpdir) / "one_atom.pdbqt"
+        tiny.write_text(
+            "ROOT\n"
+            "ATOM      1  C   UNL     1       0.000   0.000   0.000  1.00  0.00"
+            "     C.3\n"
+            "ENDROOT\n"
+            "TORSDOF 0\n",
+            encoding="utf-8",
+        )
+        empty = MainWindow()
+        empty.resize(600, 400)
+        try:
+            empty.load_structure(tiny, "receptor")
+            app.processEvents()
+            check(
+                "a structure with no site reports that, and does not invent one",
+                empty.pocket_table.rowCount() == 0
+                and "no enclosed site" in empty.lbl_pockets.text(),
+                f"{empty.pocket_table.rowCount()} rows, "
+                f"label {empty.lbl_pockets.text()!r}",
+            )
+        finally:
+            empty.close()
+            app.processEvents()
+
     # ---------------------------------------------------------------- report
     section("summary")
     npass = sum(1 for r in results if r[0] == "PASS")
