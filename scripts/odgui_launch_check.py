@@ -76,10 +76,18 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 #: machine can do. It was a private copy in each of four check scripts, which
 #: meant a fix to it had to be made four times and three of them would have been
 #: missed. `python scripts/_gui_check.py` audits that these four still use it.
-from _gui_check import odgui_check
+#: `audit_probe_copy` comes from the same module for the same reason: comparing
+#: the copy the probe loaded against this tree is a fact only this tree knows,
+#: and a second copy of that comparison would be a second answer to it.
+from _gui_check import audit_probe_copy, odgui_check, resolve_module_copy
 
 ROOT = Path(__file__).resolve().parent.parent
 EX = ROOT / "examples"
+#: This checkout's release copy of the package, and therefore the only tree whose
+#: bytes "the copy you are editing" can mean. `dock-py/python`, not `../..`: the
+#: reference is where *this file* lives, not wherever a developer's `PYTHONPATH`
+#: happens to point.
+SRC = ROOT / "dock-py" / "python"
 OUT = ROOT / "dist" / "odgui_launch"
 OUT.mkdir(parents=True, exist_ok=True)
 
@@ -233,12 +241,22 @@ def check_payload(answer) -> None:
             f"skipped: {widget['skipped']}",
         )
         return
+    extra = ""
     if answer.verdict == "no-widget":
         # The reason is what four other scripts print, so a reason that only
         # quotes the widget probe's own problem would tell every one of them
         # "this machine cannot give Qt an OpenGL context" -- on a machine whose
         # OpenGL demonstrably works. Requiring the raw stage's GL version to
         # appear checks the substance without depending on the wording.
+        #
+        # Folded into this check's own verdict rather than recorded beside it.
+        # It used to call `ok()` and then fall through to the `ok()` below, so a
+        # `no-widget` machine recorded **two** entries here and every other
+        # machine recorded one: the total was a function of the verdict, which is
+        # the thing `viewport_framing_check.py` pins `EXPECTED_CHECKS` to prevent
+        # and the reason this file has no such pin. Measured, both ways, on this
+        # machine: 4 checks with the verdict `ok`, 5 with `no-widget`. The
+        # assertion is unchanged; only the number of ledger entries is.
         reason = getattr(answer, "reason", "") or ""
         if str(raw.get("gl")) not in reason:
             bad(
@@ -247,10 +265,7 @@ def check_payload(answer) -> None:
                 f"context's GL {raw.get('gl')}: {reason!r}",
             )
             return
-        ok(
-            "the no-widget reason carries the raw stage's evidence",
-            f"quotes raw GL {raw.get('gl')}",
-        )
+        extra = f", and the no-widget reason quotes raw GL {raw.get('gl')}"
     if answer.verdict == "ok" and not widget.get("gl"):
         bad(
             "the --check payload reports both stages",
@@ -261,7 +276,8 @@ def check_payload(answer) -> None:
     ok(
         "the --check payload reports both stages",
         f"raw GL {raw.get('gl')}, widget GL {widget.get('gl') or 'none'}"
-        + (f", child exit {widget['child_exit']}" if "child_exit" in widget else ""),
+        + (f", child exit {widget['child_exit']}" if "child_exit" in widget else "")
+        + extra,
     )
 
 
@@ -300,6 +316,354 @@ def _summarise() -> None:
 answer = odgui_check()
 print(f"  --check says: {answer.describe()}")
 check_payload(answer)
+
+
+# ---------------------------------------------------------------------------
+# The probe must not be narrower than the thing it judges.
+#
+# Placed above `_run` on purpose: `x11_window_parse_check.py` slices this file
+# from the `_run` helper to the watch loop and execs the slice, so anything added
+# between those two points would be run twice and counted twice. The same
+# lesson as the `odgui_check()` call above, arrived at the same way.
+# ---------------------------------------------------------------------------
+
+#: The child that runs the product's real viewport, for the live half of the
+#: guard. Deliberately the same subject `launcher._PROBE_CHILD` uses and not a
+#: stand-in: a guard that compared the probe against another stand-in would
+#: inherit the very bias it exists to catch. It is a separate process because
+#: this file goes on to launch the real viewer, and a second QApplication in
+#: this process would fight the first one for the platform plugin.
+_PRODUCT_SUBJECT = r"""
+import json, sys, time
+from PyQt6 import QtCore, QtGui, QtWidgets
+
+started = time.perf_counter()
+app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv[:1])
+sys.stdout.write(json.dumps({"stage": "before-show"}) + "\n")
+sys.stdout.flush()
+
+try:
+    from opendocking.workbench.app import Viewport
+except Exception as exc:
+    sys.stdout.write(json.dumps({
+        "stage": "done", "harness": True,
+        "problem": "app.Viewport could not be imported: %s" % exc}) + "\n")
+    sys.stdout.flush()
+    sys.exit(3)
+
+holder = QtWidgets.QWidget()
+holder.setAttribute(QtCore.Qt.WidgetAttribute.WA_DontShowOnScreen, True)
+viewport = Viewport()
+QtWidgets.QVBoxLayout(holder).addWidget(viewport)
+holder.resize(320, 240)
+holder.show()
+
+deadline = time.perf_counter() + 20.0
+while viewport._ctx is None and time.perf_counter() < deadline:
+    app.processEvents()
+    time.sleep(0.005)
+
+sys.stdout.write(json.dumps({
+    "stage": "done", "harness": False,
+    "moderngl": viewport._ctx is not None,
+    "waited": time.perf_counter() - started}) + "\n")
+sys.stdout.flush()
+sys.exit(0 if viewport._ctx is not None else 4)
+"""
+
+
+def check_probe_judges_the_product() -> None:
+    """The widget stage must run the product's own widget, statically.
+
+    The live half of this guard (`check_probe_agrees_with_the_product`) needs a
+    machine on which the two disagree, which is exactly the machine nobody has
+    once the bug is fixed -- a check that can only go red on the broken machine
+    is a check that rots. So the structural half runs everywhere, needs no
+    display, and names the two things that made the probe narrow:
+
+    * the child must build `app.Viewport` rather than a subclass of
+      `QOpenGLWidget` standing in for it, and
+    * it must not require `initializeOpenGLFunctions`, which is the measured
+      cause. On this machine that one call ends the child with `0xC0000409`
+      *after* a usable GL 4.6 context has been established, while the product --
+      which never makes the call -- renders. A probe that requires it is testing
+      a capability the viewer does not have, and reports the gap as a fault in
+      the viewer.
+
+    Reading the child's source text is not a proxy for running it, and is not
+    claimed to be: the point is to notice a *regression* in what the probe
+    asks, cheaply, on a machine that can no longer demonstrate the bug.
+
+    **Which file is read is the other half of this guard, and it was wrong.**
+    It used to read `dock-py/python/.../launcher.py` unconditionally -- this
+    checkout's copy -- while `odgui --check` had run whichever copy `sys.path`
+    resolved. So it could pass by inspecting a file the probe never loaded, and
+    on the machine where the installed copy lagged the tree by 3 874 bytes it did
+    exactly that: a green verdict about a launcher that was not the one being
+    run. That is a report disagreeing with the process, which is the failure the
+    `--check --json` provenance block exists to prevent, committed in the very
+    file meant to police it. The path is now taken from what the probe reported.
+    The fallback exists for a launcher too old to report anything, and says so
+    in the reason rather than passing quietly.
+    """
+    import ast
+
+    reported = (getattr(answer, "detail", None) or {}).get("provenance") or {}
+    facts = reported.get("launcher") or {}
+    from_report = Path(str(facts["path"])) if facts.get("path") else None
+    if from_report is not None and from_report.is_file():
+        launcher = from_report
+        source = f"read from the copy the probe reported ({launcher})"
+    else:
+        launcher = SRC / "opendocking" / "workbench" / "launcher.py"
+        source = (
+            "read from this tree, because the probe reported no usable path "
+            f"({launcher})"
+        )
+    if not launcher.is_file():
+        skip(
+            "the --check widget stage judges the product's own viewport",
+            f"{launcher} is not on disk, so the stage cannot be inspected",
+        )
+        return
+    text = launcher.read_text(encoding="utf-8")
+
+    # The child source is a module-level string, so it is pulled out with the
+    # parser rather than by slicing between two markers that a reformat could
+    # move -- the lesson `x11_window_parse_check.py` exists to teach.
+    child = None
+    for node in ast.parse(text).body:
+        if not isinstance(node, ast.Assign):
+            continue
+        if not any(
+            isinstance(t, ast.Name) and t.id == "_PROBE_CHILD" for t in node.targets
+        ):
+            continue
+        if isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+            child = node.value.value
+    if child is None:
+        bad(
+            "the --check widget stage judges the product's own viewport",
+            "launcher.py no longer defines _PROBE_CHILD as a string, so the "
+            "stage that judges the viewer cannot be inspected at all",
+        )
+        return
+
+    problems = []
+    if "Viewport" not in child:
+        problems.append(
+            "the widget stage never names app.Viewport, so it judges a stand-in "
+            "rather than the widget the workbench shows"
+        )
+    elif "Viewport(" not in child:
+        problems.append(
+            "the widget stage imports app.Viewport but never constructs it"
+        )
+    if "initializeOpenGLFunctions" in child:
+        problems.append(
+            "the widget stage requires initializeOpenGLFunctions(), which is "
+            "the measured cause of the false 'your viewer would open empty' "
+            "verdict: it ends this process with 0xC0000409 on a machine where "
+            "the product renders"
+        )
+    if problems:
+        bad(
+            "the --check widget stage judges the product's own viewport",
+            "; ".join(problems) + f" [{source}]",
+        )
+        return
+    ok(
+        "the --check widget stage judges the product's own viewport",
+        "the stage constructs app.Viewport and requires no Qt function table "
+        f"[{source}]",
+    )
+
+
+def check_probe_agrees_with_the_product() -> None:
+    """A negative `--check` verdict must not be contradicted by the product.
+
+    This is the guard for the defect itself. The old stage 2 answered "no" for a
+    stand-in widget while `app.Viewport` rendered five frames on the same machine
+    in the same second, and the report said the viewer would open empty. The
+    only thing that catches that class is asking the product and comparing, so
+    that is what this does.
+
+    The comparison is symmetric, because a guard that only looked for one
+    direction would be a guard against today's bug and not against the next
+    one: if the probe says no and the product says yes, the probe is too narrow;
+    if the probe says no and the product says no too, they agree and the report
+    stands. A positive verdict is accepted without a second run, because a probe
+    that says "yes" is not making a claim about the product's limits.
+
+    The product half runs in a child process and a `harness` result -- an import
+    failure, a child that never started -- is a SKIP rather than a PASS, so an
+    environment that cannot answer is never recorded as agreement.
+    """
+    import json
+
+    detail = dict(getattr(answer, "detail", None) or {})
+    if answer.verdict in ("ok", "unavailable", "no-gui-stack"):
+        # Nothing is being claimed about the product's limits, so there is
+        # nothing to contradict. Recorded, so the total stays honest.
+        ok(
+            "a negative --check verdict is not contradicted by the product",
+            f"the verdict is {answer.verdict!r}, which asserts no limit to contradict",
+        )
+        return
+
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-c", _PRODUCT_SUBJECT],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=90,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        skip(
+            "a negative --check verdict is not contradicted by the product",
+            f"the product could not be exercised ({exc}), so this machine "
+            f"cannot answer the question",
+        )
+        return
+
+    report = {}
+    for line in (proc.stdout or "").splitlines():
+        try:
+            loaded = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(loaded, dict):
+            report.update(loaded)
+    if report.get("harness"):
+        skip(
+            "a negative --check verdict is not contradicted by the product",
+            f"app.Viewport could not be imported here: {report.get('problem')}",
+        )
+        return
+    if "moderngl" not in report:
+        skip(
+            "a negative --check verdict is not contradicted by the product",
+            f"the product's viewport did not answer (child exit "
+            f"{proc.returncode}), so this machine cannot adjudicate",
+        )
+        return
+
+    if report["moderngl"]:
+        bad(
+            "a negative --check verdict is not contradicted by the product",
+            f"`odgui --check` answered {answer.verdict!r} (exit {answer.code}), "
+            f"but the product's own app.Viewport came up and built a moderngl "
+            f"context in {report.get('waited', 0):.1f} s. The probe is narrower "
+            f"than the product, so its verdict is a falsehood about the viewer.",
+        )
+        return
+    ok(
+        "a negative --check verdict is not contradicted by the product",
+        f"the verdict is {answer.verdict!r} and the product's own viewport also "
+        f"failed to come up, so probe and product agree",
+    )
+
+
+check_probe_judges_the_product()
+check_probe_agrees_with_the_product()
+
+
+def check_probe_ran_the_copy_in_this_tree() -> None:
+    """A stale installed copy must be a *named* outcome, not an inferred one.
+
+    This is the check for the defect that made `odgui_launch_check` fail here
+    for a reason no report mentioned: the installed `opendocking` carried a
+    35 075-byte `launcher.py` against a tree copy 3 874 bytes larger, so
+    `odgui --check` exercised a probe that built a bare stand-in widget and
+    required `initializeOpenGLFunctions` -- a launcher that no longer exists in
+    the tree. The failure was real and the *diagnosis* was invisible: the
+    verdict quoted a product defect, because a stale copy is indistinguishable
+    from one by anything the output said. (The tree's own copy has since grown
+    again, which is why no current size is quoted here: a byte count written
+    next to "this tree's" is wrong the moment this file is edited, and that is
+    the same trap this check exists to close.)
+
+    The claim is one claim with two directions, so it is one ledger entry:
+
+    * **direction 1, silence.** The digests the probe reported must match this
+      tree's bytes. Equal digests are the only evidence of "in step", and
+      nothing is printed about it when they do match.
+    * **direction 2, report.** The same comparison, handed a digest that is
+      known to be wrong, must name the difference. A comparator that can only
+      return "no divergence" is a comparator that cannot fail, which is the
+      defect this file exists to stop -- and it is not a hypothetical one, since
+      direction 1 is the only other thing keeping this check honest.
+
+    Direction 2 perturbs the *reported* digest rather than the tree, so the
+    check needs no second copy of the package and no mutation of the checkout:
+    the thing under test is the comparison, and corrupting the tree to test it
+    would risk the very files it is asserting against.
+    """
+    import copy
+
+    name = "a stale copy of the workbench is reported, not mistaken for a defect"
+    detail = dict(getattr(answer, "detail", None) or {})
+
+    # A launcher too old to report its own provenance gets measured from here
+    # instead, because that is precisely the state a stale install is in: the
+    # 35 075-byte copy that caused this failure predates the field. Declining to
+    # compare in that state would leave the one case the check exists for as the
+    # one case it cannot see.
+    if not (detail.get("provenance") or {}):
+        measured = resolve_module_copy("opendocking.workbench.launcher")
+        detail = dict(detail)
+        detail["provenance"] = {"launcher": measured}
+        if not measured.get("path"):
+            detail = dict(getattr(answer, "detail", None) or {})
+
+    real = audit_probe_copy(detail, SRC)
+    if not real.comparable:
+        skip(
+            name,
+            f"nothing could be compared, so this run makes no claim either way "
+            f"about which copy answered: {real.why}",
+        )
+        return
+    if real.divergences:
+        bad(
+            name,
+            "the copy that answered is not the copy in this tree, so a verdict "
+            "from it is not a verdict about this checkout: "
+            + "; ".join(real.divergences),
+        )
+        return
+
+    # Direction 2. The digest is replaced by 64 zeros, which no real file here
+    # can have; if that is not reported, the comparison is not looking at
+    # anything and direction 1 was passing for the wrong reason.
+    perturbed = copy.deepcopy(detail)
+    facts = (perturbed.get("provenance") or {}).get("launcher")
+    if not isinstance(facts, dict):
+        bad(
+            name,
+            "the payload carries no `provenance.launcher` object, so the "
+            "comparison had nothing to read and its silence means nothing",
+        )
+        return
+    facts["sha256"] = "0" * 64
+    forced = audit_probe_copy(perturbed, SRC)
+    if not forced.divergences:
+        bad(
+            name,
+            "a deliberately wrong digest for the launcher was not reported, so "
+            "this check cannot detect a stale copy even when there is one",
+        )
+        return
+    ok(
+        name,
+        "the two copies are byte-identical, and the same comparison names a "
+        "wrong digest when one is given",
+    )
+
+
+check_probe_ran_the_copy_in_this_tree()
 
 
 def _descendants(root_pid: int) -> set[int]:

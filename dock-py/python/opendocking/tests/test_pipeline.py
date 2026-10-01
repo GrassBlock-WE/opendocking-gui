@@ -36,6 +36,78 @@ pytest.importorskip("rdkit", reason="RDKit is required for structure preparation
 # A box comfortably around the synthetic receptor's pocket.
 BOX = GridBox.from_center_size((0.0, 0.0, 1.5), (18.0, 18.0, 18.0))
 
+# ---------------------------------------------------------------------------
+# The line search, and why it is a ladder
+# ---------------------------------------------------------------------------
+#
+# A pose is checked for descent by stepping along the normalised ``-grad``
+# direction and asking whether the energy went down. "Can this pose still
+# descend" is therefore not a number, it is a function of the step, and a
+# single step answers a question about the step as much as about the pose.
+#
+# The rungs below are conformation units, chosen from what the pose audit
+# measures (`examples/audit_poses.py`, whose `_LINE_SEARCH_STEPS` this
+# mirrors) rather than from what reads well. The two that decide the
+# argument are the ends:
+#
+#   FINEST (1e-9)
+#       Below the step this file used to probe at. The maps are trilinearly
+#       interpolated, so the field is C0 across a cell face -- continuous in
+#       value, with a jump in its one-sided derivative -- and a pose sitting
+#       on a face has a descent region only a few times 1e-9 wide. A 1e-9 step
+#       is inside every one of those regions, so the descent it reports is a
+#       first-order term and nothing else.
+#   COARSE (1e-4 upward)
+#       The step this file used to probe at, and the one the audit reported
+#       zeros for. It is *wider* than the region, so it lands past the
+#       turn-up and reads zero. That is a fact about the probe, and the two
+#       tests below exist to keep the two apart.
+FINEST_STEP = 1e-9
+#: The intermediate rungs exist to locate the turn-over, not to sample the
+#: descent: two decades either side of the old probe step is enough to bracket
+#: a region that is demonstrably narrower than the old probe step.
+LADDER_STEPS = (1e-9, 1e-7, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1.0)
+#: The steps the old assertion used, kept verbatim: the claim "no descent at
+#: 1e-4 through 0.3" is still worth making, and it is only honest if the
+#: resolution it was made at is named next to it.
+COARSE_STEPS = (1e-4, 1e-3, 0.01, 0.1, 0.3)
+#: The optimiser's own declared stopping tolerance, `gradient_tolerance` in
+#: `dock-core/src/search/lbfgs.rs`. A pose whose gradient is far above this is
+#: not a stationary point of the field the engine scores, whatever any line
+#: search says about it -- which is what makes it the one rung of this
+#: argument that does not depend on the step at all.
+GRADIENT_TOLERANCE = 1e-4
+#: How close the measured descent/step at the finest rung has to sit against
+#: the pose's own |grad|_2 to count as a first-order term with no intercept.
+#: Not a fitted value: the measured relative spread over the poses the audit
+#: reports is 1.7e-06, which is the double-precision noise floor of a 1e-9
+#: conf-unit step, and this sits three decades above it. A value jump across a
+#: cell face is two to three decades larger than this, which is what lets the
+#: same measurement tell the two mechanisms apart.
+LINEARITY_TOL = 1e-3
+
+
+def _descent(ligand, maps, conf, unit, step):
+    """``E(conf) - E(conf - step * unit)``, in kcal/mol.
+
+    Positive means the pose can be moved downhill from here. The direction is
+    normalised by the caller, so `step` is in conformation units rather than
+    being scaled by the gradient magnitude.
+
+    A conformation the engine refuses to score (one driven outside the box)
+    is reported as a descent of 0.0, not as a crash: at the coarse rungs a
+    rejected conformation is a pose that has left the basin, which is the
+    opposite of descending, and a test that raised there would be reporting a
+    crash instead of a reading.
+    """
+    e0 = score_conformation(ligand, maps, conf)[0]
+    try:
+        moved = score_conformation(ligand, maps, conf - step * unit)[0]
+    except ValueError:
+        return 0.0
+    return float(e0) - float(moved)
+
+
 
 @pytest.fixture(scope="session")
 def data_dir(tmp_path_factory) -> Path:
@@ -424,29 +496,127 @@ class TestDocking:
         assert result.rejected_pose_count == result.num_poses > 0
         assert "WARNING" in result.summary()
 
-    def test_returned_poses_are_actual_minima(self, ligand, maps):
-        """A reported pose must be a stationary point, checked by line search.
+    def test_returned_poses_are_not_minima(self, ligand, maps):
+        """The poses are **not** minima, measured at a step that can see it.
 
-        Not by the size of its gradient. The maps are trilinearly interpolated,
-        which is only C0 across a cell face, so a pose with an atom sitting on a
-        face carries two large, opposite-signed one-sided gradients while still
-        being a genuine local minimum. A gradient-norm threshold cannot tell
-        that apart from an optimiser that failed to converge; "no downhill step
-        exists" can, and it is the property that actually matters.
+        This test used to be `test_returned_poses_are_actual_minima` and
+        asserted the opposite. It was green, and it was green for a reason that
+        had nothing to do with the poses: it asked for descent at steps of 1e-4
+        and above, and these poses' descent regions are narrower than 1e-4, so
+        every probe landed past the turn-up and read zero. "No descent found"
+        and "no descent there" are different readings, and only one of them was
+        being asserted -- by a test whose name claimed the stronger one.
+
+        Its docstring carried the same error one level up. The zeros were
+        explained by the C0 nature of the interpolated field: a pose sitting on
+        a cell face carries two large opposite-signed one-sided gradients, so a
+        gradient-norm threshold cannot tell a genuine local minimum from a
+        failed optimisation, and "no downhill step exists" can. That is true of
+        the gradient and irrelevant to the zeros -- and it has the C0 claim
+        backwards, since C0 is continuity of *value*: the value does not jump
+        across a face, the one-sided derivative does. The measurement below is
+        the one that decides the question, and it says these poses are not
+        stationary points.
+
+        What is asserted, in the order the argument needs it:
+
+        * `|grad|_2` is above the optimiser's own declared tolerance, which is
+          a statement about the engine and does not depend on any step;
+        * the descent at 1e-9 conf units is strictly positive, so the pose can
+          be moved downhill -- the opposite of the old test's claim, and
+          measured rather than inferred from the gradient;
+        * that descent equals `|grad|_2 * step` to within `LINEARITY_TOL`,
+          which is one measurement carrying two claims: the slope is the
+          pose's own gradient, and the intercept is zero. The second is what
+          a field whose *value* jumped could not produce at any step, and it
+          is the direct replacement for the mechanism the old docstring gave.
         """
         result = dock(ligand, maps, exhaustiveness=4, num_modes=3, seed=21)
         assert result.num_poses >= 1
         for i in range(result.num_poses):
             conf = np.asarray(result.pose_conformation(i), dtype=np.float64)
-            _, grad = score_conformation(ligand, maps, conf)
-            unit = grad / max(float(np.linalg.norm(grad)), 1e-30)
-            e0 = score_conformation(ligand, maps, conf)[0]
-            for step in (1e-4, 1e-3, 0.01, 0.1, 0.3):
-                moved = score_conformation(ligand, maps, conf - step * unit)[0]
-                assert moved > e0 - 1e-6, (
-                    f"pose {i} can still descend by {e0 - moved:+.6f} kcal/mol "
-                    f"at step {step}: it is not a minimum"
+            _e0, grad = score_conformation(ligand, maps, conf)
+            gnorm2 = float(np.linalg.norm(grad))
+            assert gnorm2 > GRADIENT_TOLERANCE, (
+                f"pose {i} has |grad|2 {gnorm2:.3e}, at or below the optimiser's "
+                f"own declared {GRADIENT_TOLERANCE:.0e}: it is a stationary "
+                f"point and this test's premise no longer holds"
+            )
+            unit = np.asarray(grad, dtype=np.float64) / max(gnorm2, 1e-30)
+            descent = _descent(ligand, maps, conf, unit, FINEST_STEP)
+            assert descent > 0.0, (
+                f"pose {i} cannot descend by {FINEST_STEP:.0e} conf units along "
+                f"-|grad| even though |grad|2 is {gnorm2:.3e}; the two "
+                f"measurements disagree and the fine one has stopped resolving "
+                f"the descent region"
+            )
+            predicted = gnorm2 * FINEST_STEP
+            assert abs(descent - predicted) <= LINEARITY_TOL * predicted, (
+                f"pose {i}: descent {descent:+.4e} at {FINEST_STEP:.0e} against "
+                f"|grad|2 * step {predicted:+.4e}. A slope that is not the "
+                f"pose's own |grad|2, or an offset between them, is a value "
+                f"jump across a cell face rather than a first-order term"
+            )
+
+    def test_a_coarse_line_search_steps_over_the_descent_region(self, ligand, maps):
+        """The old "no descent" reading is a fact about the probe, and is measured.
+
+        The claim the old test made -- no descent at 1e-4 through 0.3 -- is
+        still true of these poses, and it is still not evidence that they are
+        minima. This test keeps the claim and names what it is: a statement
+        about a step that is wider than the region it is asking about.
+
+        Both halves are measured, and both are needed. "No descent at any coarse
+        step" alone is what the old test asserted, and it is satisfied by any
+        pose at all whenever the probe is coarse enough. "The region closes at
+        or before the coarsest probe step" is the part that ties the zero to a
+        width, and it is what makes the zero interpretable: the field turns up
+        before the probe arrives, so the probe reports the turn-up and not the
+        absence of a descent.
+
+        The bracket is a bracket, not a measurement to more digits than the
+        ladder has -- the descent is known to be positive at one rung and not at
+        the next, and nothing between them was sampled. So the assertion is on
+        the rung that closes the region, and it is the coarse probe step that
+        is compared against it, not the geometric mean the audit reports.
+        """
+        result = dock(ligand, maps, exhaustiveness=4, num_modes=3, seed=21)
+        assert result.num_poses >= 1
+        probe = COARSE_STEPS[0]
+        for i in range(result.num_poses):
+            conf = np.asarray(result.pose_conformation(i), dtype=np.float64)
+            _e0, grad = score_conformation(ligand, maps, conf)
+            unit = np.asarray(grad, dtype=np.float64) / max(
+                float(np.linalg.norm(grad)), 1e-30
+            )
+            for step in COARSE_STEPS:
+                descent = _descent(ligand, maps, conf, unit, step)
+                assert descent <= 0.0, (
+                    f"pose {i} descends by {descent:+.6f} kcal/mol at step "
+                    f"{step}: the coarse probe is inside its descent region, so "
+                    f"'no descent at these steps' is no longer true of it"
                 )
+            ladder = [
+                (step, _descent(ligand, maps, conf, unit, step))
+                for step in LADDER_STEPS
+            ]
+            first_flat = next(
+                (n for n, (_s, descent) in enumerate(ladder) if descent <= 0.0),
+                None,
+            )
+            assert first_flat is not None, (
+                f"pose {i} descends at every rung of the ladder up to "
+                f"{LADDER_STEPS[-1]:.0e}, so its region is wider than the probe "
+                f"and the coarse zeros are not explained by the probe being too "
+                f"coarse"
+            )
+            closes_at = ladder[first_flat][0]
+            opens_at = ladder[first_flat - 1][0] if first_flat else 0.0
+            assert closes_at <= probe, (
+                f"pose {i}'s descent region closes between {opens_at:.0e} and "
+                f"{closes_at:.0e}, which is wider than the {probe:.0e} probe "
+                f"step -- so the coarse steps should have found the descent"
+            )
 
     def test_finds_a_negative_energy_pose(self, ligand, maps):
         result = dock(ligand, maps, exhaustiveness=2, num_modes=3, seed=1)

@@ -13,10 +13,21 @@ for three reasons that each cost something if ignored:
 * It is a test helper, not product code. Inside `opendocking/` it would become
   part of the shipped wheel and of the public API, and `workbench/` is not this
   file's to edit in any case.
-* The leading underscore marks it as a helper rather than a check, which matters
-  because `CONTRIBUTING.md` and `.github/workflows/ci.yml` both enumerate
-  `scripts/*.py` as things to *run*. A file called `gui_check.py` would be
-  mistaken for a gate; `_gui_check.py` cannot be.
+* The leading underscore marks it as a helper rather than a check, because
+  `CONTRIBUTING.md` and `.github/workflows/ci.yml` treat a `scripts/*.py` whose
+  name reads like a gate as a thing to *run*. A file called `gui_check.py` would
+  be mistaken for one; `_gui_check.py` cannot be.
+
+  That enumeration is no longer "every file in `scripts/`", and the audit below
+  does not depend on it being so -- `audit()` reads nothing but the five
+  `CONSUMERS` below and never opens either file. The claim is kept because the
+  naming still matters, not because anything here checks it: CI now runs the
+  audit scripts from a separate job with no display, and the workbench job runs
+  the windowed ones, so a file is run for being a gate in one job or the other.
+  An earlier version of this sentence said both files "enumerate `scripts/*.py`
+  as things to run", which stopped being true when the workbench job was
+  restructured, and a rationale that has quietly stopped being true is the kind
+  of thing that later gets relied on.
 
 **Why it exists at all.** Four of the check scripts had their own byte-identical
 copy of the same twenty-line `odgui --check` wrapper, each parsing the *first
@@ -47,6 +58,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 from dataclasses import dataclass, field
 
 #: Generous, because the honest answer costs real time on a machine that cannot
@@ -63,11 +75,20 @@ VERDICT_NO_GUI_STACK = "no-gui-stack"
 EXIT_OK = 0
 EXIT_NO_GUI_STACK = 3
 EXIT_NO_CONTEXT = 4
-#: Exit 5: OpenGL works on this machine, but Qt cannot realise an OpenGL widget,
-#: so the viewport would still open empty. Its own code because the remedy for 4
-#: ("get a machine with a GPU") is wrong for 5 -- the driver is fine. Mapping it
-#: onto 4 is exactly how this file's consumers ended up telling users to go and
-#: buy hardware they did not need.
+#: Exit 5: OpenGL works on this machine, but the **product's own viewport**
+#: (`app.Viewport`) did not come up, so the viewer window would still open with
+#: nothing rendered in it. Its own code because the remedy for 4 ("get a machine
+#: with a GPU") is wrong for 5 -- the driver is fine. Mapping it onto 4 is
+#: exactly how this file's consumers ended up telling users to go and buy
+#: hardware they did not need.
+#:
+#: The *wording* of 5 changed when the launcher's widget stage stopped using a
+#: bare stand-in widget. It used to mean "Qt cannot realise an OpenGL widget",
+#: which was a claim about the stand-in and not about the viewer, and on a
+#: machine where the viewer rendered it told users their viewer was broken. The
+#: code and the `no-widget` spelling are deliberately unchanged -- a script
+#: branching on either keeps working -- but the sentence below now describes
+#: what the launcher actually tested.
 EXIT_NO_WIDGET = 5
 
 #: Exit code -> verdict, used on the prose fallback path where there is no object
@@ -141,19 +162,24 @@ def _reason_from_json(payload: dict) -> str:
     context" and "the probe process was killed outright".
 
     `no-widget` is the one verdict whose `problem` field, quoted bare, would
-    say the wrong thing. The problem is the *widget probe's*, while OpenGL on
+    say the wrong thing. The problem is the *viewport stage's*, while OpenGL on
     that machine works -- so a consumer that took the field at face value would
     tell a user their machine has no OpenGL when it demonstrably does, and send
     them off to buy a GPU. The raw stage's facts are folded in so the sentence
     survives being passed around without its payload.
+
+    The subject is named as the workbench's own viewport rather than as "an
+    OpenGL widget", because that is what the launcher exercises now, and a
+    sentence that said the latter would be reporting the probe rather than the
+    product.
     """
     problem = payload.get("problem")
     if payload.get("verdict") == VERDICT_NO_WIDGET:
         raw = payload.get("raw") or {}
         detail = (
             f"OpenGL works (raw context GL {raw.get('gl', '?')}, function table "
-            f"{'usable' if raw.get('functions') else 'UNUSABLE'}) but Qt cannot "
-            f"realise an OpenGL widget"
+            f"{'usable' if raw.get('functions') else 'UNUSABLE'}) but the "
+            f"workbench's own viewport did not come up"
         )
         return f"{detail}: {problem}" if problem else detail
     if problem:
@@ -251,6 +277,279 @@ def odgui_check() -> Check:
             "prose report rather than a named field)"
         )
     return Check(code=code, verdict=verdict, reason=reason, source="prose")
+
+
+# ----------------------------------------------------------------- copy audit
+
+#: The payload fields compared against the tree, and where this tree keeps the
+#: same file. The paths are relative to the `opendocking` package's parent, so
+#: one table serves both layouts -- this checkout's `dock-py/python` and an
+#: installed `site-packages` -- and adding a third copy of the package does not
+#: mean writing the layout out again.
+PROVENANCE_FILES = (
+    ("launcher", "opendocking/workbench/launcher.py"),
+    ("app", "opendocking/workbench/app.py"),
+)
+
+
+@dataclass(frozen=True)
+class CopyAudit:
+    """What comparing the loaded copy against this tree established.
+
+    `comparable` is False when nothing could be compared, so a caller can SKIP
+    with `why` instead of passing a run that measured nothing -- the same
+    three-way discipline `pixel_tag` exists for, applied to a different thing
+    that can also fail to answer.
+    """
+
+    comparable: bool
+    divergences: tuple[str, ...]
+    compared: tuple[str, ...]
+    why: str = ""
+
+
+def audit_probe_copy(detail: dict, source_root) -> CopyAudit:
+    """Compare the files `odgui --check` loaded with this checkout's copies.
+
+    `detail` is a `Check.detail` -- the `--check --json` payload, whose
+    `provenance` block names the resolved files -- and `source_root` is the
+    `dock-py/python` directory of the tree the caller lives in.
+
+    **This is the half that cannot live in the probe.** The measurement belongs
+    to the process, because only it knows which file it imported; the comparison
+    belongs to the check, because only it knows where the tree being edited is.
+    A probe that tried to compare would be guessing at a path it cannot see, and
+    a check that tried to measure would be guessing at a module it never
+    imported. The split is why this is two functions in two files and not one
+    clever function in either.
+
+    What it buys is the difference between a *confident wrong answer* and a
+    named one. A stale installed copy used to make `odgui --check` report the
+    verdict of a launcher that no longer existed in the tree, with no evidence in
+    its output at all -- the divergence was only ever visible as two paths in a
+    traceback, if a person noticed. Here the two are compared byte for byte and
+    a difference comes back as a sentence that says *which file, which digest,
+    against which*, which is a cause and not a symptom.
+    """
+    import hashlib
+    from pathlib import Path
+
+    prov = dict((detail or {}).get("provenance") or {})
+    if not prov:
+        return CopyAudit(
+            False,
+            (),
+            (),
+            "the launcher reported no `provenance` block, so the copy that "
+            "answered is unknown (an older launcher, or one from before the "
+            "field existed) -- which is not evidence that the copies agree",
+        )
+
+    root = Path(source_root)
+    compared: list[str] = []
+    divergences: list[str] = []
+    unknown: list[str] = []
+    for key, relative in PROVENANCE_FILES:
+        facts = prov.get(key) or {}
+        name = str(facts.get("module") or relative)
+        reported = facts.get("sha256")
+        if not reported:
+            unknown.append(
+                f"{name}: the copy that answered reported no digest, so it "
+                f"cannot be compared"
+            )
+            continue
+        reference = root / relative
+        if not reference.is_file():
+            unknown.append(f"{name}: this tree has no {relative} to compare it with")
+            continue
+        # Read the reference's bytes once and hash them once. A digest computed
+        # twice for a message is a digest that can disagree with itself.
+        reference_sha = hashlib.sha256(reference.read_bytes()).hexdigest()
+        if reference_sha == reported:
+            compared.append(f"{name} is byte-identical to {relative}")
+        else:
+            divergences.append(
+                f"{name} differs from {relative} -- the copy that answered is "
+                f"{facts.get('path')} (sha256 {str(reported)[:12]}) and this "
+                f"tree's is {reference} (sha256 {reference_sha[:12]})"
+            )
+
+    why = "; ".join(unknown)
+    if compared or divergences:
+        return CopyAudit(True, tuple(divergences), tuple(compared), why)
+    return CopyAudit(
+        False,
+        (),
+        (),
+        why or "no file named in the payload could be compared against the tree",
+    )
+
+
+#: The child for `resolve_module_copy`. It reports the interpreter it ran under
+#: as well as the module's file, because the answer is only worth having if the
+#: thing that produced it is the same interpreter this check is running.
+_RESOLVE_CHILD = """
+import importlib, json, sys
+module = importlib.import_module(sys.argv[1])
+print(json.dumps({"executable": sys.executable,
+                  "file": getattr(module, "__file__", None)}))
+"""
+
+
+def resolve_module_copy(module_name: str) -> dict:
+    """Which file `module_name` resolves to, measured in a fresh interpreter.
+
+    The fallback for a launcher too old to report its own provenance, which is
+    the state this mechanism most has to survive: the stale copy that made
+    `odgui_launch_check` fail here predates the field entirely, so a comparison
+    that only reads the payload would decline to compare exactly when there is
+    something to say. The child runs the same interpreter as this process, in
+    this process's environment, so it sees the `PYTHONPATH` a console script
+    would inherit.
+
+    Two guards, and both of them can only make the answer *unavailable* rather
+    than wrong -- which is the direction to fail in, because the failure this
+    exists to prevent is a confident wrong answer:
+
+    * the child names the interpreter it ran under, and its answer is discarded
+      unless that is this process's own executable, so a copy belonging to a
+      different interpreter is never described using this one's `sys.path`;
+    * a child that fails to import the module, or answers with no file, yields
+      a `problem` and no path, rather than a path inferred from the module name.
+    """
+    proc = _run([sys.executable, "-c", _RESOLVE_CHILD, module_name])
+    if proc is None:
+        return {
+            "module": module_name,
+            "path": None,
+            "problem": "a fresh interpreter could not be run to ask",
+        }
+    try:
+        answer = json.loads((proc.stdout or "").strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        answer = None
+    if not isinstance(answer, dict) or not answer.get("file"):
+        return {
+            "module": module_name,
+            "path": None,
+            "problem": f"the asking interpreter could not import {module_name} "
+            f"(exit {proc.returncode})",
+        }
+    from pathlib import Path
+
+    try:
+        same = Path(str(answer.get("executable"))).resolve() == Path(
+            sys.executable
+        ).resolve()
+    except OSError:
+        same = False
+    if not same:
+        return {
+            "module": module_name,
+            "path": None,
+            "problem": f"the copy would have to be named by "
+            f"{answer.get('executable')!r}, which is not the interpreter this "
+            f"check runs under, so it is left unmeasured rather than guessed",
+        }
+
+    import hashlib
+
+    path = Path(str(answer["file"]))
+    facts = {
+        "module": module_name,
+        "path": str(path.resolve()),
+        "measured_in": "a fresh interpreter in this check's environment (the "
+        "probe itself reported no provenance)",
+    }
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        facts["problem"] = f"the file could not be read ({exc})"
+        return facts
+    facts["bytes"] = len(data)
+    facts["sha256"] = hashlib.sha256(data).hexdigest()
+    return facts
+
+
+# ----------------------------------------------------------------- pixel guard
+
+#: The three-way answer every pixel-reading GUI check has to give, in one place.
+#:
+#: A pixel check asks about something the *environment* may be unable to show:
+#: whether the viewer drew anything at all. So there are three answers, not two,
+#: and the middle one is the one that gets forgotten.
+#:
+#: * the framebuffer cannot answer (a headless runner's uniformly coloured grab,
+#:   or a null image) -- **SKIP**: nothing was measured and nothing is claimed;
+#: * it can answer and the thing asked is true -- **PASS**;
+#: * it can answer and the thing asked is false -- **FAIL**.
+#:
+#: Collapsing the first into the third is the defect this exists to prevent, and
+#: it is not a small one: a suite that reports "nothing was drawn at all" for
+#: three frames on a runner that cannot draw has told the reader their viewer is
+#: broken when the only true statement is that the runner drew nothing readable.
+#: `workbench_interaction_check.py` hit exactly that and its owner fixed it there;
+#: `viewport_framing_check.py` hit it independently, in the same CI run, which is
+#: what makes this a shared decision rather than two private ones.
+#:
+#: Deliberately free of Qt, numpy and any display, so this file stays importable
+#: by the static audit CI runs before anything needs a screen.
+PIXEL_SKIP = "SKIP"
+PIXEL_PASS = "PASS"
+PIXEL_FAIL = "FAIL"
+
+
+def pixel_tag(framebuffer_can_answer: bool, condition: bool) -> str:
+    """Which of the three answers this measurement earns.
+
+    `framebuffer_can_answer` is the machine's answer, and it must come from the
+    **product's own frame** -- never from `odgui --check` and never from
+    `GL_OK`. Those two disagree with the frame, and the disagreement is measured
+    rather than assumed: on the machine this was written on, the launcher's probe
+    reports no context while the workbench's `QOpenGLWidget` renders and its
+    framebuffer reads back 723 226 pixels. Gating a pixel check on either of
+    them skips it on machines that render perfectly well.
+
+    `condition` is the thing actually being asserted, and is only consulted when
+    the framebuffer can answer. A blank frame is not evidence about `condition`
+    in either direction, which is why the first branch comes first and returns
+    without looking at it.
+    """
+    if not framebuffer_can_answer:
+        return PIXEL_SKIP
+    return PIXEL_PASS if condition else PIXEL_FAIL
+
+
+def verify_pixel_tag() -> tuple[bool, str]:
+    """Reverse-verify `pixel_tag`, so a guard that cannot fail is visible.
+
+    All three states are probed, because a guard that skipped unconditionally
+    would be indistinguishable from a working one: the first probe is the state
+    this function exists for, the second proves a good frame is still measured,
+    and the third proves a readable-but-empty frame is still a failure.
+
+    Returns `(held, reason)`.
+    """
+    got = tuple(
+        pixel_tag(answerable, condition)
+        for answerable, condition in ((False, False), (True, True), (True, False))
+    )
+    want = (PIXEL_SKIP, PIXEL_PASS, PIXEL_FAIL)
+    return (
+        got == want,
+        f"blank framebuffer -> {got[0]}, good render -> {got[1]}, "
+        f"empty render -> {got[2]} (want {'/'.join(want)})",
+    )
+
+
+#: Files that must converge on `pixel_tag` rather than carry their own copy.
+#: `workbench_interaction_check.py` has its own `pixel_check`/`PIXELS_OK` pair,
+#: which is the correct three-way behaviour implemented locally. It is not
+#: listed here because it is owned elsewhere and is mid-convergence by another
+#: agent; when its owner points it at `pixel_tag`, this list grows by one and the
+#: two implementations collapse to one.
+PIXEL_GUARD_CONSUMERS = ("viewport_framing_check.py",)
 
 
 # --------------------------------------------------------------------- audit

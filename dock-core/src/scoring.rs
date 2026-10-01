@@ -242,19 +242,294 @@ impl SpatialKernels {
     /// Evaluate every component and its derivative at surface distance `d`.
     #[inline]
     pub fn eval(&self, d: f64) -> PairComponents {
+        let (v, dv) = self.eval_terms(d);
+        PairComponents {
+            shape: (Self::shape_of(&v), Self::shape_of(&dv)),
+            hbond: (
+                v[TermField::HbFromDonor.index()],
+                dv[TermField::HbFromDonor.index()],
+            ),
+            hydrophobic: (
+                v[TermField::Hydrophobic.index()],
+                dv[TermField::Hydrophobic.index()],
+            ),
+        }
+    }
+
+    /// The three shape terms added together, in the order the spec writes them.
+    ///
+    /// The hydrogen-bond slot takes only the donor half because
+    /// [`PairComponents::hbond`] is a single slot that the *interpolation*
+    /// weight later decides is read or not; the two halves are separated at
+    /// write time and recombined by weight, so this sum is a shape-only sum.
+    #[inline]
+    fn shape_of(v: &TermValues) -> f64 {
+        v[TermField::Gauss1.index()]
+            + v[TermField::Gauss2.index()]
+            + v[TermField::Repulsion.index()]
+    }
+
+    /// Every term's weighted value and its derivative at surface distance `d`.
+    ///
+    /// **This is the only place a Vina weight is ever multiplied in.** Both the
+    /// four-slot [`Self::eval`] and the six-field per-term path call it, so a
+    /// weight cannot be applied twice in one and once in the other — the
+    /// failure mode that would make the per-term numbers disagree with the total
+    /// for a reason that has nothing to do with the terms themselves.
+    ///
+    /// `HbFromDonor` and `HbFromAcceptor` carry the *same* weighted value
+    /// (`w_hb · hb(d)`); they are distinct fields only because a probe may read
+    /// one and not the other, which is decided at interpolation by
+    /// [`probe_term_mask`], not here.
+    #[inline]
+    pub fn eval_terms(&self, d: f64) -> (TermValues, TermValues) {
         let (g1, dg1) = gaussian_term(d, self.gauss1.0, self.gauss1.1);
         let (g2, dg2) = gaussian_term(d, self.gauss2.0, self.gauss2.1);
         let (rep, drep) = repulsion_term(d);
         let (hb, dhb) = hbond_term(d);
         let (hyd, dhyd) = hydrophobic_term(d);
-        PairComponents {
-            shape: (
-                self.w1 * g1 + self.w2 * g2 + self.w_rep * rep,
-                self.w1 * dg1 + self.w2 * dg2 + self.w_rep * drep,
-            ),
-            hbond: (self.w_hb * hb, self.w_hb * dhb),
-            hydrophobic: (self.w_hyd * hyd, self.w_hyd * dhyd),
-        }
+        (
+            [
+                self.w1 * g1,
+                self.w2 * g2,
+                self.w_rep * rep,
+                self.w_hb * hb,
+                self.w_hb * hb,
+                self.w_hyd * hyd,
+            ],
+            [
+                self.w1 * dg1,
+                self.w2 * dg2,
+                self.w_rep * drep,
+                self.w_hb * dhb,
+                self.w_hb * dhb,
+                self.w_hyd * dhyd,
+            ],
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Per-term decomposition
+// ---------------------------------------------------------------------------
+//
+// # Why the terms are not readable off the map
+//
+// The production grid stores **four** slots per (point, probe type), and slot
+// `Shape` is `w1·g1 + w2·g2 + w_rep·rep` fused into a *single* `f32` before it
+// is ever written. Three of the five terms are therefore not recoverable from
+// a [`crate::grid::GridMaps`] by any amount of reading: they were summed
+// together at precalculation time and the sum is all that survives. Nor is the
+// split an argument about precision — the f32 field holds the *rounded* sum, so
+// the three pieces are gone, not merely blurred.
+//
+// The fix is a second tabulation over the same geometry, with one field per
+// term. It is deliberately *not* a change to `MAPS_PER_TYPE`, because the WGSL
+// kernel hard-codes the same stride and the `gpu` feature's test asserts the two
+// agree; splitting `Shape` in place would move the GPU's memory layout without
+// moving its kernel. [`TermMaps`] therefore costs its own memory and is built on
+// demand, and the docking path never touches it.
+//
+// # Where the weights are applied — the point this module was vague about
+//
+// **The term weights are applied when the map is tabulated, not when a
+// conformation is scored.** `SpatialKernels::eval_terms` is the only place any
+// weight is multiplied in, it runs inside the precalculation loop, and what it
+// returns is stored as a map field. By the time `score_conformation` runs there
+// is no weight left to apply: the only per-atom multiplier still alive is the
+// 0/1 **class mask** from [`weights_for_kind`], which selects *which* slots a
+// probe reads and is not a weight in the Vina sense (its entries are 0.0 or 1.0
+// and it carries no coefficient).
+//
+// The consequence for a caller: every term reported by [`TermMaps`] is already
+// **weighted**, in kcal/mol, on the same scale as the total. There is no
+// unweighted variant, and multiplying by the weight again would double-count it.
+
+/// Number of tabulated fields per grid point needed to rebuild the five terms.
+///
+/// Six, not five. The hydrogen bond is one *term* but two *fields*, because
+/// which of the two a probe may read is decided by the **receptor** atom's
+/// class while the map is being written and by the **probe** atom's class when
+/// it is read; merging them into one field earlier would put a receptor
+/// donor's hydrogen bond where a donor probe can see it, which is precisely
+/// the spurious donor–donor bond the two-slot split exists to prevent. The
+/// merge into a single `hb` term therefore happens at *read* time, in
+/// [`probe_term_mask`], and nowhere earlier.
+pub const TERM_FIELDS: usize = 6;
+
+/// A tabulated per-term value (or its derivative), in kcal/mol.
+pub type TermValues = [f64; TERM_FIELDS];
+
+/// One of the six tabulated fields that together rebuild the five Vina terms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TermField {
+    /// `g1`, centred at `d = 0.5` with width 0.5.
+    Gauss1 = 0,
+    /// `g2`, centred at `d = 0.0` with width 0.5.
+    Gauss2 = 1,
+    /// `rep`, the quadratic wall below contact.
+    Repulsion = 2,
+    /// Hydrogen bond written by receptor **donors**, read by probe acceptors.
+    HbFromDonor = 3,
+    /// Hydrogen bond written by receptor **acceptors**, read by probe donors.
+    HbFromAcceptor = 4,
+    /// Apolar contact.
+    Hydrophobic = 5,
+}
+
+impl TermField {
+    /// All six fields, in storage order.
+    pub const ALL: [TermField; TERM_FIELDS] = [
+        TermField::Gauss1,
+        TermField::Gauss2,
+        TermField::Repulsion,
+        TermField::HbFromDonor,
+        TermField::HbFromAcceptor,
+        TermField::Hydrophobic,
+    ];
+
+    /// Dense index into a [`TermValues`].
+    #[inline]
+    pub fn index(self) -> usize {
+        self as usize
+    }
+}
+
+/// Which fields a **receptor** atom writes while the map is tabulated.
+#[inline]
+pub fn receptor_term_mask(atom: &Atom) -> [bool; TERM_FIELDS] {
+    [
+        true,
+        true,
+        true,
+        atom.can_donate(),
+        atom.can_accept(),
+        atom.is_apolar(),
+    ]
+}
+
+/// Which fields a **probe** atom reads when the map is interpolated.
+///
+/// The hydrogen-bond entries are crossed against the receptor's: a probe
+/// *donor* reads `HbFromAcceptor` and a probe *acceptor* reads `HbFromDonor`,
+/// which is the same like-with-like withholding that
+/// [`crate::grid::MapSlot`] documents. Getting the crossing backwards would
+/// give a receptor acceptor its hydrogen bond back to a receptor acceptor.
+#[inline]
+pub fn probe_term_mask(atom: &Atom) -> [bool; TERM_FIELDS] {
+    [
+        true,
+        true,
+        true,
+        atom.can_accept(),
+        atom.can_donate(),
+        atom.is_apolar(),
+    ]
+}
+
+/// Which compute backend can produce a [`TermBreakdown`].
+///
+/// # Why this is a type and not a sentence
+///
+/// The per-term decomposition is **CPU-only**, and that has to be visible at
+/// the point of call rather than in a document — a caller holding a breakdown
+/// must be able to ask, not infer.
+///
+/// The alternative would be a build where a `gpu` feature silently changed
+/// where the five terms come from, or where a `gpu` build returned *fewer* of
+/// them. Either would be worse than the bug this decomposition was written to
+/// find, because it would be invisible on whichever build the user happened to
+/// install. So the fact is carried in two places a caller actually touches:
+///
+/// * [`TermBreakdown::backend`], on the value itself, so an answer cannot be
+///   separated from the statement of what produced it; and
+/// * [`crate::grid::TermMaps::BACKEND`], for a caller deciding whether to
+///   build the tabulation at all.
+///
+/// There is exactly one variant, and adding a second is a deliberate act: it
+/// would mean a shader had learned the 60-float stride, at which point the
+/// two backends would have to be proven equal term by term before this enum
+/// could grow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TermBackend {
+    /// The CPU. [`crate::grid::TermMaps`] is tabulated on the host with rayon
+    /// and read back on the host.
+    ///
+    /// The WGSL kernel takes a [`crate::grid::GridMaps`] and nothing else — its
+    /// signature is `score(&Batch, &GridMaps)` — so a `TermMaps` cannot reach a
+    /// shader even by accident. `TermMaps` is 60 floats per grid point against
+    /// the production map's 40, and the kernel hard-codes the 40.
+    #[default]
+    Cpu,
+}
+
+/// The per-term decomposition of one conformation's intermolecular energy.
+///
+/// Every field is in **kcal/mol** and is **already weighted** — see the module
+/// section on the weight-application point. The five terms are `gauss1`,
+/// `gauss2`, `repulsion`, `hbond` and `hydrophobic`; the hydrogen bond is also
+/// reported split by receptor polarity, because that split is the property that
+/// decides whether a probe can see the bond at all.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct TermBreakdown {
+    /// Which backend produced this breakdown. Always [`TermBackend::Cpu`].
+    ///
+    /// Read this to answer "can the GPU do this?" without leaving the value.
+    /// There is no variant in which this is anything else, which is the point:
+    /// the question has an answer a caller can type-check, and the only answer
+    /// is ever "no, the CPU did this".
+    pub backend: TermBackend,
+
+    /// `g1 = −0.035579 · exp(−((d − 0.5)/0.5)²)`, summed over every pair.
+    pub gauss1: f64,
+    /// `g2 = −0.005156 · exp(−(d/0.5)²)`, summed over every pair.
+    pub gauss2: f64,
+    /// `rep = 0.840245 · d²` for `d < 0`, summed over every pair.
+    pub repulsion: f64,
+    /// The hydrogen bond: `hbond_from_donor + hbond_from_acceptor`.
+    pub hbond: f64,
+    /// The apolar contact term.
+    pub hydrophobic: f64,
+    /// The donor-polarity half of [`TermBreakdown::hbond`].
+    pub hbond_from_donor: f64,
+    /// The acceptor-polarity half of [`TermBreakdown::hbond`].
+    pub hbond_from_acceptor: f64,
+    /// Out-of-box penalty, in kcal/mol; zero unless an atom left the grid.
+    ///
+    /// Reported separately because it is **not** a Vina term: the search adds a
+    /// flat linear penalty to pull a violating pose back, and folding it into
+    /// the nearest term would make a term's value depend on whether the pose
+    /// happened to be inside the box.
+    pub out_of_box_penalty: f64,
+}
+
+impl TermBreakdown {
+    /// The five Vina terms added together, excluding the out-of-box penalty.
+    ///
+    /// This is the intermolecular energy the five terms are claimed to account
+    /// for, and it is the quantity the cross-check holds the engine to.
+    #[must_use]
+    pub fn terms_total(&self) -> f64 {
+        self.gauss1 + self.gauss2 + self.repulsion + self.hbond + self.hydrophobic
+    }
+
+    /// The five terms plus the out-of-box penalty.
+    ///
+    /// This is the number a caller should compare against the engine's
+    /// intermolecular energy, which includes the penalty for the same reason the
+    /// search does.
+    #[must_use]
+    pub fn total(&self) -> f64 {
+        self.terms_total() + self.out_of_box_penalty
+    }
+
+    /// The `Shape` slot's value: the three terms the production map fuses.
+    ///
+    /// The production grid stores exactly this sum in one `f32`, so this is the
+    /// number a per-slot reading would report for slot 0.
+    #[must_use]
+    pub fn shape(&self) -> f64 {
+        self.gauss1 + self.gauss2 + self.repulsion
     }
 }
 
@@ -661,5 +936,650 @@ mod tests {
         let c2 = atom(Element::C, AtomType::CH, AtomKind::Hydrophobic);
         // At large separation both functions must be exactly zero.
         assert!(v.pair_energy(&c, &c2, 9.0).abs() < 1e-12);
+    }
+}
+
+/// Every number the scoring path reads, pinned against the line of
+/// `docs/SCORING.md` that states it.
+///
+/// # Why the failure message carries the documentation
+///
+/// The measurement that motivated this module: changing the hydrophobic window
+/// from `1.5` to `1.45` leaves the engine scoring a **different term** and
+/// passed **117 of 117** tests that were already in the suite. The suite pinned
+/// the hydrogen-bond window and no other number, so a term nobody had pinned
+/// could be retuned freely.
+///
+/// A test asserting `hydrophobic_term(1.45) == 0.00725` would have gone red,
+/// and a test merely saying "the hydrophobic window is 1.5" would have gone red
+/// for the same reason — but would have told its reader nothing about *why* 1.5.
+/// So every assertion below names the documented line. A constant and the
+/// sentence that states it then have to change together, and a reader who trips
+/// one is sent to the specification rather than left to guess which side is
+/// stale.
+///
+/// That is the failure §5.1's measurement table fell into: the numbers were
+/// measured, written down, and then the code was fixed around them while the
+/// table kept quoting the old ones. A number with no sentence above it is a
+/// number nobody re-derived.
+///
+/// # What is deliberately not here
+///
+/// `OUT_OF_BOX_PENALTY`, `MAX_GRID_POINTS` and `TERM_FIELDS` have **no line in
+/// `SCORING.md` at all**. They are pinned in `grid.rs` with failure messages
+/// that say so, because a scoring constant with no specification is a finding
+/// the reader should be shown, not a blank to fill in here.
+#[cfg(test)]
+mod pinned_constants {
+    use super::*;
+    use crate::ligand::MIN_INTRA_BOND_DISTANCE;
+    use crate::scoring::TermField as F;
+
+    /// `docs/SCORING.md` §2.3, the smoothstep definitions.
+    const SMOOTHSTEP_DOC: &str = "SCORING.md §2.3: S(a, b, x) = 0 当 x <= a / = t^2(3-2t) 当 a < x < b, t = (x-a)/(b-a) / = 1 当 x >= b";
+    /// `docs/SCORING.md` §2.3, the two windowed terms.
+    const WINDOW_DOC: &str = "SCORING.md §2.3: hb(d) = 1 - S(-0.5,  0.0, d)   深度重叠时为 1，到 0 A 归零\n\
+                              SCORING.md §2.3: hyd(d) = 1 - S( 0.5,  1.5, d)  近程 apolar 接触为 1，到 1.5 A 归零";
+    /// `docs/SCORING.md` §2.1, the Gaussian table.
+    const GAUSS_DOC: &str = "SCORING.md §2.1: | `g1` | `0.5` | `0.5` | `-0.035579` | `0` |  and  | `g2` | `0.0` | `0.5` | `-0.005156` | `0` |\n\
+                             (columns: centre c, width w, vina weight, vinardo weight)";
+    /// `docs/SCORING.md` §3, the Vina weight block.
+    const VINA_WEIGHT_DOC: &str = "SCORING.md §3:\n\
+        VinaWeights {\n\
+        \x20   gauss1:   -0.035579,\n\
+        \x20   gauss2:   -0.005156,\n\
+        \x20   repulsion:  0.840245,\n\
+        \x20   hbond:    -0.587439,\n\
+        \x20   hydrophobic: -0.035069,\n\
+        \x20   intramolecular_scale: 0.006,\n\
+        }";
+    /// `docs/SCORING.md` §3, the Vinardo weight block.
+    const VINARDO_WEIGHT_DOC: &str =
+        "SCORING.md §3 (Vinardo, Quiroga & Villarreal, PLoS ONE 11, e0163579, 2016):\n\
+        gauss1 = gauss2 = 0        // 丢掉两个高斯\n\
+        repulsion   = -0.045       // 注意是负的\n\
+        hbond       = -0.030\n\
+        hydrophobic = -0.015\n\
+        intramolecular_scale = 0.0075";
+    /// `docs/SCORING.md` §2.2, the repulsion branch.
+    const REPULSION_DOC: &str = "SCORING.md §2.2: rep(d) = d^2  当 d < 0  /  = 0  当 d >= 0;  drep/dd = 2d 当 d < 0, 否则 0";
+    /// `docs/SCORING.md` §5.3, the surface-distance cutoff.
+    const CUTOFF_DOC: &str = "SCORING.md §5.3: `SpatialKernels::cutoff = 8.0` 是表面距离的上限，而内循环手里是真实距离，所以真实距离的截断应当是 `cutoff + 2*R`";
+    /// `docs/SCORING.md` §4.1, the intramolecular slope and graph distance.
+    const INTRA_DOC: &str = "SCORING.md §4.1: E_total = E_inter + slope * E_intra,  slope = 0.006（vina）/ 0.0075（vinardo）\n\
+                             SCORING.md §4.1: `ligand.rs::MIN_INTRA_BOND_DISTANCE = 4`，即 1-4 及更远";
+
+    /// Assert that a scoring constant still equals the value `SCORING.md`
+    /// documents for it, and name the documented line if it does not.
+    ///
+    /// The equality is the easy half. What this adds over `assert_eq!` is that
+    /// the specification line travels with the assertion, so a reader who trips
+    /// it learns which document to read — and a maintainer changing the
+    /// constant is told, in the failure they will see, that the document is
+    /// now wrong too.
+    fn assert_pinned<T: PartialEq + std::fmt::Debug>(
+        constant: &str,
+        found: T,
+        documented: T,
+        doc: &str,
+    ) {
+        if found != documented {
+            panic!(
+                "{constant} is {found:?}, but the specification documents {documented:?}.\n\
+                 documented: {doc}\n\
+                 The constant and the line that states it have to change together. \
+                 A number nobody re-derived is worse than a number nobody wrote down."
+            );
+        }
+    }
+
+    /// `smoothstep` is the one function both windowed terms are built from, and
+    /// the specification writes its definition out. Pinned to that definition
+    /// rather than to a property: the C¹ behaviour is a property of *every*
+    /// window, which is exactly why `smoothstep_is_c1` could not notice the
+    /// hydrogen-bond window moving (see its doc comment).
+    ///
+    /// A retune of the *shape* — as opposed to the window — would move these
+    /// numbers while leaving both windows intact, and would be a silent change
+    /// to every distance-dependent term in the function.
+    #[test]
+    fn the_smoothstep_is_the_documented_cubic() {
+        // The three branches, as written: 0 at and below a, 1 at and above b.
+        assert_pinned("S at x=a", smoothstep(0.5, 1.5, 0.5).0, 0.0, SMOOTHSTEP_DOC);
+        assert_pinned("S at x<a", smoothstep(0.5, 1.5, 0.4).0, 0.0, SMOOTHSTEP_DOC);
+        assert_pinned("S at x=b", smoothstep(0.5, 1.5, 1.5).0, 1.0, SMOOTHSTEP_DOC);
+        assert_pinned("S at x>b", smoothstep(0.5, 1.5, 1.6).0, 1.0, SMOOTHSTEP_DOC);
+        // The interior branch, t^2(3 - 2t). At t = 1/2 that is exactly 0.5,
+        // which is also why both window midpoints read exactly 0.5 above.
+        assert_pinned(
+            "S at t=0.5",
+            smoothstep(0.5, 1.5, 1.0).0,
+            0.5,
+            SMOOTHSTEP_DOC,
+        );
+        // ... and at t = 1/4, t^2(3-2t) = (1/16)(5/2) = 0.15625 exactly.
+        let t = 0.25;
+        assert_pinned(
+            "S at t=0.25 against t^2(3-2t)",
+            smoothstep(0.5, 1.5, 0.5 + t).0,
+            t * t * (3.0 - 2.0 * t),
+            SMOOTHSTEP_DOC,
+        );
+        // The derivative branch, 6t(1-t)/(b-a), which is what the analytic
+        // gradient depends on. At the midpoint that is 6(0.25)/1 = 1.5.
+        assert_pinned(
+            "dS/dx at t=0.5 over a unit window",
+            smoothstep(0.5, 1.5, 1.0).1,
+            1.5,
+            SMOOTHSTEP_DOC,
+        );
+        // The two window widths are both 1.0, so the peak slope is 1.5 for
+        // each. If a window were ever widened, this is the number that moves.
+        assert_pinned(
+            "peak dS/dx for the hyd window",
+            smoothstep(0.5, 1.5, 1.0).1,
+            6.0 / 1.0 * 0.25,
+            SMOOTHSTEP_DOC,
+        );
+        assert_pinned(
+            "peak dS/dx for the hb window",
+            smoothstep(-0.5, 0.0, -0.25).1,
+            6.0 / 0.5 * 0.25,
+            SMOOTHSTEP_DOC,
+        );
+    }
+
+    /// `hydrophobic_term` writes `smoothstep(0.5, 1.5, d)` inline, so there is no
+    /// constant to read — the knots have to be recovered from the values the
+    /// function returns.
+    ///
+    /// Every sample below is **discriminating**: it is a place where a retune of
+    /// the window changes the answer. The last two are what turn the measured
+    /// `1.5 -> 1.45` mutation red. Under a 1.5 window `hydrophobic_term(1.45)`
+    /// is 0.00725 — a term that is 99.3% spent but not spent; under 1.45 the
+    /// window ends *at* 1.45, so the function returns exactly 0.0 there and
+    /// retires the tail 0.05 Å early. In ångström of a real C···C contact
+    /// (`2 * 1.90 = 3.80 Å`) that is 5.28 Å, and §10's table says the term is
+    /// `= 0` only from `d >= 1.5`, i.e. from **5.30 Å**.
+    #[test]
+    fn the_hydrophobic_window_is_the_documented_one() {
+        // Saturated at and below the lower knot.
+        assert_pinned("hyd at d=0.4", hydrophobic_term(0.4).0, 1.0, WINDOW_DOC);
+        assert_pinned(
+            "hyd at d=0.5 (lower knot)",
+            hydrophobic_term(0.5).0,
+            1.0,
+            WINDOW_DOC,
+        );
+        // A cubic smoothstep is symmetric about the middle of its window, so
+        // the midpoint value is exactly 0.5 and pins the window's *centre* as
+        // well as its two ends. Retuned to 1.45 this reads 0.4605.
+        assert_pinned(
+            "hyd at d=1.0 (window midpoint)",
+            hydrophobic_term(1.0).0,
+            0.5,
+            WINDOW_DOC,
+        );
+        // Spent at and past the upper knot.
+        assert_pinned(
+            "hyd at d=1.5 (upper knot)",
+            hydrophobic_term(1.5).0,
+            0.0,
+            WINDOW_DOC,
+        );
+        assert_pinned("hyd at d=2.0", hydrophobic_term(2.0).0, 0.0, WINDOW_DOC);
+        // 0.05 Å inside the upper knot, the term is still alive. This is the
+        // single assertion that makes the 1.5 -> 1.45 mutation red: under a
+        // 1.45 window the function ends *at* 1.45 and returns exactly 0.0
+        // there, retiring the tail 0.05 Å early.
+        //
+        // `!= 0.0` rather than equality against a decimal, because the residue
+        // is 1 - 0.95²·(3 - 2·0.95) = 0.00725 in exact arithmetic and
+        // 0.007249999999999979 in f64; pinning the decimal would be pinning a
+        // rounding rather than a window.
+        assert_pinned(
+            "hyd 0.05 A inside its upper knot, d=1.45: the term is not spent yet",
+            hydrophobic_term(1.45).0 != 0.0,
+            true,
+            WINDOW_DOC,
+        );
+        // ... and the residue must be the small one the definition gives, not a
+        // substantial one. Measured on this build: 0.007249999999999979.
+        assert!(
+            (hydrophobic_term(1.45).0 - 0.00725).abs() < 1e-15,
+            "hyd at d=1.45 is {}, which is not the exact-arithmetic residue \
+             1 - 0.95^2*(3 - 2*0.95) = 0.00725 within f64 rounding.\n\
+             documented: {WINDOW_DOC}",
+            hydrophobic_term(1.45).0
+        );
+        // The same fact read in the units §10 states it in: a C···C pair
+        // (R + R = 3.80 Å) is apolar contact at 5.28 Å and spent at 5.30 Å.
+        let cc = 2.0 * Element::C.interaction_radius();
+        assert_pinned(
+            "hyd for C...C at 5.28 A: still alive, per §10 '= 0 | d >= 1.5 | >= 5.30 A'",
+            hydrophobic_term(5.28 - cc).0 != 0.0,
+            true,
+            WINDOW_DOC,
+        );
+        assert_pinned(
+            "hyd for C...C at 5.30 A: spent, per §10 '= 0 | d >= 1.5 | >= 5.30 A'",
+            hydrophobic_term(5.30 - cc).0,
+            0.0,
+            WINDOW_DOC,
+        );
+    }
+
+    /// The hydrogen-bond window, pinned the same way.
+    ///
+    /// The Ångström reading is already covered by
+    /// `the_hbond_window_lands_on_the_documented_separations`; this adds the
+    /// knot-level claim *with the documented line attached*, so a retune here
+    /// says which sentence of the specification is now false.
+    #[test]
+    fn the_hydrogen_bond_window_is_the_documented_one() {
+        // `d = -0.6` is the discriminating sample against the retired
+        // `smoothstep(-0.7, -0.5, d)`: the current window answers 1.0 (it is at
+        // or past its lower knot), the retired one answers 0.5.
+        assert_pinned("hb at d=-0.6", hbond_term(-0.6).0, 1.0, WINDOW_DOC);
+        assert_pinned(
+            "hb at d=-0.5 (lower knot)",
+            hbond_term(-0.5).0,
+            1.0,
+            WINDOW_DOC,
+        );
+        // Symmetric about the middle of its window, so exactly 0.5 at d=-0.25.
+        // Retuned to the old window this reads 0.0.
+        assert_pinned(
+            "hb at d=-0.25 (window midpoint)",
+            hbond_term(-0.25).0,
+            0.5,
+            WINDOW_DOC,
+        );
+        assert_pinned(
+            "hb at d=0.0 (upper knot)",
+            hbond_term(0.0).0,
+            0.0,
+            WINDOW_DOC,
+        );
+        assert_pinned("hb at d=0.5", hbond_term(0.5).0, 0.0, WINDOW_DOC);
+    }
+
+    /// The Gaussian centres and widths. These are the separation axis of three
+    /// of the five terms, and a retune of either moves where the shape
+    /// complementarity well sits without changing any total by more than the
+    /// sum-level checks can see.
+    #[test]
+    fn the_gaussian_centres_and_widths_are_the_documented_ones() {
+        let k = SpatialKernels::from_weights(&VinaWeights::default());
+        assert_pinned("g1 centre c", k.gauss1.0, 0.5, GAUSS_DOC);
+        assert_pinned("g1 width w", k.gauss1.1, 0.5, GAUSS_DOC);
+        assert_pinned("g2 centre c", k.gauss2.0, 0.0, GAUSS_DOC);
+        assert_pinned("g2 width w", k.gauss2.1, 0.5, GAUSS_DOC);
+
+        // Behaviourally, because a `SpatialKernels` field and the function that
+        // reads it could disagree. A Gaussian of width `w` decays by `exp(-1)`
+        // at one width from its centre, and is symmetric about it.
+        let e1 = (-1.0f64).exp();
+        let e4 = (-0.25f64).exp();
+        let at = |k: &SpatialKernels, d: f64| k.eval_terms(d).0;
+        assert_pinned(
+            "w1 * g1 at d=0.5 (its own centre)",
+            at(&k, 0.5)[F::Gauss1.index()],
+            k.w1,
+            GAUSS_DOC,
+        );
+        assert_pinned(
+            "w1 * g1 at d=0.5 - one width",
+            at(&k, 0.0)[F::Gauss1.index()],
+            k.w1 * e1,
+            GAUSS_DOC,
+        );
+        assert_pinned(
+            "w1 * g1 at d=0.5 + one width",
+            at(&k, 1.0)[F::Gauss1.index()],
+            k.w1 * e1,
+            GAUSS_DOC,
+        );
+        assert_pinned(
+            "w1 * g1 at d=0.5 - half a width",
+            at(&k, 0.25)[F::Gauss1.index()],
+            k.w1 * e4,
+            GAUSS_DOC,
+        );
+        assert_pinned(
+            "w2 * g2 at d=0.0 (its own centre)",
+            at(&k, 0.0)[F::Gauss2.index()],
+            k.w2,
+            GAUSS_DOC,
+        );
+        assert_pinned(
+            "w2 * g2 at d=0.5 (one width out)",
+            at(&k, 0.5)[F::Gauss2.index()],
+            k.w2 * e1,
+            GAUSS_DOC,
+        );
+        assert_pinned(
+            "w2 * g2 at d=-0.5 (one width out)",
+            at(&k, -0.5)[F::Gauss2.index()],
+            k.w2 * e1,
+            GAUSS_DOC,
+        );
+        // The two centres are 0.5 A apart, so `g1` at 0.5 is `g2` at 0.0 scaled
+        // only by their weights. If either centre moved apart from the other
+        // these two stop being equal and the assertion goes red.
+        let r1 = at(&k, 0.5)[F::Gauss1.index()] / k.w1;
+        let r2 = at(&k, 0.0)[F::Gauss2.index()] / k.w2;
+        assert_pinned(
+            "g1(c1) / w1 against g2(c2) / w2, which the table makes equal",
+            r1,
+            r2,
+            GAUSS_DOC,
+        );
+    }
+
+    /// The Vina weights, quoted from §3.
+    ///
+    /// The first three matter most: they are the terms that are always present,
+    /// so a change to any of them moves every single score in the program and
+    /// would be obvious. `hbond` and `hydrophobic` are the two that are
+    /// conditional on the pair class, and `hydrophobic` is the one the
+    /// `1.5 -> 1.45` window mutation moved without moving any total.
+    #[test]
+    fn the_vina_weights_are_the_documented_ones() {
+        let w = VinaWeights::default();
+        assert_pinned("VinaWeights::gauss1", w.gauss1, -0.035_579, VINA_WEIGHT_DOC);
+        assert_pinned("VinaWeights::gauss2", w.gauss2, -0.005_156, VINA_WEIGHT_DOC);
+        assert_pinned(
+            "VinaWeights::repulsion",
+            w.repulsion,
+            0.840_245,
+            VINA_WEIGHT_DOC,
+        );
+        assert_pinned("VinaWeights::hbond", w.hbond, -0.587_439, VINA_WEIGHT_DOC);
+        assert_pinned(
+            "VinaWeights::hydrophobic",
+            w.hydrophobic,
+            -0.035_069,
+            VINA_WEIGHT_DOC,
+        );
+        assert_pinned(
+            "VinaWeights::intramolecular_scale",
+            w.intramolecular_scale,
+            0.006,
+            VINA_WEIGHT_DOC,
+        );
+    }
+
+    /// The Vinardo weights, quoted from §3. The `gpu` feature does not touch
+    /// these, so this assertion is identical in both feature configurations.
+    #[test]
+    fn the_vinardo_weights_are_the_documented_ones() {
+        let w = VinaWeights::vinardo();
+        assert_pinned("Vinardo gauss1", w.gauss1, 0.0, VINARDO_WEIGHT_DOC);
+        assert_pinned("Vinardo gauss2", w.gauss2, 0.0, VINARDO_WEIGHT_DOC);
+        assert_pinned("Vinardo repulsion", w.repulsion, -0.045, VINARDO_WEIGHT_DOC);
+        assert_pinned("Vinardo hbond", w.hbond, -0.030, VINARDO_WEIGHT_DOC);
+        assert_pinned(
+            "Vinardo hydrophobic",
+            w.hydrophobic,
+            -0.015,
+            VINARDO_WEIGHT_DOC,
+        );
+        assert_pinned(
+            "Vinardo intramolecular_scale",
+            w.intramolecular_scale,
+            0.0075,
+            VINARDO_WEIGHT_DOC,
+        );
+    }
+
+    /// `STERIC_LIMIT` — the `d < 0` branch of §2.2. Pinned as a constant *and*
+    /// behaviourally, because the two can drift: the constant can be 0.0 while
+    /// the comparison underneath it is `d <= 0.0`, which changes nothing at
+    /// contact but is not the documented statement.
+    #[test]
+    fn the_steric_limit_is_contact() {
+        assert_pinned("STERIC_LIMIT", STERIC_LIMIT, 0.0, REPULSION_DOC);
+        assert_pinned(
+            "rep at d=0 (the contact itself)",
+            repulsion_term(0.0).0,
+            0.0,
+            REPULSION_DOC,
+        );
+        assert_pinned(
+            "rep at d=0.001 (just outside)",
+            repulsion_term(0.001).0,
+            0.0,
+            REPULSION_DOC,
+        );
+        assert_pinned(
+            "rep at d=-0.001 (just inside)",
+            repulsion_term(-0.001).0,
+            1e-6,
+            REPULSION_DOC,
+        );
+        // The derivative branch has the same boundary, and the sign convention
+        // matters: below contact the gradient is *negative*, which is what pulls
+        // an overlapping pose apart.
+        assert_pinned(
+            "drep/dd at d=-0.001",
+            repulsion_term(-0.001).1,
+            -0.002,
+            REPULSION_DOC,
+        );
+        assert_pinned(
+            "drep/dd at d=0.0",
+            repulsion_term(0.0).1,
+            0.0,
+            REPULSION_DOC,
+        );
+    }
+
+    /// `VINA_CUTOFF`, the surface-distance limit, quoted from §5.3.
+    ///
+    /// The reach this implies is checked at the grid level in `grid.rs`, where
+    /// the real distance is the thing the inner loop actually holds — that is
+    /// the half of §5.3 that a constant here cannot see.
+    #[test]
+    fn the_cutoff_is_eight_angstroms_of_surface_distance() {
+        assert_pinned("VINA_CUTOFF", VINA_CUTOFF, 8.0, CUTOFF_DOC);
+        assert_pinned(
+            "SpatialKernels::cutoff",
+            SpatialKernels::from_weights(&VinaWeights::default()).cutoff,
+            8.0,
+            CUTOFF_DOC,
+        );
+        assert_pinned(
+            "SpatialKernels::cutoff (vinardo)",
+            SpatialKernels::from_weights(&VinaWeights::vinardo()).cutoff,
+            8.0,
+            CUTOFF_DOC,
+        );
+        // The documented consequence: every term is spent well before the
+        // cutoff, so truncating *at* the cutoff rather than a little beyond it
+        // costs nothing. This is what makes 8.0 a bound rather than a tuned
+        // number, and it is why a change to it is not silently harmless.
+        let k = SpatialKernels::from_weights(&VinaWeights::default());
+        let (v, _) = k.eval_terms(VINA_CUTOFF);
+        let total: f64 = v.iter().sum();
+        assert!(
+            total.abs() < 1e-90,
+            "every term must already be spent at the cutoff, or the cutoff is \
+             truncating something; the sum at d = {VINA_CUTOFF} is {total:e}.\n\
+             documented: {CUTOFF_DOC}"
+        );
+    }
+
+    /// The intramolecular slope and the graph distance it is applied over,
+    /// quoted from §4.1. `MIN_INTRA_BOND_DISTANCE` lives in `ligand.rs`; it is
+    /// asserted from here because it is a scoring constant — it decides which
+    /// pairs the *whole scoring function* is summed over — and because a test
+    /// that pins it has to sit somewhere that will be run.
+    #[test]
+    fn the_intramolecular_slope_and_graph_distance_are_the_documented_ones() {
+        assert_pinned(
+            "Vina intramolecular_scale",
+            VinaScoring::new().intramolecular_scale(),
+            0.006,
+            INTRA_DOC,
+        );
+        assert_pinned(
+            "Vinardo intramolecular_scale",
+            VinaScoring::vinardo().intramolecular_scale(),
+            0.0075,
+            INTRA_DOC,
+        );
+        assert_pinned(
+            "MIN_INTRA_BOND_DISTANCE (ligand.rs)",
+            MIN_INTRA_BOND_DISTANCE,
+            4,
+            INTRA_DOC,
+        );
+    }
+
+    /// A weight is multiplied in **exactly one place**, and it is the map
+    /// tabulation — not the scoring call.
+    ///
+    /// This is the correction to an earlier claim in this file that weights are
+    /// applied at score time. Pinned as numbers, because the correction is a
+    /// statement about where a multiplication happens and such a statement is
+    /// only worth anything if a second multiplication turns the suite red.
+    ///
+    /// `eval_terms` is the single place, and both consumers — the four-slot
+    /// `eval` and the six-field per-term path — read from it. A caller who
+    /// multiplied by `VinaWeights::hbond` again would double-count it, and
+    /// since the term is reported *already weighted*, that error is invisible
+    /// in the total it is supposed to explain.
+    #[test]
+    fn a_weight_is_applied_once_and_at_tabulation_time() {
+        let k = SpatialKernels::from_weights(&VinaWeights::default());
+        for &d in &[-0.8, -0.4, -0.1, 0.2, 0.6, 1.0, 1.4, 2.0, 3.0] {
+            let (v, dv) = k.eval_terms(d);
+            let c = k.eval(d);
+            assert_pinned(
+                &format!("g1 at d={d}: eval_terms against eval().shape"),
+                v[F::Gauss1.index()] + v[F::Gauss2.index()] + v[F::Repulsion.index()],
+                c.shape.0,
+                VINA_WEIGHT_DOC,
+            );
+            // ... and the two conditional ones. `eval` takes only the donor
+            // half of the hydrogen bond, which is a slot decision made at
+            // interpolation, not a second weight.
+            assert_pinned(
+                &format!("hb at d={d}: eval_terms donor half against eval().hbond"),
+                v[F::HbFromDonor.index()],
+                c.hbond.0,
+                VINA_WEIGHT_DOC,
+            );
+            assert_pinned(
+                &format!("hb at d={d}: eval_terms acceptor half"),
+                v[F::HbFromDonor.index()],
+                v[F::HbFromAcceptor.index()],
+                WINDOW_DOC,
+            );
+            assert_pinned(
+                &format!("hyd at d={d}: eval_terms against eval().hydrophobic"),
+                v[F::Hydrophobic.index()],
+                c.hydrophobic.0,
+                VINA_WEIGHT_DOC,
+            );
+            // The derivatives, which the search's analytic gradient depends on.
+            // Same call, second tuple: `eval` is built from `eval_terms`, so if
+            // the two ever diverged the value assertions above would already
+            // have gone red and these are the derivative counterpart.
+            assert_pinned(
+                &format!("shape derivative at d={d}"),
+                dv[F::Gauss1.index()] + dv[F::Gauss2.index()] + dv[F::Repulsion.index()],
+                c.shape.1,
+                VINA_WEIGHT_DOC,
+            );
+            assert_pinned(
+                &format!("hyd derivative at d={d}"),
+                dv[F::Hydrophobic.index()],
+                c.hydrophobic.1,
+                VINA_WEIGHT_DOC,
+            );
+        }
+    }
+
+    /// `TERM_FIELDS` is six, and the six are the five terms plus one split.
+    ///
+    /// **This constant has no line in `SCORING.md`.** The specification was
+    /// written before the per-term tabulation existed and documents four map
+    /// slots in §5.1, which is a different decomposition. So the pin below is
+    /// against the module's own documented claim, and the failure message says
+    /// so — a scoring constant with no specification is a finding, and the
+    /// reader should be handed it rather than a plausible-looking number.
+    #[test]
+    fn the_term_field_count_is_six_and_named() {
+        const DOC: &str =
+            "scoring.rs: 'Number of tabulated fields per grid point needed to rebuild \
+the five terms. Six, not five. The hydrogen bond is one term but two fields' \
+-- and SCORING.md §5.1 documents FOUR map slots, which is the per-slot \
+decomposition and not this one. SCORING.md has no line for TERM_FIELDS.";
+        assert_pinned("TERM_FIELDS", TERM_FIELDS, 6, DOC);
+        assert_pinned("TermField::ALL length", F::ALL.len(), TERM_FIELDS, DOC);
+        // Six distinct dense indices, in storage order, with the hydrogen bond's
+        // two halves adjacent. The order is the storage layout of every
+        // `TermValues` in the crate, so it is a constant in its own right.
+        let idx: Vec<usize> = F::ALL.iter().map(|f| f.index()).collect();
+        assert_pinned("TermField dense indices", idx, vec![0, 1, 2, 3, 4, 5], DOC);
+        assert_pinned("HbFromDonor index", F::HbFromDonor.index(), 3, DOC);
+        assert_pinned("HbFromAcceptor index", F::HbFromAcceptor.index(), 4, DOC);
+        assert_pinned("Hydrophobic index", F::Hydrophobic.index(), 5, DOC);
+    }
+
+    /// The class masks are a **role** partition, and neither direction is a
+    /// bijection: four map slots are not four terms, and five terms are not
+    /// five slots.
+    ///
+    /// Pinned because the earlier framing — "the four slots correspond to the
+    /// terms" — is wrong in both directions and reads convincingly. Slot 0 is
+    /// three fused terms; `hb` is one term across two slots.
+    #[test]
+    fn the_masks_are_a_role_partition_not_a_term_correspondence() {
+        use crate::types::{Atom, AtomKind, AtomType};
+        let mk = |kind| {
+            let mut a = Atom::new(1, [0.0, 0.0, 0.0], Element::O, AtomType::OA);
+            a.kind = kind;
+            a
+        };
+        // A hydrophobic probe reads one of the six fields: the apolar one.
+        let hyd = probe_term_mask(&mk(AtomKind::Hydrophobic));
+        assert_eq!(
+            hyd.iter().filter(|b| **b).count(),
+            4,
+            "shape terms + apolar"
+        );
+        assert!(hyd[F::Hydrophobic.index()]);
+        // A donor-acceptor reads five of the six: both hydrogen-bond halves,
+        // because both were written by some receptor atom, and the three shape
+        // terms, which every atom writes. It does **not** read the apolar field,
+        // because `is_apolar` is false for an oxygen. Five is not six — an
+        // atom's class is a role, and a polar atom has no apolar role.
+        let both = probe_term_mask(&mk(AtomKind::DonorAcceptor));
+        assert_eq!(
+            both.iter().filter(|b| **b).count(),
+            5,
+            "not the apolar field"
+        );
+        assert!(!both[F::Hydrophobic.index()]);
+        assert!(both[F::HbFromDonor.index()] && both[F::HbFromAcceptor.index()]);
+        // A donor reads the acceptor-written half and *not* the donor-written
+        // one. This crossing is the whole of its selectivity; backwards would
+        // hand a receptor acceptor its hydrogen bond back to a receptor acceptor.
+        let d = probe_term_mask(&mk(AtomKind::Donor));
+        assert!(d[F::HbFromAcceptor.index()]);
+        assert!(!d[F::HbFromDonor.index()]);
+        // The receptor side is the mirror image, and the two are crossed
+        // against each other rather than aligned.
+        let rd = receptor_term_mask(&mk(AtomKind::Donor));
+        assert!(rd[F::HbFromDonor.index()]);
+        assert!(!rd[F::HbFromAcceptor.index()]);
+        // Four roles, and no one-to-one: the four map slots carry
+        // three-plus-one-plus-one-plus-one, and the six fields carry three
+        // shape terms plus a split hydrogen bond plus one apolar term.
+        assert_eq!(crate::grid::MAPS_PER_TYPE, 4);
+        assert_ne!(TERM_FIELDS, crate::grid::MAPS_PER_TYPE);
     }
 }

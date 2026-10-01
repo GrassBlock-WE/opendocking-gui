@@ -1,23 +1,46 @@
-"""Try harder to get a real OpenGL context inside a Qt `QOpenGLWidget`.
+"""Does a bare Qt `QOpenGLWidget` get a context here, by a route CI does not walk?
 
-The workbench renderer is already verified against a standalone moderngl
-context (see `workbench_smoke.py`). What has *not* been verified is whether a
-Qt widget can obtain a GL context at all in this environment, which is what
-`initializeGL` needs.
+**What this file is, and what it is not.**
 
-A "no context here" message is not automatically a bug: a headless Windows
-session with no display driver cannot create one, and `offscreen` in
-particular is documented not to support OpenGL. The question worth answering
-is *which* of the available routes actually works, so that a user on a real
-desktop gets a working window and so that any future failure can be attributed
-correctly.
+It asks a *mechanism* question: can a plain `QOpenGLWidget` obtain a GL context
+in this environment at all, and are there requestable configurations beyond the
+ones the product already tries. It is not the product's capability answer, and it
+does not try to be -- that is `odgui --check`, and the routes CI applies to it
+are enumerated in one place only, `gl_route_matrix.py`.
 
-Routes tried:
-  1. default platform
-  2. offscreen platform
-  3. software rendering (`QT_OPENGL=software`)
-  4. ANGLE / native / software requested via QSurfaceFormat
-  5. a bare `QOpenGLContext` on an offscreen surface, bypassing the widget
+That separation is the point of this rewrite. The file used to walk six
+strategies of its own -- default, offscreen, `QT_OPENGL=software`,
+`QT_OPENGL=angle`, `QT_OPENGL=desktop`, and a bare `QOpenGLContext` -- and three
+of those six were routes the CI capability ladder also walks. Two enumerations
+of the same question is a defect waiting to happen: they drift, someone reads
+one and wires the other, and the answer to "which route works" becomes a matter
+of which file you opened. So the three overlapping widget probes were removed
+rather than reconciled, because the ladder already covers them with strictly
+better evidence -- a real process exit code and a `--check --json` payload,
+rather than a substring match on `GL_OK`.
+
+What is left is deliberately the residue: two `QT_OPENGL` values the ladder does
+not name, and one probe that does not involve a widget at all. Those are
+questions only this file asks, which is the only reason it still exists.
+
+**The overlap is checked, not just documented.**
+
+`_overlap_report()` imports the matrix's declared routes and refuses to stay
+quiet if a widget probe here is configured by a subset of a route the ladder
+walks -- which is exactly how the duplication came back in the first time, since
+every removed probe was a strict subset of some rung. A comment saying "do not
+re-add these" rots silently; this prints instead.
+
+**It still never fails, and that is now load-bearing rather than incidental.**
+
+This step runs inside the workbench job, where a failing step cancels every step
+after it. That is exactly what happened when the GUI stack check exited 5 and
+thirteen audits were cancelled. So a detected overlap is reported loudly and the
+process still exits 0: the finding is for a human, and the alternative is
+re-creating the failure mode the job was restructured to remove.
+
+The one exception is unchanged from before: if PyQt6 will not import, there is
+no question to ask, so the file prints that and exits 0.
 """
 
 from __future__ import annotations
@@ -42,7 +65,7 @@ def probe(name: str, body) -> bool:
     Path(path).unlink(missing_ok=True)
     out = (proc.stdout or "").strip()
     err = (proc.stderr or "").strip()
-    verdict = "GL OK" if "GL_OK" in out else "no GL"
+    verdict = "GL_OK" if "GL_OK" in out else "no GL"
     detail = out.splitlines()[-1] if out else (err.splitlines()[-1] if err else "(no output)")
     print(f"  {name:<44} {verdict:<7} exit {proc.returncode}  {detail[:60]}")
     return "GL_OK" in out
@@ -103,56 +126,91 @@ def raw_context():
 '''
 
 
+#: The routes this file walks, as ``(label, env overrides, body)``.
+#:
+#: Spelled as a declared list rather than inline in ``main()`` so that
+#: `_overlap_report` has something to check. Every one of these is deliberately
+#: absent from the CI capability ladder in `gl_route_matrix.ROUTES`; the three
+#: that used not to be absent were removed, and the guard below is what stops
+#: them coming back.
+ROUTES = (
+    (
+        "QT_OPENGL=angle, widget",
+        {"QT_OPENGL": "angle"},
+        "widget_result()",
+    ),
+    (
+        "QT_OPENGL=desktop, widget",
+        {"QT_OPENGL": "desktop"},
+        "widget_result()",
+    ),
+    (
+        "raw QOpenGLContext on offscreen surface",
+        {},
+        "raw_context()",
+    ),
+)
+
+
+def _setup_for(env: dict) -> str:
+    """The child's env assignments, from the declared route's overrides.
+
+    Generated from the dict rather than hand-written per route, because a
+    hand-written `setup=` string is a third spelling of each route and is the
+    shape that let this file and the matrix drift in the first place.
+    """
+    return "\n".join(f"os.environ[{key!r}] = {value!r}" for key, value in sorted(env.items()))
+
+
+def _overlap_report() -> list:
+    """Widget routes here that the CI ladder already walks. Empty when healthy.
+
+    Compares against `gl_route_matrix.ROUTES` rather than against a name list
+    copied here, because a copy is the thing that goes stale. A route counts as
+    overlapping when its overrides are a **subset** of a ladder route's: every
+    probe removed from this file was a strict subset of some rung, so a subset
+    test catches the real shape of the duplication and not just an exact repeat.
+
+    Only widget probes are compared. The bare `QOpenGLContext` probe shares the
+    empty environment with the matrix's `default` baseline but asks a different
+    question -- it never builds a widget at all -- so comparing it would report a
+    duplication that does not exist.
+    """
+    try:
+        from gl_route_matrix import ROUTES as LADDER
+    except Exception as exc:  # noqa: BLE001 - an informer must not die on this
+        print(f"  note: could not read the CI ladder from gl_route_matrix "
+              f"({type(exc).__name__}: {exc}), so route overlap is UNCHECKED here")
+        return []
+
+    clashes = []
+    for label, env, body in ROUTES:
+        if body != "widget_result()":
+            continue
+        for rung in LADDER:
+            if env.items() <= rung.env.items():
+                clashes.append((label, rung.name, rung.ladder_index))
+    return clashes
+
+
 def main() -> int:
     from PyQt6 import QtGui  # noqa: F401  (import check only)
 
     print("Qt OpenGL widget availability\n")
-    wins = []
+    print("product-level routes are enumerated in gl_route_matrix.py, which "
+          "walks the CI capability ladder; this file asks only what that "
+          "ladder does not\n")
 
-    wins.append(
-        probe(
-            "default platform, widget",
-            TEMPLATE.format(setup="", body="widget_result()"),
-        )
-    )
-    wins.append(
-        probe(
-            "offscreen platform, widget",
-            TEMPLATE.format(
-                setup='os.environ["QT_QPA_PLATFORM"] = "offscreen"', body="widget_result()"
-            ),
-        )
-    )
-    wins.append(
-        probe(
-            "QT_OPENGL=software, widget",
-            TEMPLATE.format(
-                setup='os.environ["QT_OPENGL"] = "software"', body="widget_result()"
-            ),
-        )
-    )
-    wins.append(
-        probe(
-            "QT_OPENGL=angle, widget",
-            TEMPLATE.format(
-                setup='os.environ["QT_OPENGL"] = "angle"', body="widget_result()"
-            ),
-        )
-    )
-    wins.append(
-        probe(
-            "QT_OPENGL=desktop, widget",
-            TEMPLATE.format(
-                setup='os.environ["QT_OPENGL"] = "desktop"', body="widget_result()"
-            ),
-        )
-    )
-    wins.append(
-        probe(
-            "raw QOpenGLContext on offscreen surface",
-            TEMPLATE.format(setup="", body="raw_context()"),
-        )
-    )
+    clashes = _overlap_report()
+    for label, rung, index in clashes:
+        print(f"  ::error::ROUTE OVERLAP: {label!r} is a subset of CI ladder "
+              f"rung {index} ({rung!r}). It is walked twice; remove it from "
+              f"ROUTES here. Reporting and continuing, because this step must "
+              f"not cancel the steps after it.")
+
+    wins = []
+    for label, env, body in ROUTES:
+        wins.append(probe(label, TEMPLATE.format(setup=_setup_for(env), body=body)))
 
     print()
     if any(wins):

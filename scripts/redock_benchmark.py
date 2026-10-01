@@ -1,4 +1,4 @@
-﻿"""Redocking benchmark: can the search find a pose that is already known?
+"""Redocking benchmark: can the search find a pose that is already known?
 
 This is the check the project has been missing, and it is deliberately not a
 pass/fail. The three things it could be confused with are all different:

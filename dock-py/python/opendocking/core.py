@@ -32,10 +32,12 @@ __all__ = [
     "GridBox",
     "Receptor",
     "GridMaps",
+    "TermMaps",
     "Ligand",
     "DockingResult",
     "dock",
     "score_conformation",
+    "score_conformation_terms",
     "conformation_coordinates",
     "evaluate_conformations",
     "load_receptor",
@@ -371,6 +373,30 @@ class Receptor:
             self._rec.precalculate(box_._box, scoring, float(spacing))
         )
 
+    def precalculate_terms(
+        self, box_: GridBox, scoring: str = "vina", spacing: float = 0.375
+    ) -> "TermMaps":
+        """Tabulate one map field per Vina term, over the same geometry.
+
+        :meth:`precalculate` cannot answer this. Its ``Shape`` field is
+        ``g1``, ``g2`` and ``rep`` already summed and rounded into one
+        ``float32``, so those three are gone once the map exists; the hydrogen
+        bond is likewise one term spread over two fields. This builds a parallel
+        tabulation that keeps them apart, at 1.5x the memory.
+
+        Use it to ask *why* a pose scored what it scored. Do not use it to dock:
+        nothing in the search reads it, and building one costs as much as
+        building the maps you already have.
+
+        Same ``scoring`` and ``spacing`` obligations as :meth:`precalculate` --
+        in particular, pass the *same* values to both, or the two tabulations
+        will not be describing the same field and any comparison between them is
+        meaningless rather than merely imprecise.
+        """
+        return TermMaps(
+            self._rec.precalculate_terms(box_._box, scoring, float(spacing))
+        )
+
     def __repr__(self) -> str:
         return f"Receptor(num_atoms={self.num_atoms})"
 
@@ -430,6 +456,69 @@ class GridMaps:
 
     def __repr__(self) -> str:
         return f"GridMaps(dims={self.dims}, spacing={self.spacing})"
+
+
+class TermMaps:
+    """One map field per Vina term. See :meth:`Receptor.precalculate_terms`."""
+
+    def __init__(self, raw: Any) -> None:
+        self._terms = raw
+
+    @property
+    def dims(self) -> tuple[int, int, int]:
+        """Number of grid points along each axis."""
+        return tuple(self._terms.dims)
+
+    @property
+    def spacing(self) -> float:
+        """Grid spacing in Ångström."""
+        return self._terms.spacing
+
+    @property
+    def num_points(self) -> int:
+        """Total number of tabulated grid points."""
+        return self._terms.num_points
+
+    @property
+    def memory_mb(self) -> float:
+        """Approximate memory footprint, in megabytes."""
+        return self._terms.memory_mb
+
+    @property
+    def box(self) -> GridBox:
+        """The box these maps cover.
+
+        Equal to the box that was passed to `Receptor.precalculate`, not a
+        recomputation of it, for the same reason as `GridMaps.box`: a caller
+        comparing the two is asking whether the maps went where they think.
+        """
+        # `box_` is a `#[getter]`, not a method. This line used to call it,
+        # which raised `TypeError: 'opendocking._dockpy.GridBox' object is not
+        # callable` on *every* access, so the property had never worked: the
+        # binding exposes the same getter on both wrappers and only the
+        # sibling was written without the parentheses.
+        return GridBox._from_raw(self._terms.box_)
+
+    @property
+    def backend(self) -> str:
+        """The only backend that can produce a decomposition from these maps.
+
+        ``"cpu"``, read from the engine's own `TermMaps::BACKEND` rather than
+        written here. Ask it *before* building the table: the per-term maps are
+        60 ``f32`` per point against the production map's 40, so 1.5x the
+        memory for a diagnostic, and on a machine with a GPU the question "is
+        this worth it" still has the same answer.
+
+        One variant exists and the reason is written at the Rust enum: the WGSL
+        entry point takes a ``GridMaps``, and there is no overload, no generic
+        and no trait through which a ``TermMaps`` could reach a device. So this
+        is not a value that will change when a second backend lands; it is the
+        fact that a second backend cannot land without the type changing.
+        """
+        return self._terms.backend
+
+    def __repr__(self) -> str:
+        return f"TermMaps(dims={self.dims}, spacing={self.spacing})"
 
 
 class Ligand:
@@ -620,6 +709,30 @@ class DockingResult:
         """
         return np.asarray(self._res.pose_conformation(self._checked_index(index)), dtype=np.float64)
 
+    def pose_gradient(self, index: int = 0) -> np.ndarray | None:
+        """The gradient of pose ``index``'s own energy, or ``None``.
+
+        Shape ``(6 + num_torsions,)``, float64, one entry per degree of freedom
+        in the same layout :meth:`pose_conformation` returns.
+
+        This is the number the search computed at this conformation and threw
+        away, so a caller can ask whether *this* pose is a stationary point of
+        the field the engine scored without going back to the engine. It is not
+        the gradient the optimiser finished on: a reported pose is a clustering
+        representative, and the local search that proposed it ended on a
+        different iterate. It answers a question about the pose, not about the
+        search.
+
+        ``None`` means the pose's gradient was never measured, and it is kept
+        distinct from a zero vector on purpose. A zero gradient would assert
+        that the pose is stationary, and returning that for a pose nobody
+        measured is the most damaging wrong answer available here.
+        """
+        g = self._res.pose_gradient(self._checked_index(index))
+        if g is None:
+            return None
+        return np.asarray(g, dtype=np.float64)
+
     def _checked_index(self, index: int) -> int:
         """Turn a pose index into one the engine will accept, or explain why not."""
         idx = int(index)
@@ -770,6 +883,89 @@ def score_conformation(
         np.ascontiguousarray(arr[6:]),
     )
     return float(energy), np.asarray(grad, dtype=np.float64)
+
+
+def score_conformation_terms(
+    ligand: Ligand,
+    maps: GridMaps,
+    term_maps: TermMaps,
+    conformation: Sequence[float],
+    scoring: str = "vina",
+) -> dict[str, Any]:
+    """The per-term decomposition of one conformation's intermolecular energy.
+
+    ``conformation`` is the packed degree-of-freedom vector
+    :func:`score_conformation` takes. ``maps`` and ``term_maps`` must have been
+    built from the same receptor, box, spacing and scoring function -- pass
+    ``maps`` to :meth:`Receptor.precalculate` and ``term_maps`` to
+    :meth:`Receptor.precalculate_terms` with identical arguments.
+
+    Returns a dict whose ``g1``/``g2``/``rep``/``hb``/``hyd`` entries are the
+    five Vina terms **in kcal/mol, already weighted** -- the weights are
+    applied while the map is tabulated, not at scoring time, and the only
+    multiplier still applied then is the 0/1 per-slot class mask. Multiplying by
+    a weight again would double-count it.
+
+    The remaining entries exist so the decomposition can be *checked* rather
+    than believed:
+
+    ``terms_total``
+        the five terms added together.
+    ``intermolecular``
+        what the production map path returns for the same pose. ``terms_total``
+        should equal it to within the ``float32`` storage rounding of the
+        production ``Shape`` field, which is the only reason they can differ at
+        all -- the production field rounds ``g1 + g2 + rep`` once, where the
+        term maps round each of the three separately.
+    ``total``
+        the production path's total, ``intermolecular + scale *
+        intramolecular``. This is the same number :func:`score_conformation`
+        returns.
+    ``slots``
+        the four **map slots**, ``[shape, hb_from_donor, hb_from_acceptor,
+        hydrophobic]``. This is a different decomposition from the five terms
+        and must not be read as one: slot 0 is the three shape terms fused, and
+        the hydrogen bond is one term spread over two slots.
+    ``out_of_box_penalty``
+        non-zero only if an atom left the grid. It is reported separately
+        because it is not a Vina term, and folding it into one would make that
+        term's value depend on whether the pose was inside the box.
+    ``backend``
+        which backend produced this breakdown, read from the engine's own field
+        on ``TermBreakdown`` rather than inferred here. The Rust docstring
+        promises a caller holding a breakdown can ask, and from Python that
+        promise used to be false: the key was absent, so the only route to the
+        answer was to reason about which Python path had been taken, which is
+        the thing the field exists to make unnecessary. It has exactly one
+        possible value today (``"cpu"``); it is reported anyway so that a
+        future backend is a value the caller reads rather than a change in
+        control flow they have to guess at.
+    """
+    arr = np.ascontiguousarray(conformation, dtype=np.float64)
+    if arr.shape != (ligand.num_dof,):
+        raise ValueError(
+            f"conformation must have {ligand.num_dof} values, got {arr.shape}"
+        )
+    raw = _core.score_terms(
+        ligand._lig, maps._maps, term_maps._terms, arr, scoring
+    )
+    # An allow-list, not a copy: a key the engine adds does not reach the caller
+    # until it is named here, which is why the `backend` key needed naming in two
+    # places rather than one. The alternative -- projecting everything the engine
+    # returned -- would hand callers whatever the next binding change happened to
+    # add, and a decomposition whose key set moves on its own is one nobody can
+    # assert against. `core_check.py` and `scoring_cross_check.py` both read named
+    # keys and one uses a subset test, so nothing here depends on the set being
+    # closed in the other direction either.
+    out = {k: raw[k] for k in (
+        "g1", "g2", "rep", "hb", "hyd", "shape",
+        "hb_from_donor", "hb_from_acceptor", "terms_total",
+        "intermolecular", "intramolecular", "intramolecular_scale", "total",
+        "out_of_box_penalty", "backend",
+    )}
+    out["slots"] = [float(v) for v in raw["slots"]]
+    out["slot_names"] = list(raw["slot_names"])
+    return out
 
 
 def conformation_coordinates(ligand: Ligand, conformation: Sequence[float]) -> np.ndarray:

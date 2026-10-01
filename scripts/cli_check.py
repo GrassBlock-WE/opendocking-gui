@@ -103,7 +103,14 @@ TIMEOUT = 90.0
 if hasattr(sys.stdout, "reconfigure"):  # pragma: no branch
     sys.stdout.reconfigure(encoding="utf-8", errors="backslashreplace")
 
-sys.path.insert(0, str(SRC))
+# This module imports nothing from `opendocking` -- every call goes out to the
+# `odcli` console script in a child, exactly as a user would type it -- so it
+# must NOT put `dock-py/python` on its own `sys.path`. It used to
+# (`sys.path.insert(0, str(SRC))`), which is harmless here only because nothing
+# in this file imports the package: the identical line in `core_check.py` broke
+# that suite on a clean runner, where the checkout has no compiled extension to
+# import. The children get the source tree through `run()` instead, and only
+# when it is importable -- see `source_tree_usable`.
 
 FAILURES: list[str] = []
 CHECKS = 0
@@ -116,12 +123,16 @@ WALL: list[tuple[str, float]] = []
 #: condition -- a check that is skipped is not skipped from the total, and a
 #: check that is not reached at all is a bug in this file, not a fact about the
 #: environment. Change it deliberately.
-#: measured: a green run on this machine (127/127, exit 0, tree unchanged).
+#: measured: a green run on this machine (127/127, exit 0, tree unchanged), and
+#: later 131 after the two additions named on `EXPECTED_CHECKS`'s own history --
+#: the viewport-shim interception proof and its mutation twin, both counted
+#: because a check that cannot be reached is a bug in this file rather than a
+#: fact about the environment.
 #: Lower it only after a real green run. Note what is deliberately *not* pinned
 #: separately: the tree-guard outcome exits 2 before `finish()` runs, so a
 #: concurrent edit cannot change this number -- it changes the exit code
 #: instead, which is the whole point of splitting those two.
-EXPECTED_CHECKS = 129
+EXPECTED_CHECKS = 131
 
 #: Exit vocabulary, shared with the GUI check scripts:
 #: 0 ran and everything passed, 1 ran and something failed, 2 did not finish.
@@ -216,12 +227,44 @@ def say(*args) -> list[str]:
     return [str(a) for a in args]
 
 
+def source_tree_usable() -> bool:
+    """Whether ``dock-py/python`` can actually be imported by *this* interpreter.
+
+    A checkout carries no compiled extension: the Rust engine is only ever built
+    into the wheel (``maturin build``), and the one ``_dockpy.pyd`` in the tree
+    is a Windows binary, so on a Linux runner it is not importable either. A
+    child given ``PYTHONPATH=<checkout>`` therefore resolves ``opendocking`` to
+    the checkout and dies on ``from . import _dockpy`` -- reproduced here, and
+    the same ``ImportError`` that killed ``core_check.py`` in CI:
+
+        ImportError: The Open Docking native extension is not available.
+
+    So "test the source tree" is not always available, and the honest move is to
+    use the source tree when it is usable and the installed wheel when it is
+    not -- while *saying which*, because "129/129" against the wheel is a
+    weaker claim than "129/129" against the tree being edited, and a harness
+    that cannot tell the difference should not report them as the same number.
+    """
+    import importlib.machinery
+
+    suffixes = importlib.machinery.EXTENSION_SUFFIXES
+    return any(
+        (SRC / "opendocking" / f"_dockpy{suffix}").exists() for suffix in suffixes
+    )
+
+
+#: Whether this run puts the source tree on the children's path, decided once so
+#: that the harness and the checks that describe it cannot disagree.
+USING_SOURCE_TREE = source_tree_usable()
+
+
 def run(args, *, source_tree: bool = True, extra_path: Path | None = None) -> Result:
     """Run the real entry point in a subprocess, as a user would type it.
 
-    `source_tree` puts `dock-py/python` first on the child's path. It has to be
-    done per child rather than assumed from the parent, because `odcli` is an
-    installed script whose imports resolve in *its* process.
+    `source_tree` puts `dock-py/python` first on the child's path, but **only
+    when the checkout is importable here** (see :func:`source_tree_usable`).
+    It has to be done per child rather than assumed from the parent, because
+    `odcli` is an installed script whose imports resolve in *its* process.
 
     A timeout becomes a result with `timed_out` set rather than an exception,
     so a command that blocks -- `workbench` opening a window is the realistic
@@ -231,7 +274,7 @@ def run(args, *, source_tree: bool = True, extra_path: Path | None = None) -> Re
     parts: list[str] = []
     if extra_path is not None:
         parts.append(str(extra_path))
-    if source_tree:
+    if source_tree and USING_SOURCE_TREE:
         parts.append(str(SRC))
     if parts:
         env["PYTHONPATH"] = os.pathsep.join(parts)
@@ -252,25 +295,111 @@ def run(args, *, source_tree: bool = True, extra_path: Path | None = None) -> Re
     return res
 
 
+def probe_opendocking(*, source_tree: bool, extra_path: Path | None = None) -> Result:
+    """Ask a child, in the children's own environment, which package it imported.
+
+    This is how the suite establishes *which copy answered*, rather than
+    inferring it from a flag. The inference is unsound, and was: the flag the
+    old pair of checks used (``--report``) exists in the installed wheel too --
+    the wheel's ``cli.py`` is byte-for-byte the source tree's -- so its presence
+    in a child's help said nothing at all about which copy was running, and the
+    "sensitivity" control beside it compared that flag against the *top-level*
+    ``--help``, where a subcommand's flag can never appear. That control could
+    not fail, whatever the children did.
+
+    The probe prints the imported package's own path, so the answer is a fact
+    about the child rather than an inference about a flag.
+
+    The child's **stderr** comes back in the `Result` like every other stream,
+    and that is load-bearing rather than incidental. This probe has failed once
+    for real and the failure was undiagnosable, because the check's detail read
+    stdout -- the one line of the imported path -- and dropped the traceback that
+    said why. `Result.stderr` was there the whole time; nothing was using it here.
+    Any caller of this function must therefore put `result.stderr` in its failure
+    detail, or it will be in the same position next time.
+    """
+    env = dict(os.environ)
+    parts: list[str] = []
+    if extra_path is not None:
+        parts.append(str(extra_path))
+    if source_tree and USING_SOURCE_TREE:
+        parts.append(str(SRC))
+    if parts:
+        env["PYTHONPATH"] = os.pathsep.join(parts)
+    else:
+        env.pop("PYTHONPATH", None)
+    env["PYTHONIOENCODING"] = "utf-8"
+    argv = [sys.executable, "-c",
+            "import opendocking; print(opendocking.__file__)"]
+    started = time.perf_counter()
+    try:
+        proc = subprocess.run(argv, capture_output=True, cwd=str(ROOT), env=env,
+                              encoding="utf-8", errors="replace", timeout=TIMEOUT)
+        res = Result(proc, False, time.perf_counter() - started)
+    except subprocess.TimeoutExpired:
+        res = Result(None, True, time.perf_counter() - started)
+    WALL.append(("probe opendocking", res.wall))
+    return res
+
+
 def nonempty(stdout: str) -> list[str]:
     return [l for l in stdout.splitlines() if l.strip()]
 
 
 #: A `sitecustomize` that lets the whole GUI stack import and then makes the
-#: OpenGL context unusable, by swapping in a `QOpenGLWidget` whose
-#: `initializeGL` does nothing. This is the machine-independent way to produce
-#: the second way a viewer can be unlaunchable: Qt comes up, the widget is
-#: really created and shown, and the context simply never arrives. Breaking a
-#: driver instead would only work on a machine that already has a broken one,
-#: which is the opposite of what a CI box usually is.
-_NO_GL_SHIM = '''\
+#: product's own viewport unusable, by replacing the class the probe constructs
+#: with a subclass whose `initializeGL` does nothing. This is the
+#: machine-independent way to produce the second way a viewer can be
+#: unlaunchable: Qt comes up, the viewport is really created and shown, and the
+#: context simply never arrives. Breaking a driver instead would only work on a
+#: machine that already has a broken one, which is the opposite of what a CI box
+#: usually is.
+#:
+#: **Which name this replaces, and why the old one was a no-op.** It used to
+#: intercept `PyQt6.QtOpenGLWidgets` and swap `module.QOpenGLWidget` for a dead
+#: subclass. That interception *does* fire -- instrumented, it reports
+#: `PyQt6.QtOpenGLWidgets` imported and `QOpenGLWidget` replaced, before
+#: `opendocking.workbench.app` is imported at all -- and it still changed
+#: nothing, because `app.Viewport` **overrides** `initializeGL` rather than
+#: inheriting it. Instrumented again on the product's side, the resolved method
+#: is `Viewport.initializeGL`, not the base class's. A base class cannot
+#: neutralise an override, so that shim asserted nothing about the product it
+#: claimed to test, and the check it fed went green on a viewport that worked.
+#:
+#: The subject is now `opendocking.workbench.app.Viewport`, which is a name the
+#: shipped code really resolves: it is in that module's `__all__`, and
+#: `launcher._PROBE_CHILD` imports it by name
+#: (`from opendocking.workbench.app import MSAA_SAMPLES, Viewport`). It is a
+#: public class and a public method, not a private implementation detail.
+#:
+#: The shim records what it intercepted, next to itself, so the check can prove
+#: the interception happened instead of inferring it from an exit code.
+#: `{subject}` is the only thing that differs between this and its mutation,
+#: `_GL_SHIM_WRONG_SUBJECT`, which points the same machinery at a class the probe
+#: never constructs. That is what makes "the exit-5 answer came from breaking
+#: the viewport" a measurement rather than an assumption.
+_GL_SHIM_TEMPLATE = '''\
 import importlib.abc
 import importlib.machinery
+import json
+import os
+import pathlib
 import sys
+
+#: The module the probe imports its subject from.
+TARGET = "opendocking.workbench.app"
+#: The class inside it. This is the only token the mutation changes.
+SUBJECT = "{subject}"
+RECORD = pathlib.Path(__file__).resolve().parent / "intercepted.jsonl"
+
+
+def _record(**fields):
+    with RECORD.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(fields) + chr(10))
 
 
 class _Wrap:
-    """Delegates everything to the real loader, then patches the module."""
+    """Delegates to the real loader, then replaces one class in the module."""
 
     def __init__(self, inner):
         self._inner = inner
@@ -280,26 +409,41 @@ class _Wrap:
 
     def exec_module(self, module):
         self._inner.exec_module(module)
-        real = module.QOpenGLWidget
+        real = getattr(module, SUBJECT, None)
+        if real is None:
+            _record(event="absent", subject=SUBJECT, pid=os.getpid())
+            return
+        if SUBJECT == "Viewport":
+            class _DeadViewport(real):
+                def initializeGL(self):
+                    return None
 
-        class DeadContext(real):
-            def initializeGL(self):
-                pass
-
-            def initializeOpenGLFunctions(self):
-                return False
-
-        module.QOpenGLWidget = DeadContext
+            module.Viewport = _DeadViewport
+            action = "replaced Viewport with a subclass whose initializeGL does nothing"
+        else:
+            setattr(module, SUBJECT, getattr(module, SUBJECT))
+            action = "left " + SUBJECT + " exactly as it was"
+        _record(
+            event="patched",
+            subject=SUBJECT,
+            action=action,
+            pid=os.getpid(),
+            module_file=getattr(module, "__file__", None),
+            base_mro=[c.__name__ for c in real.__mro__][:5],
+            base_module=real.__module__,
+            neutralised=getattr(real, "initializeGL", None) is not None
+            and real.initializeGL.__qualname__,
+        )
 
     def __getattr__(self, name):
         return getattr(self._inner, name)
 
 
-class _PatchQtOpenGL(importlib.abc.MetaPathFinder):
+class _PatchApp(importlib.abc.MetaPathFinder):
     """Patches one module on the way in, then gets out of the way."""
 
     def find_spec(self, name, path=None, target=None):
-        if name != "PyQt6.QtOpenGLWidgets":
+        if name != TARGET:
             return None
         sys.meta_path.remove(self)
         try:
@@ -312,8 +456,23 @@ class _PatchQtOpenGL(importlib.abc.MetaPathFinder):
         return spec
 
 
-sys.meta_path.insert(0, _PatchQtOpenGL())
+sys.meta_path.insert(0, _PatchApp())
 '''
+
+#: The shim that earns exit 5: it breaks the product's own viewport.
+_NO_GL_SHIM = _GL_SHIM_TEMPLATE.format(subject="Viewport")
+
+#: The mutation of `_NO_GL_SHIM`, and the only thing that differs is `SUBJECT`.
+#:
+#: Same loader hook, same recording, same replacement step -- pointed at a class
+#: the probe never constructs. So the viewport comes up and `--check` answers 0.
+#: If the exit-5 check still answered 5 under this shim, it would be reading the
+#: *presence* of a shim rather than its *effect*, and a shim that had quietly
+#: stopped intercepting anything would be indistinguishable from one that works.
+#: The sibling direction already exists in this file: `_NO_RAW_CONTEXT_SHIM`
+#: breaks the raw stage instead and earns exit 4, so the pair 4/5 is a two-way
+#: discrimination rather than one reachable verdict.
+_GL_SHIM_WRONG_SUBJECT = _GL_SHIM_TEMPLATE.format(subject="SphereMesh")
 
 
 #: A `sitecustomize` that breaks the *raw* stage instead of the widget one, so
@@ -532,18 +691,89 @@ def main() -> int:
         section("the subprocess is running the code under test")
 
         help_with = run(["--help"])
-        help_without = run(["--help"], source_tree=False)
-        check("odcli is a real console script and answers --help",
-              help_with.returncode == 0 and "usage: odcli" in help_with.stdout,
-              f"rc={help_with.returncode}")
-        prep_help = run(["prep-receptor", "--help"])
-        check("the child process is importing the source tree, not the wheel",
-              "--report" in prep_help.stdout and "--keep-chain" in prep_help.stdout,
-              "flags that exist only in the edited source are visible to the child")
-        check("and the check is sensitive to that, not merely satisfied by it",
-              "--report" not in help_without.stdout,
-              "the same flag is absent without PYTHONPATH, so its presence above "
-              "means something")
+        check('odcli is a real console script and answers --help',
+              help_with.returncode == 0 and 'usage: odcli' in help_with.stdout,
+              f'rc={help_with.returncode}')
+
+        # Which copy answered, asked rather than inferred. This pair used to read
+        # a flag: a prep-receptor flag visible in the child help with the source
+        # tree, and the same flag absent from the top-level help without it. Both
+        # halves were unsound. The flag is in the installed wheel too -- the
+        # wheel cli.py is byte-for-byte the source tree one -- so its presence said
+        # nothing about which copy ran; and a subcommand flag can never appear in
+        # the top-level help, so the sensitivity control beside it was satisfied no
+        # matter what the children did. It could not fail.
+        #
+        # The probe asks the child to print the package it imported, and this half
+        # can fail: point the children at a checkout with no compiled extension and
+        # the probe returns exactly the ImportError that killed core_check.py on a
+        # clean CI runner.
+        #
+        # This has failed once for real, reporting "the children import (nothing)"
+        # on a run whose own tree guard said `unchanged (30 files)`. The reason it
+        # could not be diagnosed is that the detail threw the child's stderr away,
+        # which `Result` had been carrying the whole time. So the detail now names
+        # the exception, and the check stays a hard failure rather than becoming
+        # conditional on the tree: the tree guard is asserted separately and is
+        # not a licence to excuse this one. A CI runner is never concurrently
+        # edited, so the same signal there means a real defect.
+        #
+        # What is still not knowable, and is deliberately not asserted: *which*
+        # cause produced the failure. A stale `__pycache__`, a half-written file
+        # and an antivirus handle all present as an ImportError with different
+        # text, and until one of them actually recurs here, a check that named a
+        # cause would be naming a cause nobody has observed.
+        probe_with = probe_opendocking(source_tree=True)
+        resolved = (probe_with.stdout.strip().splitlines() or [''])[-1].strip()
+        shown = resolved if resolved else "(nothing)"
+        norm = resolved.replace('/', '\\')
+        child_error = probe_with.stderr.strip() or probe_with.stdout.strip() or '(no output)'
+        check('the child imports a working opendocking, and this run says which',
+              probe_with.returncode == 0
+              and norm.endswith('opendocking\\__init__.py')
+              and (not USING_SOURCE_TREE
+                   or norm.startswith(str(SRC).replace('/', '\\'))),
+              f'the children import {shown} -- '
+              + ('the source tree, which carries an extension this interpreter '
+                 'can import'
+                 if USING_SOURCE_TREE else
+                 'the installed wheel: this checkout has no extension for this '
+                 'interpreter, so putting it first would kill every child')
+              + (f'; rc={probe_with.returncode}'
+                 if probe_with.returncode else '')
+              + (f'; the child said: {child_error}'
+                 if probe_with.returncode else ''))
+
+        # The control, and this time a control on the mechanism rather than on a
+        # flag: a module that exists only on the harness own path must be
+        # importable by a child given that path and invisible to a child not given
+        # it. If run() stopped setting PYTHONPATH, or set it wrong, this goes red
+        # -- and it goes red the same way on every machine, which the flag
+        # comparison did not.
+        sentinel_dir = tmp / 'sentinel_dir'
+        sentinel_dir.mkdir()
+        (sentinel_dir / 'odck_path_sentinel.py').write_text(
+            'NAME = ' + repr('odck-path-sentinel') + '\n', encoding='utf-8')
+        probe_code = 'import odck_path_sentinel as m; print(m.NAME)'
+        with_path = subprocess.run(
+            [sys.executable, '-c', probe_code], capture_output=True,
+            cwd=str(ROOT), encoding='utf-8', errors='replace', timeout=TIMEOUT,
+            env={**os.environ, 'PYTHONPATH': str(sentinel_dir),
+                 'PYTHONIOENCODING': 'utf-8'})
+        without_env = {k: v for k, v in os.environ.items() if k != 'PYTHONPATH'}
+        without_path = subprocess.run(
+            [sys.executable, '-c', probe_code], capture_output=True,
+            cwd=str(ROOT), encoding='utf-8', errors='replace', timeout=TIMEOUT,
+            env=without_env)
+        check('and the PYTHONPATH mechanism the children rely on is observable',
+              with_path.returncode == 0
+              and 'odck-path-sentinel' in with_path.stdout
+              and without_path.returncode != 0,
+              f'a module reachable only through PYTHONPATH imports with it '
+              f'(rc={with_path.returncode}, stdout {with_path.stdout.strip()!r}) '
+              f'and does not without it (rc={without_path.returncode}), so a child '
+              f'handed the source tree is demonstrably handed a different path '
+              f'from one that is not')
         radius = run(say("prep-ligand", "-l", str(SDF))).stdout
         check("the child's UTF-8 output survives the pipe intact",
               "Å" in radius and "脜" not in radius,
@@ -1203,12 +1433,52 @@ def main() -> int:
         check("and it says it without a traceback", not wb.has_traceback,
               "the handler is three lines, not an except-and-reraise")
         ogw = odgui_run(["-r", str(REC)], shim)
-        check("odgui says the same thing, on the same stream, byte for byte",
-              ogw.returncode == 3 and ogw.stdout.strip() == ""
-              and ogw.stderr == wb.stderr,
-              f"odgui rc={ogw.returncode}, stdout {len(ogw.stdout)}B, stderr "
-              f"identical to odcli's: {ogw.stderr == wb.stderr} -- one handler "
-              "behind both, so they cannot word it differently")
+        # What `launcher.py` actually promises about exit 3 is that the number
+        # is the same one the launch would give, so a script can preflight and
+        # then launch without re-deriving what the number means. That is a claim
+        # about the exit code, and it is checkable forever.
+        #
+        # This used to demand `ogw.stderr == wb.stderr` -- the two commands
+        # byte for byte -- and that was the wrong check, for three reasons that
+        # are worth keeping written down because the next reader will be tempted
+        # to put it back:
+        #
+        # 1. It enforced a stronger claim than any document makes. Nothing ever
+        #    said the two diagnostics are the same *sentence*; `launcher.py:83`
+        #    says "the same code", and the paragraph around it is about exit
+        #    codes being scriptable.
+        # 2. It is unsatisfiable in principle once the two commands have
+        #    different jobs. `odcli workbench` was told to open files and
+        #    `odgui --check` was told nothing, so a shared string is maintainable
+        #    only by duplicating a literal across two files -- which is the
+        #    coupling that let them drift in the first place.
+        # 3. It went red for an *improvement*. Rewording the diagnostic to name
+        #    the module that is actually missing is the fix this project has
+        #    asked for everywhere else; this check punished it.
+        #
+        # So the two properties below replace it, and neither depends on the
+        # wording: the codes must agree, and each message must independently
+        # carry the three things that make it a diagnostic rather than an
+        # apology.
+        check("odgui and odcli workbench agree on the exit code, which is the "
+              "contract launcher.py states",
+              ogw.returncode == 3 and wb.returncode == 3,
+              f"odgui rc={ogw.returncode}, odcli rc={wb.returncode} -- these are "
+              "two commands with different jobs, so only the number is promised")
+        blocked = ("PyQt6", "moderngl")
+        check("and each of them says what is missing, on stderr, without a "
+              "traceback -- the two are free to word it differently",
+              all(r.returncode == 3
+                  and r.stdout.strip() == ""
+                  and any(m in r.stderr for m in blocked)
+                  and not r.has_traceback
+                  for r in (wb, ogw)),
+              "odcli names "
+              f"{[m for m in blocked if m in wb.stderr]}, stderr {len(wb.stderr)}B, "
+              f"traceback {wb.has_traceback}; odgui names "
+              f"{[m for m in blocked if m in ogw.stderr]}, stderr {len(ogw.stderr)}B, "
+              f"traceback {ogw.has_traceback} -- byte-identical: "
+              f"{ogw.stderr == wb.stderr}, which is deliberately not asserted")
         check("the shim is what kept it from opening a window",
               not wb.timed_out and wb.wall < TIMEOUT / 3,
               f"returned in {wb.wall:.2f}s; a run that had opened a viewer would "
@@ -1222,29 +1492,32 @@ def main() -> int:
         # -------------------------------------------------------------------
         section("odgui --check has to be able to say no")
 
-        # Two shims, because there are two ways a viewer can be unlaunchable and
-        # the command that exists to answer "can I use this?" used to answer
+        # Three shims, because there are two ways a viewer can be unlaunchable
+        # and the command that exists to answer "can I use this?" used to answer
         # "yes" to both. The first is the one this section already had: the
         # stack cannot be imported. The second is the one this machine is
         # actually in -- the stack imports and Qt comes up, and the OpenGL
         # context the viewport needs never arrives.
         #
-        # The second shim replaces `QOpenGLWidget` with a subclass whose
-        # `initializeGL` does nothing, rather than trying to break a driver.
-        # That makes "installed, will not start" reproducible on a machine with
-        # a perfectly good GPU, which is the only way the second stage can be
-        # checked on CI at all.
-        ck_missing = odgui_run(["--check"], shim)
-        check("--check says no when the GUI stack cannot be imported",
-              ck_missing.returncode == 3 and ck_missing.stdout.strip() == ""
-              and "GUI stack OK" not in ck_missing.stdout
-              and ck_missing.stderr == wb.stderr,
-              f"rc={ck_missing.returncode}, stdout {len(ck_missing.stdout)}B, "
-              f"stderr identical to the launch path's: {ck_missing.stderr == wb.stderr} "
-              "-- same code, same sentence, same stream as the thing it predicts")
-        # The second shim targets the *widget*, so under the two-stage probe it
-        # earns exit 5, not 4: the raw context succeeds and Qt still cannot
-        # realise an OpenGL widget. That is a different answer from "this
+        # The second shim replaces the product's own `app.Viewport` with a
+        # subclass whose `initializeGL` does nothing, rather than trying to break
+        # a driver. That makes "installed, will not start" reproducible on a
+        # machine with a perfectly good GPU, which is the only way the second
+        # stage can be checked on CI at all. It used to replace
+        # `PyQt6.QtOpenGLWidgets.QOpenGLWidget` instead, which fires and does
+        # nothing, because `app.Viewport` overrides `initializeGL`; the
+        # replacement and the reason are documented on `_GL_SHIM_TEMPLATE`.
+        # The missing-stack case is checked once, further down, next to the two
+        # shims that reach the other exit codes. It used to be checked here as
+        # well -- byte for byte the same block, `ck_missing` recomputed from the
+        # same shim -- so the suite registered the identical predicate twice and
+        # counted it twice. A duplicated check is worse than a missing one: it
+        # inflates the total, and a reader auditing the section sees two
+        # apparently independent guards of the same property and has to work out
+        # that there is only one.
+        # The second shim targets the *viewport*, so under the two-stage probe it
+        # earns exit 5, not 4: the raw context succeeds and the product's own
+        # viewport still does not. That is a different answer from "this
         # machine cannot do OpenGL", and the probe now says so. Exit 4 is still
         # reachable and still needs covering, so a third shim makes the *raw*
         # stage fail -- which is the only way to reach 4 on a machine whose GPU
@@ -1255,15 +1528,21 @@ def main() -> int:
         noraw = tmp / "shim_noraw"
         noraw.mkdir()
         (noraw / "sitecustomize.py").write_text(_NO_RAW_CONTEXT_SHIM, encoding="utf-8")
+        inert = tmp / "shim_inert"
+        inert.mkdir()
+        (inert / "sitecustomize.py").write_text(_GL_SHIM_WRONG_SUBJECT, encoding="utf-8")
 
         ck_missing = odgui_run(["--check"], shim)
         check("--check says no when the GUI stack cannot be imported",
               ck_missing.returncode == 3 and ck_missing.stdout.strip() == ""
               and "GUI stack OK" not in ck_missing.stdout
-              and ck_missing.stderr == wb.stderr,
+              and any(m in ck_missing.stderr for m in blocked)
+              and not ck_missing.has_traceback,
               f"rc={ck_missing.returncode}, stdout {len(ck_missing.stdout)}B, "
-              f"stderr identical to the launch path's: {ck_missing.stderr == wb.stderr} "
-              "-- same code, same sentence, same stream as the thing it predicts")
+              f"stderr names {[m for m in blocked if m in ck_missing.stderr]} "
+              f"({len(ck_missing.stderr)}B), traceback {ck_missing.has_traceback} "
+              "-- same exit code as the launch path, which is the promise; the "
+              "sentence is its own, and is allowed to be")
         ck_nogl = odgui_run(["--check"], nogl)
         check("--check says no when OpenGL works but the widget will not realise",
               ck_nogl.returncode == 5 and ck_nogl.stdout.strip() == ""
@@ -1271,7 +1550,55 @@ def main() -> int:
               and not ck_nogl.has_traceback,
               f"rc={ck_nogl.returncode}, stdout {len(ck_nogl.stdout)}B, stderr "
               f"{(ck_nogl.stderr.strip().splitlines() or ['(none)'])[0][:64]!r} "
-              "-- 5, because the shim breaks the widget and the raw stage is fine")
+              "-- 5, because the shim breaks the product's own viewport and the "
+              "raw stage is fine")
+        # The exit code alone does not say *why* it was 5, and the previous
+        # version of this shim answered 0 while looking like it was working. So
+        # the shim reports what it replaced, and this reads that report rather
+        # than inferring the interception from the verdict. Three things have to
+        # hold: the subject is the class the probe imports by name, its base is
+        # the real `QOpenGLWidget` (so it is the product's class and not a
+        # stand-in), and the method neutralised is the product's own override.
+        intercepted = [
+            json.loads(line)
+            for line in (nogl / "intercepted.jsonl").read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ] if (nogl / "intercepted.jsonl").exists() else []
+        patched = [r for r in intercepted if r.get("event") == "patched"]
+        check("the viewport shim replaced the class the product's own probe "
+              "imports, and the product's own override of initializeGL",
+              bool(patched)
+              and all(r.get("subject") == "Viewport" for r in patched)
+              and all(r.get("base_mro", [None])[0] == "Viewport" for r in patched)
+              and all("QOpenGLWidget" in r.get("base_mro", []) for r in patched)
+              and all(r.get("neutralised") == "Viewport.initializeGL" for r in patched),
+              f"{len(patched)} replacement(s) recorded in {len(intercepted)} event(s): "
+              f"subjects {sorted({r.get('subject') for r in intercepted})}, "
+              f"base mro {patched[0].get('base_mro') if patched else None}, "
+              f"neutralised {patched[0].get('neutralised') if patched else None}, "
+              f"module {patched[0].get('module_file') if patched else None} -- "
+              "recorded by the shim itself, in the process that built the viewport")
+        # The mutation, in-band. Same loader hook, same recording, same
+        # replacement step, one token different: it points at a class the probe
+        # never constructs. If this still answered 5, the check above would be
+        # reading the presence of a shim rather than its effect.
+        ck_inert = odgui_run(["--check"], inert)
+        inert_record = (inert / "intercepted.jsonl")
+        inert_events = [
+            json.loads(line)
+            for line in inert_record.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ] if inert_record.exists() else []
+        check("and the shim pointed at a class the probe never builds does NOT "
+              "earn 5 -- so the 5 above came from breaking the viewport",
+              ck_inert.returncode != 5
+              and any(r.get("event") == "patched" for r in inert_events)
+              and all(r.get("subject") == "SphereMesh" for r in inert_events
+                      if r.get("event") == "patched"),
+              f"rc={ck_inert.returncode} (not 5), and the inert shim still ran and "
+              f"recorded {[r.get('subject') for r in inert_events if r.get('event') == 'patched']}"
+              " -- same machinery, different subject, different verdict, which is "
+              "what makes the 5 a measurement of the product")
         ck_noraw = odgui_run(["--check"], noraw)
         check("--check says no when not even a bare context can be made",
               ck_noraw.returncode == 4 and ck_noraw.stdout.strip() == ""

@@ -19,14 +19,34 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from typing import NamedTuple
 
 import numpy as np
 
 from . import Camera, MoleculeView, _icosphere, _parse_pdbqt_atoms, _require_gui
+from . import crashguard
 
 _require_gui()
 from PyQt6 import QtCore, QtGui, QtOpenGLWidgets, QtWidgets  # noqa: E402
 from PyQt6.QtOpenGLWidgets import QOpenGLWidget  # noqa: E402
+
+# An uncaught exception inside a Qt slot ends this process with `0xC0000409`
+# and prints nothing, so a bug in a signal handler is indistinguishable from a
+# driver fault until somebody reads a log that does not exist. This module is
+# the earliest point every GUI entry point shares -- `odgui`,
+# `python -m opendocking.workbench.launcher` and `odcli workbench` all reach it
+# through `workbench.launch`, and the `odgui --check` stage-2 child imports
+# `app` too -- and it is a module-scope statement, not one call in one launcher,
+# because a hook installed in one module is not a hook. It goes after
+# `_require_gui()`: a machine with no PyQt6 has no slots to raise in, and the
+# diagnostic that says so is better than a hook guarding nothing.
+#
+# The hook prints the traceback *and* ends the process with a non-zero code. The
+# second half is the one that matters; a hook that only prints leaves the
+# process alive and exiting 0, which turns a crash into a silent pass. See
+# `crashguard` for why the code is handed back through the event loop only where
+# this package owns it.
+crashguard.install()
 
 __all__ = [
     "run",
@@ -38,8 +58,13 @@ __all__ = [
     "draw_spheres",
     "draw_lines",
     "draw_mesh",
+    "Representation",
     "REPRESENTATIONS",
     "REPRESENTATION_KEYS",
+    "ELEMENT_VDW_CPK",
+    "ELEMENT_CPK_RADIUS",
+    "CPK_CARBON_RADIUS",
+    "sphere_radii_for",
 ]
 
 SPHERE_VERTEX_SHADER = """
@@ -183,32 +208,61 @@ def _mat4(m: np.ndarray) -> np.ndarray:
     return np.asarray(m, dtype=np.float32).flatten(order="F")
 
 
-def _draw_colours_for(mol, comparing: bool = False) -> np.ndarray:
+def _draw_colours_for(mol) -> np.ndarray:
     """The per-atom RGB a view is actually drawn in, as an ``(n, 3)`` array.
 
     One function, because "what colour is this view" has two answers in this
-    file -- the element table, and the flat overrides that a pose comparison
-    asks for -- and they have to be asked in the same place. A check that asked
+    file -- the element table, and the flat overrides a pose wears -- and they
+    have to be asked in the same place. A check that asked
     `MoleculeView.atom_colors` while the renderer used its own copy would be
     asking about a colour nothing draws, and it would pass or fail for reasons
     that have nothing to do with the picture.
 
-    While poses are being compared, both ends of the comparison go flat: the
-    ghosts in `POSE_GHOST_COLOR` and the selected one in its own identity
-    colour, the green the pose table's `*` and the status bar already use. The
-    element table is what makes a molecule readable *as a molecule*, and it is
-    also what made a comparison unreadable: a small ligand is mostly grey carbon,
-    so grey carbon at 1.0 is not a thing the eye picks out of grey carbon at
-    0.30 sitting in grey protein at 1.0, and the one object the overlay exists
-    to identify had no colour of its own at all. Two poses differing in kind --
-    one flat green, eight flat slate -- is a difference the eye makes before it
-    reads a single number.
+    **A pose is drawn in its own flat colour, always, and not only while poses
+    are being compared.** The ghosts have always been flat (`POSE_GHOST_COLOR`,
+    a cool slate) and the selected pose flat in its identity green while the
+    compare overlay was up; this makes the pose flat unconditionally, because
+    the measurement says the element table costs more than it carries here.
 
-    With the overlay off, `comparing` is False and the pose is drawn in element
-    colours like any other molecule, because then the question is what the
-    molecule is rather than which of nine it is.
+    What it costs, measured on prepared 1CRN with the crambin pose at the
+    selection framing, interaction overlay **off**, over the pose's own 23 092
+    pixels:
+
+        chroma (max channel - min channel, 0-255)   median   % >= 24
+        pose                                                8        10.7%
+        receptor                                            7        25.3%
+
+    The pose's median chroma sits at the **receptor's 60th percentile**. That is
+    the whole finding: the pose is not "a bit greyer than the protein", it is
+    *inside the protein's own chroma distribution*, so no threshold on hue,
+    chroma or brightness separates the two populations. A 16-atom ligand at
+    0.30 A radii is 2.5% of a 1251x989 frame made of 10-30 px blobs, and the
+    pose's red oxygens and blue nitrogens are 10 px dots in a field of grey
+    protein dots -- the element table was buying a distinction the picture
+    cannot show at the framing that shows the pose at all.
+
+    **What this gives up**, stated plainly: element identity on the selected
+    pose's atoms, in every representation, whenever a pose is selected. "That
+    atom is an oxygen" is no longer readable off the picture. It is still
+    readable where it actually matters for this question -- the contact table
+    names each contacting residue and its element, and the residue tooltip
+    says the contact kind -- and a user who wants element colours on a pose has
+    them for the ligand, which is a different view (`role == "ligand"`).
+
+    The alternative that was rejected is a *highlight on top of* the element
+    colours -- a rim pass, an emissive boost, a halo. The numbers above are why:
+    a brightness change moves a pixel along the lit surface, and both
+    populations are lit and fogged by the same shader, so it cannot move the
+    pose out of the receptor's chroma distribution. Making a 2.5%-of-frame
+    object findable needs a difference in *kind*, which is what a flat hue is.
+
+    The `comparing` argument this function used to take is gone rather than left
+    reading nothing: a pose view only exists when a pose is selected, so "the
+    pose is flat" and "a pose is selected" are the same condition, and a
+    parameter that no longer changes the answer is a second way to be wrong
+    about it.
     """
-    if mol.role == "pose_ghost" or (comparing and mol.role == "pose"):
+    if mol.role in ("pose", "pose_ghost"):
         return np.tile(np.asarray(mol.color, np.float32), (len(mol.coords), 1))
     return mol.atom_colors()
 
@@ -530,7 +584,8 @@ def draw_background(ctx, prog, vao, width: int, height: int) -> None:
     ctx.enable(moderngl.DEPTH_TEST)
 
 
-def draw_spheres(ctx, prog, mesh: SphereMesh, mol, mvp, colors=None) -> None:
+def draw_spheres(ctx, prog, mesh: SphereMesh, mol, mvp, colors=None,
+                 radii=None) -> None:
     """Draw every atom of `mol` as a shaded sphere.
 
     The mesh is expanded on the CPU rather than drawn with hardware
@@ -546,6 +601,13 @@ def draw_spheres(ctx, prog, mesh: SphereMesh, mol, mvp, colors=None) -> None:
     default representation, so an override applied anywhere but here would have
     coloured the bonds and left every atom its element colour. Two places
     asking the same question is how that happens.
+
+    `radii` is the per-atom radius in Angstrom, and the caller passes
+    :func:`sphere_radii_for` rather than this working it out, because the
+    space-filling mode's radii are physical and every other mode's are a
+    drawing scale. Left as ``None`` it is the old behaviour -- the molecule's
+    own element-scaled radius -- so a caller that has not been updated still
+    gets separated small spheres rather than a surprise surface.
     """
     import moderngl
 
@@ -557,7 +619,9 @@ def draw_spheres(ctx, prog, mesh: SphereMesh, mol, mvp, colors=None) -> None:
     # Per-atom radius, broadcast against the shared unit mesh. A single scalar
     # here draws every element at the same size, which makes a polar hydrogen
     # look like a carbon.
-    radii = np.asarray(mol.atom_radii(), np.float32).reshape(n_atoms, 1, 1)
+    per_atom_radius = (np.asarray(mol.atom_radii(), np.float32) if radii is None
+                       else np.asarray(radii, np.float32))
+    radii = per_atom_radius.reshape(n_atoms, 1, 1)
     positions = (centers + radii * mesh.verts[None, :, :]).reshape(-1, 3)
     # On a unit sphere the position is the normal, so the mesh supplies both.
     normals = np.tile(mesh.verts, (n_atoms, 1))
@@ -655,18 +719,128 @@ def draw_mesh(ctx, prog, mesh, mvp, opacity) -> None:
     ibo.release()
 
 
+#: CPK van der Waals radii in Angstrom. One published table, used for every
+#: element, rather than a hand-picked number per element: a per-element number
+#: chosen by eye is a number nobody can check, and hydrogen is where that
+#: always shows up first.
+ELEMENT_VDW_CPK: dict[str, float] = {
+    "H": 1.20, "C": 1.70, "N": 1.55, "O": 1.52, "S": 1.80, "P": 1.80,
+    "F": 1.47, "Cl": 1.75, "Br": 1.85, "I": 1.98,
+    "Mg": 1.73, "Zn": 1.39, "Ca": 2.31, "Fe": 2.04, "Mn": 2.05,
+    # A dummy atom carries no element of its own; it stands in for the atom it
+    # replaced, and carbon is both the commonest of those and the anchor below.
+    "Du": 1.70,
+}
+
+#: The one number the space-filling mode is anchored on, in Angstrom.
+CPK_CARBON_RADIUS = 0.77
+
+#: The same table scaled so that carbon is exactly ``CPK_CARBON_RADIUS``. So
+#: ``ELEMENT_CPK_RADIUS[e] / CPK_CARBON_RADIUS`` is the published CPK ratio for
+#: `e`, hydrogen included: 1.20/1.70 of carbon, like any other element.
+#:
+#: Measured on prepared 1CRN (382 atoms, mean nearest neighbour 1.288 A): at
+#: these radii **91.1% of atoms have a neighbour inside 2r**, against **0.0%**
+#: at the 0.30 A the default uses. That gap is the whole difference between a
+#: surface and a cloud of separated dots, and it is why the default keeps its
+#: small radius and its honest name while the solid view is a separate mode.
+ELEMENT_CPK_RADIUS: dict[str, float] = {
+    e: CPK_CARBON_RADIUS * v / ELEMENT_VDW_CPK["C"]
+    for e, v in ELEMENT_VDW_CPK.items()
+}
+
+
+def sphere_radii_for(mol, key: str) -> np.ndarray:
+    """Per-atom sphere radius in Angstrom, for representation `key`.
+
+    One place answers this, because the honest answer differs per
+    representation and two places answering it is exactly how a mode ends up
+    disagreeing with its own name. `spheres` and `ball_and_stick` scale
+    `MoleculeView.radius`, which is 0.30 A for a receptor and is a *drawing*
+    scale rather than a physical one; `space_filling` is the one mode whose
+    radii are physical, so it ignores that scale and reads the CPK table.
+
+    `molecule` with no elements (a bare coordinate list) falls back to the
+    carbon anchor, which is the honest answer for "an element we do not know"
+    and the same fallback the element table itself uses.
+    """
+    n = len(mol.coords)
+    if key == "space_filling":
+        elements = getattr(mol, "elements", None)
+        if not elements or len(elements) != n:
+            return np.full(n, CPK_CARBON_RADIUS, np.float32)
+        return np.asarray(
+            [ELEMENT_CPK_RADIUS.get(e, CPK_CARBON_RADIUS) for e in elements],
+            dtype=np.float32,
+        )
+    radii = np.asarray(mol.atom_radii(), np.float32)
+    if key == "ball_and_stick":
+        # The 0.42 is the same factor the draw path used inline, so the balls
+        # are not resized by this refactor.
+        return radii * 0.42
+    return radii
+
+
+class Representation(NamedTuple):
+    """One entry in the display selector.
+
+    `claims` is the geometric property that the user-facing `label` asserts,
+    and it is a field rather than a comment because it is checked:
+    `scripts/representation_names_check.py` measures the geometry each entry
+    really draws and fails if it does not have the property its name claims. A
+    name whose property nobody measures is a name nobody can defend, and this
+    project has already shipped one of those -- a protein at 0.30 A labelled
+    "Space-filling", which is the defect this field exists to make impossible.
+
+    `label` is what the user reads; `key` is what the rest of the program and
+    the check suite pass around, so renaming a label does not have to rename
+    the thing being tested.
+    """
+
+    key: str
+    label: str
+    needs_backbone: bool
+    claims: str
+
+
 #: The representations the viewport offers, in the order they are listed.
 #: `needs_backbone` marks the ones that only mean something for a protein; a
 #: molecule without a backbone falls back and says so rather than drawing
 #: nothing.
-REPRESENTATIONS: tuple[tuple[str, str, bool], ...] = (
-    ("spheres", "Space-filling", False),
-    ("ball_and_stick", "Ball and stick", False),
-    ("stick", "Skeletal (sticks only)", False),
-    ("ribbon", "Ribbon (backbone)", True),
-    ("cartoon", "Cartoon (ribbon + side chains)", True),
+#:
+#: Every label here was checked against the geometry it names, and three of them
+#: did not survive it. "Space-filling" was drawing separated spheres (0.0% of
+#: atoms in contact), and "Cartoon" was drawing the *same ribbon* as the mode
+#: above it plus side-chain sticks -- no extra width, no extra colour, no
+#: helix-and-arrow encoding, which is what a cartoon is. `ribbon` and
+#: `cartoon` differ by exactly one thing and the name now says which.
+#:
+#: `cartoon` is now built by `MoleculeView.cartoon`, which twists the ribbon
+#: through a helix and flares a strand into a C-terminal arrowhead. The label is
+#: "Cartoon (twisted ribbon + arrows)" because that is the geometry, and
+#: `scripts/representation_names_check.py` measures whether it is true.
+REPRESENTATIONS: tuple[Representation, ...] = (
+    Representation(
+        "spheres", "Small spheres (separated)", False, "separated_spheres"
+    ),
+    Representation(
+        "space_filling", "Space-filling (CPK radii)", False, "solid_surface"
+    ),
+    Representation(
+        "ball_and_stick", "Ball and stick", False, "balls_and_sticks"
+    ),
+    Representation(
+        "stick", "Skeletal (sticks only)", False, "sticks_only"
+    ),
+    Representation(
+        "ribbon", "Ribbon (backbone)", True, "backbone_ribbon"
+    ),
+    Representation(
+        "cartoon", "Cartoon (twisted ribbon + arrows)", True,
+        "twisted_cartoon",
+    ),
 )
-REPRESENTATION_KEYS = tuple(key for key, _, _ in REPRESENTATIONS)
+REPRESENTATION_KEYS = tuple(r.key for r in REPRESENTATIONS)
 
 
 class Viewport(QOpenGLWidget):
@@ -705,11 +879,13 @@ class Viewport(QOpenGLWidget):
         #: taken out of the frame entirely while poses are being compared -- see
         #: `POCKET_OPACITY_COMPARE`.
         self.pocket_opacity = POCKET_OPACITY_PLAIN
-        #: True while "all poses ghosted together" is on. A rendering state, not
-        #: a data one, so it lives here beside the other things the picture
-        #: changes: the cloud's opacity and this. Read by `_draw_molecule` and
-        #: passed to `_draw_colours_for`, which is the only place that decides
-        #: what colour a pose is drawn in.
+        #: True while "all poses ghosted together" is on. Kept as the
+        #: *rendering state* the picture and the status label share -- it is
+        #: what `_on_all_poses_visibility` toggles and what the poses label
+        #: words out -- but it no longer decides any colour: a pose view wears
+        #: its own flat colour whether or not this is set, because the element
+        #: table cannot separate a pose from the protein it sits in. See
+        #: `_draw_colours_for`, which carries the measurement.
         self.pose_compare = False
         #: Pose/receptor interactions, as returned by `contacts.find_contacts`.
         #: Empty means "not computed", which the status bar says out loud
@@ -731,6 +907,12 @@ class Viewport(QOpenGLWidget):
         self._dragging: QtCore.Qt.MouseButton | None = None
         self._last_mouse = (0.0, 0.0)
         self.on_pose_changed = None
+        #: The camera move in flight, and its step counter. `None` when the
+        #: camera is where it was told to be, which is the only state any
+        #: other code has to care about.
+        self._move = None
+        self._move_step = 0
+        self._move_timer = None
 
     # -- Qt / GL lifecycle -------------------------------------------------
 
@@ -816,10 +998,19 @@ class Viewport(QOpenGLWidget):
             mode = "ball_and_stick"
 
         pairs = mol.bond_pairs()
-        colors = _draw_colours_for(mol, self.pose_compare)
+        colors = _draw_colours_for(mol)
 
-        if mode == "spheres":
-            draw_spheres(self._ctx, self._sphere_prog, self._mesh, mol, mvp, colors)
+        if mode in ("spheres", "space_filling"):
+            draw_spheres(self._ctx, self._sphere_prog, self._mesh, mol, mvp,
+                         colors, radii=sphere_radii_for(mol, mode))
+            if mode == "space_filling":
+                # No bond lines here, and that is what makes the name true: at
+                # CPK radii every bond lies inside the surface of its own
+                # atoms, so drawing them would cost a draw call per molecule
+                # and put no pixel on screen. The small-sphere mode below is
+                # the one that needs them, because its atoms are far enough
+                # apart that the bonds are the only thing joining them up.
+                return
             segs = mol.bond_segments()
             if len(segs):
                 draw_lines(
@@ -835,7 +1026,7 @@ class Viewport(QOpenGLWidget):
         if mode == "ball_and_stick":
             draw_mesh(
                 self._ctx, self._sphere_prog,
-                sphere_geometry(mol.coords, mol.atom_radii() * 0.42, colors),
+                sphere_geometry(mol.coords, sphere_radii_for(mol, mode), colors),
                 mvp, mol.opacity,
             )
             draw_mesh(
@@ -857,8 +1048,18 @@ class Viewport(QOpenGLWidget):
             return
 
         # ribbon / cartoon
+        # Two different meshes over the same trace. `ribbon` sweeps a quad
+        # strip whose cross-section does not turn about the path; `cartoon`
+        # twists it through a helix and flares a strand into an arrowhead. The
+        # call is deliberately not shared: a cartoon drawn by `backbone_ribbon`
+        # is the defect this dispatch was split to remove, and a shared call
+        # would make it a one-line accident again.
         draw_mesh(
-            self._ctx, self._sphere_prog, mol.backbone_ribbon(), mvp, mol.opacity
+            self._ctx,
+            self._sphere_prog,
+            mol.cartoon() if mode == "cartoon" else mol.backbone_ribbon(),
+            mvp,
+            mol.opacity,
         )
         if mode == "cartoon":
             # Side chains as thin sticks so the detail is still reachable
@@ -1039,6 +1240,7 @@ class Viewport(QOpenGLWidget):
 
     def frame_all(self) -> None:  # pragma: no cover - GUI
         """Point the camera at everything currently visible."""
+        self._cancel_move()
         pts = [m.coords for m in self.molecules if m.visible and len(m.coords)]
         if not pts:
             return
@@ -1058,9 +1260,137 @@ class Viewport(QOpenGLWidget):
         with protein around it, so a tight framing that fills the window with
         the box's own face is not informative.
         """
+        self._cancel_move()
         self.camera.center = np.asarray(point, np.float32)
         self.camera.distance = max(12.0, float(radius) * 1.6)
         self.update()
+
+    # -- the camera transition --------------------------------------------
+
+    #: How long a camera move takes, in milliseconds, and how many steps it is
+    #: taken in. Both are here rather than inline because the plan
+    #: (`framing_selection.CameraMove`) is what a check samples, and a plan whose
+    #: timing is buried in a `QTimer` call is a plan nobody can sample.
+    MOVE_MS = 280
+    MOVE_STEPS = 14
+
+    def _begin_move(self, plan) -> None:  # pragma: no cover - GUI
+        """Run `plan` to completion, a step at a time.
+
+        A camera that snaps from 43 A to 16 A loses the user's sense of where
+        they were: the frame they were reading is replaced by one they have
+        never seen, with nothing connecting the two. Moving is the difference
+        between a viewer and a slideshow.
+
+        The last step is :meth:`CameraMove.settle` rather than another
+        interpolation, so the camera ends *exactly* on the target. A tween that
+        approaches its target asymptotically ends a thousandth of an angstrom
+        short forever, and a check written against the target then has to
+        tolerate a floating-point remainder to be reliable on a machine it was
+        not written on.
+        """
+        self._move = plan
+        self._move_step = 0
+        if self._move_timer is None:
+            self._move_timer = QtCore.QTimer(self)
+            self._move_timer.timeout.connect(self._advance_move)
+        self._move_timer.start(max(1, self.MOVE_MS // self.MOVE_STEPS))
+
+    def _advance_move(self) -> None:  # pragma: no cover - GUI
+        plan = self._move
+        if plan is None:
+            self._move_timer.stop()
+            return
+        self._move_step += 1
+        done = self._move_step >= plan.steps
+        centre, distance = plan.settle() if done else plan.at(
+            self._move_step / float(plan.steps)
+        )
+        self.camera.center = centre
+        self.camera.distance = distance
+        self.update()
+        if done:
+            self._move_timer.stop()
+            self._move = None
+
+    def _settle_move_now(self) -> None:  # pragma: no cover - GUI
+        """Jump to the end of any running move. Used when a second one starts.
+
+        Without this a second selection clicked during the first move's 280 ms
+        starts from wherever the first had got to, and the two plans interleave
+        into a camera that never passes through the target of either.
+        """
+        if self._move is not None:
+            centre, distance = self._move.settle()
+            self.camera.center = centre
+            self.camera.distance = distance
+        if self._move_timer is not None:
+            self._move_timer.stop()
+        self._move = None
+        self.update()
+
+    def _cancel_move(self) -> None:  # pragma: no cover - GUI
+        """Drop any running move, leaving the camera where it is.
+
+        The counterpart to `_settle_move_now`, for the methods that place the
+        camera absolutely: `frame_all`, `focus_point` and `focus_residue` are
+        all "the camera is *here* now" and none of them animates. Without this
+        they were stomped: a tween still in flight overwrites whatever they set
+        on its next tick, so a residue clicked during the 280 ms of a selection
+        move ended up centred 3.05 A from its own contacts -- measured, and the
+        measurement is what turned a "the camera moved" check into a failure
+        that had nothing to do with the thing it was written for.
+        """
+        if self._move is None:
+            return
+        if self._move_timer is not None:
+            self._move_timer.stop()
+        self._move = None
+        self._move_step = 0
+
+    @property
+    def moving(self) -> bool:  # pragma: no cover - GUI
+        return self._move is not None
+
+    def focus_selection(self, pose_coords, partner_coords, **kwargs):  # pragma: no cover - GUI
+        """Point the camera at a pose and the atoms it touches.
+
+        The *what* of this -- which points are in the selection, how far back
+        the camera stops, what a degenerate framing is -- is
+        `framing_selection`, which has no Qt in it and can be asked all of those
+        questions without a window. This method supplies the two things only the
+        viewport knows: the camera's own right/up basis, and the aspect ratio of
+        the surface being drawn into.
+
+        It returns the :class:`~opendocking.workbench.framing_selection.CameraMove`
+        it ran, because a caller that wants to know where the camera ended -- a
+        check, or a status line -- should not have to go and measure it again.
+        """
+        from . import framing_selection as fs
+
+        right, up, forward = self.camera.basis()
+        aspect = max(self.width(), 1) / max(self.height(), 1)
+        plan = self.plan_selection(
+            pose_coords, partner_coords, right, up, forward, aspect=aspect, **kwargs
+        )
+        self._settle_move_now()
+        self._begin_move(plan)
+        return plan
+
+    def plan_selection(self, pose_coords, partner_coords, right, up, forward, *, aspect=1.0, **kwargs):
+        """The move a selection would make, from where the camera is now."""
+        from . import framing_selection as fs
+
+        target = fs.selection_target(
+            pose_coords, partner_coords, right, up, forward,
+            fov=self.camera.fov, aspect=aspect, **kwargs
+        )
+        return fs.CameraMove(
+            start_center=np.asarray(self.camera.center, np.float32),
+            start_distance=float(self.camera.distance),
+            target=target,
+            steps=self.MOVE_STEPS,
+        )
 
     def focus_residue(self, residue: str) -> bool:  # pragma: no cover - GUI
         """Move the camera onto a residue's contacts. True if it moved.
@@ -1071,6 +1401,7 @@ class Viewport(QOpenGLWidget):
         in it. A residue with no contacts found leaves the camera alone and says
         so, rather than jumping somewhere arbitrary.
         """
+        self._cancel_move()
         pose = next((m for m in self.molecules if m.role == "pose"), None)
         receptor = next((m for m in self.molecules if m.role == "receptor"), None)
         if pose is None or receptor is None:
@@ -1186,6 +1517,43 @@ class DockingWorker(QtCore.QObject):
             self.failed.emit(str(exc))
 
 
+class TermsWorker(QtCore.QObject):
+    """Tabulates the term maps and decomposes one pose, off the GUI thread.
+
+    The same pattern `DockingWorker` uses, for the same reason. Measured on
+    1crn at spacing 0.375, the two precalculations the panel needs cost 0.82 s
+    for a 22 A box and 4.09 s for a 40 A one, and a zero-delay `QTimer` armed
+    immediately before the build had still not fired when the build returned --
+    which is the measurement that says the event loop could not run at all
+    during it. On the GUI thread that is a window which answers nothing for four
+    seconds, with no explanation, the first time somebody selects a pose after
+    moving the box to 40 A. So the first selection pays for the maps here, once,
+    and every later one reads the cache.
+    """
+
+    ready = QtCore.pyqtSignal(object)
+    failed = QtCore.pyqtSignal(str)
+
+    def __init__(self, evaluator, result, pose_index: int) -> None:
+        super().__init__()
+        self._evaluator = evaluator
+        self._result = result
+        self._index = int(pose_index)
+
+    @QtCore.pyqtSlot()
+    def run(self) -> None:  # pragma: no cover - GUI
+        from .energy_terms import TermsUnavailable
+
+        try:
+            breakdown = self._evaluator.breakdown(self._result, self._index)
+        except TermsUnavailable as exc:
+            self.failed.emit(str(exc))
+        except Exception as exc:  # noqa: BLE001 - reported to the user
+            self.failed.emit(f"the term decomposition failed: {exc}")
+        else:
+            self.ready.emit(breakdown)
+
+
 class MainWindow(QtWidgets.QMainWindow):
     """The workbench main window."""
 
@@ -1215,6 +1583,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self._pose_ghosts: list = []
         self._pose_ghosts_on = False
         self._current_pose = -1
+        #: True while the site table has a selection, i.e. while the user is
+        #: looking at a *site*. One of the two states `_sync_pocket_opacity`
+        #: reads, and the only one this file's own handlers set.
+        self._pocket_selected = False
+        #: The last move `focus_selection` ran, kept so a check or a status line
+        #: can ask where the camera went without measuring it a second time.
+        self._last_selection_plan = None
         self._pose_dists = None
         self._pocket_models: list = []
         self._pocket_thread: QtCore.QThread | None = None
@@ -1241,8 +1616,8 @@ class MainWindow(QtWidgets.QMainWindow):
         form = QtWidgets.QFormLayout(panel_widget)
 
         self.cmb_representation = QtWidgets.QComboBox()
-        for key, label, _ in REPRESENTATIONS:
-            self.cmb_representation.addItem(label, key)
+        for rep in REPRESENTATIONS:
+            self.cmb_representation.addItem(rep.label, rep.key)
         self.cmb_representation.currentIndexChanged.connect(self._on_representation)
         form.addRow("display", self.cmb_representation)
 
@@ -1308,6 +1683,13 @@ class MainWindow(QtWidgets.QMainWindow):
         legend_row.addWidget(dtext)
         legend_row.addStretch(1)
         form.addRow("legend", legend)
+        # Named, because a check has to be able to ask about *this* row rather
+        # than about every label in the window. It used to reach for the whole
+        # window and identify a legend word by its stylesheet, which meant any
+        # new secondary-text label in the panel was counted as a legend entry
+        # and the "every swatch names itself" check went red on a panel that was
+        # telling the truth.
+        self.legend_row = legend
 
         # Pocket candidates for the receptor, offered as a list the user picks
         # from rather than as a box that silently moved. Clicking a row places
@@ -1558,6 +1940,169 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lbl_rmsd = QtWidgets.QLabel("—")
         form.addRow("RMSD to best", self.lbl_rmsd)
 
+        # Which term produced this ranking. The engine decomposes a pose's
+        # energy into the five weighted Vina terms, and until this panel
+        # existed the only way to read them was to leave the GUI: a user could
+        # see that pose 3 beat pose 1 and not why. The terms are named the way
+        # `docs/SCORING.md` names them, and the engine's own keys sit in the
+        # tooltips so the numbers can be traced back to `core.py`.
+        #
+        # Two things this widget is shaped around. It names the pose it is
+        # describing in its own header, because a table of energies with no pose
+        # on it is a set of numbers about an unknown molecule -- and a panel
+        # quietly showing the *previous* pose is worse than no panel. And every
+        # row is always present, including a term that came back as exactly
+        # zero, because "this pose is ranked by four terms and not five" is
+        # information and an absent row is not.
+        terms_box = QtWidgets.QGroupBox("pose energy breakdown")
+        terms_layout = QtWidgets.QVBoxLayout(terms_box)
+        self.lbl_terms_pose = QtWidgets.QLabel("no pose selected")
+        self.lbl_terms_pose.setWordWrap(True)
+        self.lbl_terms_pose.setStyleSheet("font-weight: bold;")
+        terms_layout.addWidget(self.lbl_terms_pose)
+        self.tbl_terms = QtWidgets.QTableWidget(0, 2)
+        self.tbl_terms.setHorizontalHeaderLabels(["term", "kcal/mol"])
+        terms_head = self.tbl_terms.horizontalHeader()
+        terms_head.setSectionResizeMode(
+            0, QtWidgets.QHeaderView.ResizeMode.Stretch
+        )
+        terms_head.setSectionResizeMode(
+            1, QtWidgets.QHeaderView.ResizeMode.ResizeToContents
+        )
+        self.tbl_terms.verticalHeader().setVisible(False)
+        self.tbl_terms.setEditTriggers(
+            QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers
+        )
+        # Tall enough for all ten rows -- five terms and the five the engine
+        # returns so the decomposition can be checked. The first version left
+        # the default height, which clipped "sum of the five terms" behind a
+        # scrollbar: the row a reader most wants to compare against the terms
+        # above it was the one that could not be seen. 282 and 310 each still
+        # clipped the last row; a header plus eleven rows measures about 350,
+        # and the screenshots are what caught both. The eleventh row is the
+        # engine's own sum of the five, which the column-reconciliation fix
+        # added rather than replacing the displayed one.
+        self.tbl_terms.setMinimumHeight(364)
+        self.tbl_terms.setSelectionMode(
+            QtWidgets.QAbstractItemView.SelectionMode.NoSelection
+        )
+        terms_layout.addWidget(self.tbl_terms)
+        self.lbl_terms_note = QtWidgets.QLabel("")
+        self.lbl_terms_note.setWordWrap(True)
+        self.lbl_terms_note.setStyleSheet("color: #9aa3ad; font-size: 11px;")
+        terms_layout.addWidget(self.lbl_terms_note)
+        # The next action, as a button, because "these poses came from a file
+        # and a file has no conformation vector" is an explanation and not a
+        # way forward. The engine's decomposition is keyed on the conformation
+        # and there is no inverse -- `conformation_coordinates` goes one way and
+        # nothing in the public API comes back -- so the only honest route from a
+        # file pose to a decomposition is to dock the ligand here, which reports
+        # poses *with* their conformations. Hidden unless that is exactly the
+        # situation, so it never sits there looking available and being useless.
+        self.btn_terms_dock = QtWidgets.QPushButton("Re-dock this ligand here")
+        self.btn_terms_dock.setVisible(False)
+        self.btn_terms_dock.setToolTip(
+            "Runs a docking with the receptor and ligand already loaded. The "
+            "poses it reports carry the conformations the term decomposition "
+            "is keyed on, so the breakdown appears for the pose you select "
+            "afterwards."
+        )
+        self.btn_terms_dock.clicked.connect(self._on_terms_dock_clicked)
+        terms_layout.addWidget(self.btn_terms_dock)
+        form.addRow(terms_box)
+        # Kept so a screenshot can be of the panel itself rather than of the
+        # whole window, which is what makes "which pose is it describing"
+        # legible in a picture instead of a fact in a log.
+        self.terms_box = terms_box
+        # The pose the table is describing, and the evaluator that produced it.
+        # Both are written here and nowhere else, so "which pose is this" and
+        # "whose maps are these" have one answer each.
+        self._terms_pose_index = -1
+        #: The breakdown currently on screen, kept so the verdict panel can
+        #: reuse this pose's out-of-box penalty instead of asking the engine
+        #: for it a second time. Written only by `_terms_fill` and cleared only
+        #: by `_refresh_energy_terms`, and the verdict panel uses it only when
+        #: its `pose_index` is the selected pose -- a penalty belonging to
+        #: another pose is refused rather than shown.
+        self._terms_breakdown = None
+        self._terms_evaluator = None
+        self._terms_evaluator_key = None
+        self._terms_thread = None
+        self._terms_worker = None
+
+        # Can *this* pose's numbers be trusted? The breakdown above answers
+        # "which terms produced this energy"; this one answers the other
+        # question, which is whether the energy is the field's own value at
+        # this pose at all.
+        #
+        # It is here, beside the breakdown, for the same reason the breakdown
+        # is where it is: both are per-pose, both name the pose they are about,
+        # and the two answers have to be read together. A panel that reported a
+        # `yes` next to a breakdown whose `out_of_box_penalty` was non-zero
+        # would be two of this file's panels disagreeing in the reader's face.
+        #
+        # Three states, and the third is the point. `yes`, `no` and `unknown`
+        # are three different answers, and `unknown` is **not** a softer `yes`:
+        # it means a measurement was not made, and a reader who cannot tell it
+        # from a pass will read it as one. So the state is a word in the header
+        # and a word in every row, and the colour is a second channel rather
+        # than the only one. `scripts/pose_trust_check.py` asserts the three
+        # treatments differ, so the panel cannot quietly converge on the pass
+        # style for a contract nothing measured.
+        verdict_box = QtWidgets.QGroupBox("pose verdict")
+        verdict_layout = QtWidgets.QVBoxLayout(verdict_box)
+        self.lbl_verdict_head = QtWidgets.QLabel("no pose selected")
+        self.lbl_verdict_head.setWordWrap(True)
+        self.lbl_verdict_head.setStyleSheet("font-weight: bold;")
+        verdict_layout.addWidget(self.lbl_verdict_head)
+        # Three columns: what was checked, what came out, and the pair of
+        # numbers that decided it. The remedy is not a column -- it is a
+        # sentence, and a sentence in a table cell is a sentence nobody reads.
+        self.tbl_verdict = QtWidgets.QTableWidget(0, 3)
+        self.tbl_verdict.setHorizontalHeaderLabels(
+            ["contract", "state", "measured / threshold"]
+        )
+        verdict_head = self.tbl_verdict.horizontalHeader()
+        verdict_head.setSectionResizeMode(
+            0, QtWidgets.QHeaderView.ResizeMode.Stretch
+        )
+        verdict_head.setSectionResizeMode(
+            1, QtWidgets.QHeaderView.ResizeMode.ResizeToContents
+        )
+        verdict_head.setSectionResizeMode(
+            2, QtWidgets.QHeaderView.ResizeMode.ResizeToContents
+        )
+        self.tbl_verdict.verticalHeader().setVisible(False)
+        self.tbl_verdict.setEditTriggers(
+            QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers
+        )
+        self.tbl_verdict.setSelectionMode(
+            QtWidgets.QAbstractItemView.SelectionMode.NoSelection
+        )
+        # Four rows and a header, measured the same way the breakdown's height
+        # was: a 29 px row plus a 25 px header, and the rows are always all
+        # four -- a contract that was not measured is information, and an absent
+        # row is not.
+        self.tbl_verdict.setMinimumHeight(150)
+        verdict_layout.addWidget(self.tbl_verdict)
+        self.lbl_verdict_why = QtWidgets.QLabel("")
+        self.lbl_verdict_why.setWordWrap(True)
+        self.lbl_verdict_why.setStyleSheet("font-size: 11px;")
+        verdict_layout.addWidget(self.lbl_verdict_why)
+        self.lbl_verdict_note = QtWidgets.QLabel("")
+        self.lbl_verdict_note.setWordWrap(True)
+        self.lbl_verdict_note.setStyleSheet("color: #9aa3ad; font-size: 11px;")
+        verdict_layout.addWidget(self.lbl_verdict_note)
+        # Kept for the same reason `terms_box` is: so a screenshot can be of
+        # this panel alone, which is the only way "which pose is it describing"
+        # and "is `unknown` distinguishable from a pass" are questions about a
+        # picture rather than about a log.
+        self.verdict_box = verdict_box
+        # The pose this panel last described. -1 is "nothing on screen", and it
+        # is the value the gate compares the selection against.
+        self._verdict_pose_index = -1
+        form.addRow(verdict_box)
+
         # Residue-level summary of the pose/receptor interface, one row per
         # residue. Selecting a row flies the camera to that contact, which is
         # the whole reason the table exists: "THR 2 is hydrogen-bonded" is a
@@ -1769,7 +2314,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 # the user is already using.
                 found = self.find_pockets_now()
                 if found:
-                    self.pocket_table.selectRow(0)
+                    self._auto_select_pocket_row(0)
                 else:
                     self.lbl_pockets.setText(
                         "no enclosed site found — the box is still where you "
@@ -2211,16 +2756,17 @@ class MainWindow(QtWidgets.QMainWindow):
         # fading it was tried first and did not work. The user asked to compare
         # poses; the pocket is still in the scene, it is just no longer answering
         # first, and it comes back at its own strength with the overlay off.
-        self.viewport.pocket_opacity = (
-            POCKET_OPACITY_COMPARE if checked else POCKET_OPACITY_PLAIN
-        )
-        # And the selected pose takes off its element colours while the
-        # comparison is up, for the same reason the ghosts put on theirs: in
-        # space-filling a ligand is mostly grey carbon, and grey carbon at 1.0
-        # is not a thing the eye picks out of grey carbon at 0.30 sitting in
-        # grey protein at 1.0. One flat green against eight flat slate is a
-        # difference of *kind*; the green is the same one the pose table marks
-        # its best row with, so the picture and the words agree.
+        # The value itself is `_sync_pocket_opacity`'s to decide, from the
+        # overlay flag and whether a site is selected, rather than assigned here.
+        self._sync_pocket_opacity()
+        # The selected pose wears its identity green whether or not this is on.
+        # It used to be only while comparing, and the measurement that changed
+        # that is in `_draw_colours_for`: over the pose's own 23 092 pixels its
+        # chroma median is 8 against the receptor's 7, which is the receptor's
+        # own 60th percentile -- the pose sat *inside* the protein's colour
+        # distribution, so there was nothing for the eye to find it by. This
+        # assignment now records the comparison state for the label and the
+        # ghosts, and no longer changes a colour.
         self.viewport.pose_compare = bool(checked)
         if checked:
             # And go and look at them. The overlay answers "are these nine
@@ -2232,6 +2778,38 @@ class MainWindow(QtWidgets.QMainWindow):
             self._frame_poses()
         self._update_poses_label()
         self.viewport.update()
+
+    def _sync_pocket_opacity(self) -> None:  # pragma: no cover - GUI
+        """The one place that decides how present the site cloud is.
+
+        Three handlers used to assign `viewport.pocket_opacity` each -- the
+        compare toggle, the site table and the pose selection -- and nothing said
+        which of them won. It was "the last one to run", and that is not a rule
+        a picture measurement can rely on: which of the three ran last depends on
+        which checks a suite happened to execute, so the same window rendered
+        two different pictures run to run.
+
+        Measured, and the symptom was a representation check that read 0.1%,
+        3.9%, 23.0% and 2.7% on four consecutive runs and a stable 18.0% in
+        isolation. The cause is this attribute: with the cloud at
+        `POCKET_OPACITY_PLAIN` the translucent magenta shifts pixels across the
+        suite's absolute mask threshold, and it does so by *different* amounts
+        in the two sphere modes -- the space-filling surface measures 791 824 px
+        with the cloud on against 837 500 with it off, so the "surface" ends up
+        covering less than the separated spheres and the direction of the
+        comparison inverts. One owner, derived from state, is the fix; see
+        `scripts/workbench_interaction_check.py` section 10 for the other half.
+
+        The rule, in one sentence: the cloud leaves whenever the user is looking
+        at a *pose* -- comparing poses, or inspecting one -- and comes back when
+        they are looking at a *site*.
+        """
+        hide = self._pose_ghosts_on or (
+            self._current_pose >= 0 and not self._pocket_selected
+        )
+        self.viewport.pocket_opacity = (
+            POCKET_OPACITY_COMPARE if hide else POCKET_OPACITY_PLAIN
+        )
 
     def _frame_poses(self) -> None:  # pragma: no cover - GUI
         """Point the camera at the poses rather than at the whole scene."""
@@ -2245,6 +2823,59 @@ class MainWindow(QtWidgets.QMainWindow):
         points = np.concatenate(chunks, axis=0)
         centre = points.mean(axis=0)
         self.viewport.focus_point(centre, float(np.abs(points - centre).max()) * 2.3)
+
+    def _frame_selection(self) -> None:  # pragma: no cover - GUI
+        """Frame the selected pose and the receptor atoms it is in contact with.
+
+        Not the same gesture as `_frame_poses`, and the difference is the point.
+        `_frame_poses` is the "compare nine answers at once" view: it frames all
+        of them together, because the question there is whether the nine are
+        nine answers or one answer nine times. This is the "look at *this* one"
+        view, and what makes it answerable is that the contacting receptor atoms
+        are in the selection too -- the overlays are lines drawn between the two
+        sets, so a framing that kept the pose and dropped the partners would
+        leave the lines pointing off the edge of the picture.
+
+        The search box and the site cloud are deliberately not in it. Both belong
+        to the search rather than to this pose -- every reported pose came out of
+        that cube and sits in that cloud -- and framing either of them is the
+        gesture the site table already has. See `framing_selection` for why, and
+        for the measurements.
+        """
+        pose = next((m for m in self.viewport.molecules if m.role == "pose"), None)
+        receptor = next(
+            (m for m in self.viewport.molecules if m.role == "receptor"), None
+        )
+        if pose is None or not len(pose.coords):
+            return
+        # The site cloud steps aside, because `_sync_pocket_opacity` is what
+        # decides it now and a pose is selected. The reason is in
+        # `_draw_pocket` and in `POCKET_OPACITY_COMPARE`: the cloud is depth-off
+        # and nine times the pose's own footprint, so a framing that puts the
+        # pose at 2.6% of the frame underneath a cloud that owns ten times that
+        # is a framing of the cloud. See the measurement in
+        # `scripts/framing_selection_screens.py`, which writes the picture.
+        self._sync_pocket_opacity()
+        pose_coords = np.asarray(pose.coords, np.float32)
+        partners: list[np.ndarray] = []
+        residues: list[str] = []
+        if receptor is not None and self.viewport.contacts:
+            wanted = sorted({
+                c.partner_index for c in self.viewport.contacts
+                if 0 <= c.partner_index < len(receptor.coords)
+            })
+            if wanted:
+                partners.append(np.asarray(receptor.coords, np.float32)[wanted])
+                residues = sorted({
+                    c.partner_residue for c in self.viewport.contacts
+                    if 0 <= c.partner_index < len(receptor.coords)
+                })
+        partner_coords = (
+            np.concatenate(partners, axis=0) if partners else np.zeros((0, 3), np.float32)
+        )
+        self._last_selection_plan = self.viewport.focus_selection(
+            pose_coords, partner_coords, partner_residues=tuple(residues)
+        )
 
     def _on_box_visibility(self) -> None:  # pragma: no cover - GUI
         self.viewport.show_box = self.cb_box.isChecked()
@@ -2419,7 +3050,48 @@ class MainWindow(QtWidgets.QMainWindow):
             # Only auto-select when nothing is selected. A search the user
             # asked for while reading the list should not move the box out from
             # under them, which is exactly what load-time selection would do.
-            self.pocket_table.selectRow(0)
+            # And it is a default, not a click, so it does not claim to be one:
+            # see `_auto_select_pocket_row`.
+            self._auto_select_pocket_row(0)
+
+    def _auto_select_pocket_row(self, row: int) -> None:  # pragma: no cover - GUI
+        """Select a site row as a *default*, which is not the user choosing it.
+
+        Both auto-selects -- the one on load and the one after a search the user
+        asked for -- go through here, because they fire the same
+        `itemSelectionChanged` signal a click does and there is no way to tell
+        the two apart from the signal alone.
+
+        The difference matters now that `_sync_pocket_opacity` reads
+        `_pocket_selected`: a default site selection would otherwise count as
+        "the user is looking at a site" for the rest of the session, keep the
+        site cloud at full strength over a pose the user had selected, and
+        silently undo the one thing a pose selection does to the picture. It
+        did exactly that when this rule first went in as two assignments at the
+        two call sites: with a pose selected the cloud still measured 0.34.
+
+        A default selection still *shows* -- the cloud is drawn whenever no pose
+        is selected, which is the receptor-only case this exists for -- it just
+        does not claim to be a gesture.
+
+        The highlight is then cleared, with signals blocked. Clearing it is not
+        cosmetic: leaving row 0 highlighted while `_pocket_selected` is False
+        put the table and the cloud in states that disagreed, and it created a
+        state the user could not leave. `itemSelectionChanged` does not fire when
+        the row that is already current is clicked, so a user clicking the
+        highlighted row to say "yes, this site" produced no event at all and the
+        cloud stayed away. The first version of this rule kept the highlight and
+        set a flag instead, and the suite caught exactly that: a check that
+        selected a site row and expected the cloud back read 0.0.
+        """
+        self.pocket_table.selectRow(int(row))
+        self.pocket_table.blockSignals(True)
+        try:
+            self.pocket_table.clearSelection()
+        finally:
+            self.pocket_table.blockSignals(False)
+        self._pocket_selected = False
+        self._sync_pocket_opacity()
 
     def _on_pockets_failed(self, message: str) -> None:  # pragma: no cover - GUI
         self.btn_pockets.setEnabled(True)
@@ -2513,6 +3185,13 @@ class MainWindow(QtWidgets.QMainWindow):
         models = getattr(self, "_pocket_models", None)
         if not models or not 0 <= index < len(models):
             self.viewport.pocket_points = np.zeros((0, 3), np.float32)
+            # Clearing the selection means no site is being looked at, which is
+            # a state the cloud's opacity depends on. It used to be invisible
+            # here: `pocket_opacity` was only ever written by the two handlers
+            # that *chose* something, so clearing left the last choice standing
+            # with nothing on screen to justify it.
+            self._pocket_selected = False
+            self._sync_pocket_opacity()
             self.viewport.update()
             return
         pocket = models[index]
@@ -2530,6 +3209,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.viewport.pocket_points = np.asarray(
             getattr(pocket, "points", np.zeros((0, 3), np.float32)), np.float32
         ).reshape(-1, 3)
+        # The cloud comes back at its own strength, because this is the gesture
+        # that answers "show me the site" and a site you cannot see is not one.
+        # `_sync_pocket_opacity` owns the decision; all this does is record that
+        # a site is the thing being looked at.
+        self._pocket_selected = True
+        self._sync_pocket_opacity()
         # Frame the *box*, not the site, and by its diagonal rather than its
         # longest side. The site is 7 A across and the box 15 A; framing the
         # site put the camera 18 A out, which is inside the protein's own
@@ -2794,10 +3479,448 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lbl_rmsd.setText(
             "—" if self._pose_rmsd(index) is None else f"{self._pose_rmsd(index):.2f} Å"
         )
+        # The breakdown is asked for the *same* index the label and the table
+        # above were given, passed in rather than read back off `self`, so that
+        # "the panel is describing the selected pose" is a fact about this call
+        # and not about a field that could have been written by something else.
+        self._refresh_energy_terms(index)
+        # The verdict, for the same index and in the same breath. The index is
+        # passed down rather than read back off `self` for the reason the
+        # breakdown's is: a handler that refreshed the panel from a field
+        # something else had written would put one pose's verdict under
+        # another's name.
+        self._refresh_pose_verdict(index)
         self._apply_pose_visibility()
         self._update_poses_label()
         self._refresh_contacts()
+        # After the contacts, because the selection is the pose *and what it is
+        # touching*: framing first would aim the camera at a pose and nothing
+        # else, and the partner atoms would then be outside the picture the
+        # overlays are drawn into.
+        self._frame_selection()
         self.viewport.update()
+
+    def _refresh_energy_terms(self, index: int) -> None:  # pragma: no cover - GUI
+        """Show pose ``index``'s term decomposition, or say why there isn't one.
+
+        ``index`` is passed in rather than read back off ``self`` so the panel
+        and the two labels above it are provably describing the same pose. A
+        handler that refreshed the panel from a field something else had
+        written would put the previous pose's terms under the new pose's name,
+        which is the one outcome this panel exists to make impossible.
+
+        Nothing here recomputes a term. The five numbers come out of the
+        engine's own `score_conformation_terms`, already weighted, and the rows
+        underneath them are the engine's own consistency pair so a reader can
+        see that the decomposition adds up rather than take it on trust.
+        """
+        from ..core import GridBox
+        from .energy_terms import (
+            TERM_ROWS,
+            TermEvaluator,
+            TermsUnavailable,
+            format_kcal,
+        )
+
+        table = self.tbl_terms
+        table.setRowCount(0)
+        self._terms_pose_index = -1
+        self._terms_breakdown = None
+        self.btn_terms_dock.setVisible(False)
+        if index < 0 or not self._pose_models:
+            self._terms_retire()
+            self.lbl_terms_pose.setText("no pose selected")
+            self.lbl_terms_note.setText(
+                "Select a pose to see which terms produced its energy."
+            )
+            return
+
+        count = len(self._pose_models)
+        self.lbl_terms_pose.setText(f"pose {index + 1} of {count}")
+        if self._receptor_path is None or self._ligand_path is None:
+            self._terms_retire()
+            self.lbl_terms_note.setText(
+                "No receptor or ligand path, so there is nothing to tabulate "
+                "the maps from."
+            )
+            return
+        centre = tuple(float(s.value()) for s in self.center_spins)
+        size = tuple(float(s.value()) for s in self.size_spins)
+        scoring = self.cb_scoring.currentText()
+        # The maps depend on the receptor, the box, the ligand and the scoring
+        # function and on nothing else, so they are built once per combination of
+        # those. Moving a spin box gives a new key and a new evaluator;
+        # selecting another pose reuses it.
+        key = (str(self._receptor_path), str(self._ligand_path),
+               centre, size, scoring)
+        if self._terms_evaluator_key != key:
+            self._terms_evaluator = TermEvaluator(
+                self._receptor_path,
+                GridBox.from_center_size(centre, size),
+                self._ligand_path,
+                scoring,
+            )
+            self._terms_evaluator_key = key
+        if self._terms_evaluator.built:
+            try:
+                breakdown = self._terms_evaluator.breakdown(
+                    self._dock_result, index
+                )
+            except TermsUnavailable as exc:
+                self._terms_unavailable(exc, count)
+                return
+            self._terms_fill(breakdown, count)
+            return
+        # Not built yet. The maps depend on the receptor, the box, the ligand and
+        # the scoring function and on nothing else, so this is paid once per
+        # combination of those and then cached. It is the expensive part -- see
+        # `TermsWorker` for the measurement -- so it runs off this thread, and the
+        # panel says so, because four silent seconds and a hang look identical
+        # from the outside.
+        #
+        # The two numbers in that sentence were measured here, not inherited.
+        # 22 A is a 59^3 grid and 40 A a 107^3 grid, at the default 0.375 A
+        # spacing, on `examples/1crn_prep.pdbqt`; three runs each, taking the
+        # first `TermEvaluator.breakdown` (build plus score plus the ligand
+        # load) on an otherwise idle process:
+        #
+        #     22 A   0.808 / 0.755 / 1.164 s   -> "about 0.8 s"
+        #     40 A   4.009 / 5.006 / 5.020 s   -> "about 5 s"
+        #
+        # The 40 A figure was "4 s" here until this revision, and it was
+        # understated: the spread above reaches 5.0 s, and 4 s describes none
+        # of the three runs. The 22 A figure was already right and is unchanged.
+        #
+        # What the sentence does *not* claim is that the window stayed
+        # comfortable. That the build is not on the GUI thread is a fact about
+        # the four lines below; whether a 5 s tabulation produces a visible
+        # stutter on a given machine has not been measured for this panel --
+        # section 11d of `scripts/workbench_interaction_check.py` measures it
+        # for the *pocket search*, which is a different thread and a different
+        # duration. So the wording names where the work happens and stops
+        # there. The earlier "the window stays responsive while it happens" was
+        # a claim about a user-visible effect that nothing had measured.
+        self._terms_retire()
+        self.lbl_terms_pose.setText(f"pose {index + 1} of {count}")
+        self.lbl_terms_note.setText(
+            "tabulating the term maps for this box -- about 0.8 s at 22 A "
+            "and 5 s at 40 A, measured on 1crn at the default 0.375 A "
+            "spacing. The build runs on its own QThread, so the GUI thread "
+            "is not the one doing it"
+        )
+        self._terms_thread = QtCore.QThread(self)
+        self._terms_worker = TermsWorker(
+            self._terms_evaluator, self._dock_result, index
+        )
+        self._terms_worker.moveToThread(self._terms_thread)
+        self._terms_thread.started.connect(self._terms_worker.run)
+        self._terms_worker.ready.connect(self._on_terms_ready)
+        self._terms_worker.failed.connect(self._on_terms_failed)
+        # The window keeps the thread object, and drops it only when the thread
+        # says it is done. Holding the reference until then is the other half of
+        # not blocking: a retired build keeps answering, and a *running* one is
+        # never in a state where something drops its last reference.
+        self._terms_thread.finished.connect(self._terms_reaped)
+        self._terms_thread.start()
+
+    def _terms_retire(self) -> None:
+        """Ask a running build to stop, without blocking.
+
+        `wait()` from inside a signal handler is a re-entrant block on the event
+        loop, and it aborted the process: the first version waited in
+        `_on_terms_ready`, which the dock's own row selection reaches, and the
+        run died with 0xC0000409 before printing a summary. So a build is only
+        ever *asked* to stop here, and the thread object is parented to the
+        window and released when it reports `finished` -- which means it is never
+        destroyed while running, the other way to get the same abort.
+        """
+        thread = self._terms_thread
+        if thread is not None and thread.isRunning():
+            thread.quit()
+
+    def _terms_reaped(self) -> None:  # pragma: no cover - GUI
+        """Release a thread object, but only the one that actually reported.
+
+        `finished` arrives queued, so a thread retired by a later selection
+        can deliver its signal *after* that later selection has already stored
+        its own thread. Dropping the reference on every `finished` would
+        therefore clear a running thread's handle -- and `closeEvent` waits on
+        this attribute, so the window would then stop waiting for a build that
+        is still running, and the abort would come back at the next close.
+        """
+        sender = self.sender()
+        if sender is not None and sender is not self._terms_thread:
+            return
+        self._terms_thread = None
+        self._terms_worker = None
+
+    def _on_terms_ready(self, breakdown) -> None:  # pragma: no cover - GUI
+        """A build finished. Use it only if it is still the pose on show.
+
+        The selection can move while four seconds of map tabulation are in
+        flight, and filling the panel with the pose that was asked for would put
+        one pose's terms under another's name -- the one thing this panel must
+        never do. So a late answer for a pose that is no longer selected is
+        dropped, and the newer selection's own request fills the panel.
+        """
+        self._terms_retire()
+        if breakdown.pose_index != self._current_pose:
+            return
+        self._terms_fill(breakdown, len(self._pose_models))
+
+    def _on_terms_failed(self, message: str) -> None:  # pragma: no cover - GUI
+        from .energy_terms import TermsUnavailable  # noqa: PLC0415
+
+        self._terms_retire()
+        self._terms_unavailable(
+            TermsUnavailable(message), len(self._pose_models)
+        )
+
+    def _terms_unavailable(self, exc, count: int) -> None:  # pragma: no cover
+        """Say why there are no terms, and offer the way forward if there is one."""
+        self.lbl_terms_note.setText(str(exc))
+        # The one case with a way forward: no run in memory, so no
+        # conformation, so no decomposition -- and a receptor and a ligand
+        # loaded, so a run is one click away. The button says so instead of
+        # leaving the reader to work it out.
+        can_dock = (
+            self._dock_result is None
+            and self._receptor_path is not None
+            and self._ligand_path is not None
+        )
+        self.btn_terms_dock.setVisible(can_dock)
+        if can_dock:
+            self.lbl_terms_note.setText(
+                f"{exc}. The button below runs a docking with the loaded "
+                f"receptor and ligand; the poses it reports carry the "
+                f"conformations the decomposition needs, and this panel "
+                f"will describe whichever one is selected afterwards."
+            )
+
+    def _terms_fill(self, breakdown, count: int) -> None:  # pragma: no cover
+        """Put one breakdown on screen. The only writer of the table's rows."""
+        # Imported here rather than reusing an import in the caller: this method
+        # is also reached from a signal handler, where a name that only existed
+        # in some other method's local scope is a `NameError` -- and an
+        # exception escaping a PyQt6 slot aborts the process with 0xC0000409,
+        # which is what the first threaded run did, silently, on every build.
+        from .energy_terms import TERM_ROWS, format_kcal
+
+        self._terms_pose_index = int(breakdown.pose_index)
+        self._terms_breakdown = breakdown
+        self.lbl_terms_pose.setText(
+            f"pose {breakdown.pose_index + 1} of {count}, {breakdown.scoring} "
+            f"-- total {format_kcal(breakdown.total)} kcal/mol"
+        )
+        notes = {name: note for name, _key, note in TERM_ROWS}
+        keys = {name: key for name, key, _note in TERM_ROWS}
+        rows = [(name, value) for name, _k, value, _n in breakdown.term_rows()]
+        rows += [(label, value) for label, value, _src in breakdown.check_rows()]
+        table = self.tbl_terms
+        table.setRowCount(len(rows))
+        for row, (label, value) in enumerate(rows):
+            first = QtWidgets.QTableWidgetItem(label)
+            tip = notes.get(label)
+            if tip:
+                first.setToolTip(f"{tip}. Engine key: {keys[label]!r}.")
+            table.setItem(row, 0, first)
+            second = QtWidgets.QTableWidgetItem(value)
+            second.setTextAlignment(
+                int(QtCore.Qt.AlignmentFlag.AlignRight
+                    | QtCore.Qt.AlignmentFlag.AlignVCenter)
+            )
+            table.setItem(row, 1, second)
+        self.lbl_terms_note.setText(
+            "The first sum is the sum of the values printed above it, so the "
+            "column adds up by hand; the engine's own sum is on the next row "
+            "and can differ in the last printed decimal, because the five terms "
+            "are printed rounded. The terms are already weighted, exactly as "
+            "score_conformation_terms returns them, so do not weight them "
+            "again. A term too small for four decimals is printed in exponent "
+            "form and counts as zero in that first sum."
+        )
+        # The breakdown carries this pose's out-of-box penalty, which is one of
+        # the four numbers the verdict panel needs, so the verdict is asked
+        # again now that it has arrived. Until it does, that one contract reads
+        # `unmeasured` -- which is the truth: the penalty is a property of a
+        # scored pose, and nothing has scored this one yet.
+        self._refresh_pose_verdict(int(breakdown.pose_index))
+
+    def _refresh_pose_verdict(self, index: int) -> None:  # pragma: no cover - GUI
+        """Say whether pose ``index``'s own numbers can be trusted, or why not.
+
+        Nothing here is a measurement. The gradient is read out of the array
+        the run already holds, the tolerance is the optimiser's declared one,
+        the out-of-box penalty is reused from the breakdown above *for this
+        pose*, and the folding into one of three states is a pure function. So
+        this panel adds no engine call and no thread: 500 of these on this
+        machine took 77.8 us each, against 0.808 s for the first breakdown the
+        panel above has to wait for.
+
+        The refusal is a state, not a gap. A pose read from a file has no
+        gradient and no penalty -- the engine keys both on the conformation of a
+        run in memory, and there is no inverse from coordinates -- so the panel
+        says `unknown` on all four contracts and names the action that would
+        change it. It does not show the previous pose's verdict, which is the
+        one thing a panel like this must never do.
+        """
+        from .pose_trust import (
+            NO_POSE,
+            NO_POSE_NOTE,
+            PoseVerdictUnavailable,
+            describe_file_pose,
+            describe_pose,
+            stylesheet_for,
+            verdict_is_available,
+        )
+
+        self.tbl_verdict.setRowCount(0)
+        self._verdict_pose_index = -1
+        available, why = verdict_is_available()
+        if not available:
+            # The module is not importable, so nothing can be measured. This
+            # is drawn in the `unknown` treatment rather than left blank: a
+            # blank table beside a filled-in breakdown reads as "nothing to
+            # say", which is the reading that turns a missing module into a
+            # silent pass.
+            self.lbl_verdict_head.setText("no verdict available")
+            self.lbl_verdict_head.setStyleSheet(stylesheet_for("unknown"))
+            self.lbl_verdict_why.setText(why)
+            self.lbl_verdict_note.setText(
+                "No contract below was checked, because there was nothing to "
+                "check them with. This is not a pass."
+            )
+            return
+        if index < 0 or not self._pose_models:
+            self._verdict_clear(NO_POSE, NO_POSE_NOTE, "unknown")
+            return
+        count = len(self._pose_models)
+        try:
+            if self._dock_result is None:
+                verdict = describe_file_pose(index, count)
+            else:
+                penalty = None
+                penalty_index = None
+                breakdown = self._terms_breakdown
+                if (breakdown is not None
+                        and int(breakdown.pose_index) == int(index)):
+                    penalty = float(breakdown.out_of_box_penalty)
+                    penalty_index = int(breakdown.pose_index)
+                verdict = describe_pose(
+                    self._dock_result, index, penalty, penalty_index
+                )
+        except PoseVerdictUnavailable as exc:
+            self._verdict_clear(
+                f"pose {index + 1} of {count}: no verdict", str(exc), "unknown"
+            )
+            return
+        self._verdict_fill(verdict, count)
+
+    def _verdict_clear(self, head: str, why: str, state: str) -> None:
+        """An empty table with a stated reason, never an empty panel."""
+        from .pose_trust import stylesheet_for
+
+        self.lbl_verdict_head.setText(head)
+        self.lbl_verdict_head.setStyleSheet(stylesheet_for(state))
+        self.lbl_verdict_why.setText(why)
+        self.lbl_verdict_note.setText(
+            "Four contracts are checked and every one of them needs a number "
+            "this result does not carry, so the verdict is 'unknown' -- which "
+            "is not a pass. The action that would change it is "
+            "'Re-dock this ligand here' in the panel above: the poses it "
+            "reports carry the conformations and the run-time numbers the "
+            "contracts read."
+        )
+
+    def _verdict_fill(self, verdict, count: int) -> None:  # pragma: no cover - GUI
+        """Put one verdict on screen. The only writer of these rows.
+
+        Every row comes out of the single `describe_pose` call above, so the
+        table cannot hold two contracts measured at two different moments, and
+        the header names the pose those rows are about.
+        """
+        from .pose_trust import (
+            STATE_COLOURS,
+            stylesheet_for,
+        )
+
+        self._verdict_pose_index = int(verdict.pose_index)
+        self.lbl_verdict_head.setText(verdict.headline())
+        self.lbl_verdict_head.setStyleSheet(stylesheet_for(verdict.trust))
+        table = self.tbl_verdict
+        table.setRowCount(len(verdict.rows))
+        for row, contract in enumerate(verdict.rows):
+            first = QtWidgets.QTableWidgetItem(contract.name)
+            # The contract's own `source`, which is the engine-side thing each
+            # number was compared against -- `result.grad_l2 vs
+            # LbfgsConfig::gradient_tolerance` and so on. It is the same
+            # traceability the breakdown gives through its engine keys.
+            first.setToolTip(
+                f"{contract.source}. Family: {contract.family}. "
+                f"{contract.because}"
+            )
+            table.setItem(row, 0, first)
+            word = QtWidgets.QTableWidgetItem(contract.word)
+            word.setTextAlignment(
+                int(QtCore.Qt.AlignmentFlag.AlignRight
+                    | QtCore.Qt.AlignmentFlag.AlignVCenter)
+            )
+            # The state is coloured and also typed: a reader who cannot see the
+            # colour reads the same word, which is why the word is in the cell
+            # and not only in the header.
+            word.setForeground(QtGui.QBrush(QtGui.QColor(
+                STATE_COLOURS.get(contract.state, STATE_COLOURS["unknown"])
+            )))
+            if contract.state == "fails":
+                font = word.font()
+                font.setBold(True)
+                word.setFont(font)
+            elif contract.state == "unmeasured":
+                font = word.font()
+                font.setItalic(True)
+                word.setFont(font)
+            table.setItem(row, 1, word)
+            third = QtWidgets.QTableWidgetItem(contract.pair)
+            third.setTextAlignment(
+                int(QtCore.Qt.AlignmentFlag.AlignRight
+                    | QtCore.Qt.AlignmentFlag.AlignVCenter)
+            )
+            table.setItem(row, 2, third)
+        self.lbl_verdict_why.setText(verdict.explanation())
+        note = (
+            "Three states, and they are three different answers. 'holds' means "
+            "the measurement was made and the contract is satisfied; 'fails' "
+            "means it was made and is not; 'unmeasured' means the result did "
+            "not carry the number the contract needs, which is NOT a pass and "
+            "is printed in its own colour and its own italic. A known failure "
+            "outranks 'unmeasured': a `no` names the contract that failed, and "
+            "the unmeasured ones are still listed. The numbers in the third "
+            "column are measured / threshold, both read from the objects named "
+            "in each row's tooltip; a row with no numbers says so rather than "
+            "showing a zero. The values the engine does not report are the "
+            "descent width and the support edge: no object here carries them, "
+            "so those contracts stay unmeasured rather than being passed."
+        )
+        if (self._dock_result is None and self._receptor_path is not None
+                and self._ligand_path is not None):
+            # Nothing above can be measured, and an explanation is not a way
+            # forward. The action is named, and it is the button in the panel
+            # above rather than a second one here: the same click produces the
+            # poses that carry the numbers these contracts read. The first
+            # version of this panel did not say it, and the gate caught that a
+            # dead end had been presented as a feature.
+            note += (
+                " Nothing here can be measured from a pose file, and "
+                "'Re-dock this ligand here' in the panel above is the action "
+                "that changes it: the poses it reports carry the run's own "
+                "numbers, and this panel will describe whichever of them is "
+                "selected afterwards."
+            )
+        self.lbl_verdict_note.setText(note)
+
+    def _on_terms_dock_clicked(self) -> None:  # pragma: no cover - GUI
+        """Run a docking, so the poses carry the conformations the terms need."""
+        self.start_docking()
 
     def _rmsd_to_best(self, row: int):  # pragma: no cover - GUI
         if not self._pose_models:
@@ -2924,15 +4047,16 @@ class MainWindow(QtWidgets.QMainWindow):
         process with "QThread: Destroyed while thread is still running". Closing
         the window during a search used to be exactly that.
         """
-        for name in ("_thread", "_pocket_thread"):
+        for name in ("_thread", "_pocket_thread", "_terms_thread"):
             thread = getattr(self, name, None)
             if thread is not None and thread.isRunning():
                 thread.quit()
-                # The pocket search is a bounded numpy loop, not a cancellable
-                # one, so `quit()` only takes effect between slots. A long wait
-                # is better than an abort: the user asked to close, and the
-                # alternative used to be a crash on the way out.
-                thread.wait(15000 if name == "_pocket_thread" else 3000)
+                # The pocket search and the term-map build are bounded numpy
+                # loops, not cancellable ones, so `quit()` only takes effect
+                # between slots. A long wait is better than an abort: the user
+                # asked to close, and the alternative used to be a crash on the
+                # way out.
+                thread.wait(15000 if name != "_thread" else 3000)
         super().closeEvent(event)
 
 
@@ -2954,8 +4078,20 @@ def _energy_of(model_text: str) -> float | None:
 
 
 def run(receptor=None, ligand=None, poses=None) -> int:
-    """Launch the Qt application."""
+    """Launch the Qt application.
+
+    Two things are wrapped around the event loop, and both are about the exit
+    code. `event_loop()` marks the one place in this package that owns the
+    loop, which is what lets `crashguard` end a crashed run by asking `exec()`
+    to return `EXIT_UNHANDLED` instead of killing the process -- the window then
+    closes the way it closes for any other exit. `finalise()` is the backstop:
+    a failure `crashguard` recorded can never be reported as 0, whatever the
+    loop returned. `odcli workbench` returns this number too, so the code a
+    user sees from the CLI and from `odgui` is the same code.
+    """
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
     window = MainWindow(receptor, ligand, poses)
     window.show()
-    return app.exec()
+    with crashguard.event_loop():
+        code = app.exec()
+    return crashguard.finalise(code)

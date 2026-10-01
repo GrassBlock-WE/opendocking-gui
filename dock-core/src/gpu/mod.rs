@@ -553,17 +553,52 @@ mod tests {
     }
 
     #[test]
-    fn gpu_energies_match_the_cpu_interpolation() {
+    fn the_cpu_and_gpu_paths_agree_where_the_difference_was_measured() {
         // The whole point of the compute shader is to reproduce the CPU
         // trilinear sum. A kernel that compiles but reads the wrong slot, the
         // wrong stride or the wrong grid origin still returns plausible-looking
         // numbers, so the only real check is a numerical one against the CPU
         // path on the same grid.
+        //
+        // What this test is and is not. It is a *measurement*, and it is the
+        // only statement in the suite about the shader's arithmetic. It cannot
+        // run on a machine with no adapter, and there are two honest ways to
+        // deal with that: fail, or do not claim a result. Failing would make a
+        // headless CI runner permanently red over something it cannot do, and
+        // would make this project's counts a property of the machine they ran
+        // on, which is the one thing a count must not be. So this test does not
+        // fail, and it does not claim a result either — and the count below is
+        // the same with and without an adapter because there is exactly one
+        // `#[test]` either way, no `#[ignore]`, and no `skip()` to be counted.
+        // What changes between the two machines is a **word in the output**,
+        // never a number: that is the whole trick, and it is why the wording
+        // below is this long and does not contain the word "pass".
+        //
+        // The structural claim that does hold everywhere is
+        // `grid::tests::under_the_gpu_feature_the_terms_are_still_cpu_only`, in
+        // the same feature arm: it reads this module's own `ENERGY_WGSL` and
+        // asserts the kernel's stride is the production one, that the two
+        // per-point strides differ, and that `TermMaps::BACKEND` is the CPU. It
+        // needs no adapter, so it runs on a machine that cannot run this one.
+        // Between them the arm says something true about the GPU path either
+        // way — which is why this test does not have to assert a structural
+        // fact of its own to avoid being vacuous, and why an earlier version of
+        // this comment claiming it had to was wrong: that version described a
+        // duplicate of a guard that already existed.
         if !is_available() {
-            eprintln!("no GPU adapter; skipping the numerical cross-check");
+            eprintln!(
+                "NOT MEASURED: this machine has no GPU adapter, so the CPU/GPU \
+                 difference was not computed and no comparison was made. This line \
+                 reports an absence, not a result. What was still asserted on this \
+                 machine, in this same arm, is the structural claim: \
+                 `under_the_gpu_feature_the_terms_are_still_cpu_only` checks that \
+                 the kernel's stride is the production one and that the two \
+                 per-term and production layouts cannot be interchanged. The \
+                 numerical claim above is the one that did not run here."
+            );
             return;
         }
-        use crate::grid::{GridBox, GridMaps};
+        use crate::grid::{GridBox, GridMaps, MapSlot};
         use crate::scoring::VinaScoring;
 
         let receptor = test_receptor();
@@ -594,11 +629,45 @@ mod tests {
         };
         let ligand = crate::ligand::Ligand::from_molecule_with(lig_mol, &[]).expect("ligand");
 
-        // Place the two fragments at two different points in the box.
-        let placements: [[f32; 3]; 2] = [[-1.0, -1.0, -1.0], [2.0, 1.5, 0.5]];
+        // The sample. The two placements this test used to check are kept, and
+        // 125 more are added on a 1.7 A lattice spanning -3.4..3.4 A, which is
+        // off the 0.5 A grid everywhere except by accident -- so most of the
+        // sample is a real trilinear blend rather than a node lookup, and the
+        // spread includes the corners where the partial sums are largest and
+        // the deep interior where they cancel hardest. Two conformations cannot
+        // tell a stride error from a correct kernel: both are one number, and
+        // the number is wrong in the same way every time. The size of the
+        // sample is what makes "the worst difference" a statement about the
+        // kernel rather than about one pose.
+        let mut placements: Vec<[f32; 3]> = vec![[-1.0, -1.0, -1.0], [2.0, 1.5, 0.5]];
+        let mut a = -3.4f32;
+        while a <= 3.4 {
+            let mut b = -3.4f32;
+            while b <= 3.4 {
+                let mut c = -3.4f32;
+                while c <= 3.4 {
+                    placements.push([a, b, c]);
+                    c += 1.7;
+                }
+                b += 1.7;
+            }
+            a += 1.7;
+        }
+        // The far corner plus the 1.2 A offset on the second atom must still be
+        // inside the box, or `interpolate_with_gradient` would refuse the point
+        // and the CPU side of the comparison would never run.
+        let reach = placements
+            .iter()
+            .map(|p| p[0] + 1.2)
+            .fold(f32::NEG_INFINITY, f32::max);
+        assert!(
+            reach < 6.0,
+            "the sample reaches x = {reach}, which is outside the 6 A box"
+        );
+
         let mut coords: Vec<f32> = Vec::new();
-        for p in placements {
-            coords.extend_from_slice(&p);
+        for p in &placements {
+            coords.extend_from_slice(p);
             coords.extend_from_slice(&[p[0] + 1.2, p[1], p[2]]);
         }
         let n_conf = placements.len();
@@ -611,7 +680,7 @@ mod tests {
         // The same sum, on the CPU, from the same maps: the weighted trilinear
         // value of every atom.
         let mut want = Vec::with_capacity(n_conf);
-        for p in placements {
+        for p in &placements {
             let mut total = 0.0f64;
             for (i, _atom) in ligand.molecule.atoms.iter().enumerate() {
                 let mut xyz = [p[0] as f64, p[1] as f64, p[2] as f64];
@@ -624,13 +693,111 @@ mod tests {
             want.push(total);
         }
 
+        // The scale the tolerance is derived from: the magnitude of the `f32`
+        // grid data the shader actually reads, over the eight corners of every
+        // atom's cell, weighted by that atom's slot weights.
+        //
+        // The first version of this band scaled by the *interpolated* energy,
+        // and the 1.7 A lattice is what showed it was wrong: a conformation whose
+        // neighbouring nodes nearly cancel is evaluated from nodes orders of
+        // magnitude larger than its own total, and the shader's `f32` weights are
+        // applied to those nodes, not to the result. A band proportional to the
+        // total collapses exactly where the kernel is hardest to get right, and
+        // two hand-picked poses at 1.5 A and 3.0 A never reached such a point.
+        // The data magnitude does not collapse: it is the only thing the `f32`
+        // error can be proportional to, since both paths read the same values
+        // and the representation error is common to the two.
+        let corners = [
+            [0usize, 0, 0],
+            [1, 0, 0],
+            [0, 1, 0],
+            [1, 1, 0],
+            [0, 0, 1],
+            [1, 0, 1],
+            [0, 1, 1],
+            [1, 1, 1],
+        ];
+        let mut read_magnitude = Vec::with_capacity(n_conf);
+        for p in &placements {
+            let mut magnitude = 0.0f64;
+            for (i, _atom) in ligand.molecule.atoms.iter().enumerate() {
+                let mut xyz = [p[0] as f64, p[1] as f64, p[2] as f64];
+                xyz[0] += if i == 1 { 1.2 } else { 0.0 };
+                // The cell this atom lands in, by the same arithmetic
+                // `GridMaps::fractional` uses; it is private, and it is restated
+                // here rather than reached through, so the two can be seen to
+                // agree instead of one hiding the other.
+                let mut cell = [0usize; 3];
+                for (a, cell_a) in cell.iter_mut().enumerate() {
+                    let u = (xyz[a] - maps.min[a]) / maps.spacing[a];
+                    *cell_a = u.floor() as usize;
+                }
+                for c in corners {
+                    for (s, slot) in MapSlot::ALL.iter().enumerate() {
+                        let w = ligand.weights[i][s] as f64;
+                        if w == 0.0 {
+                            continue;
+                        }
+                        let v = maps.raw(
+                            ligand.type_index[i],
+                            *slot,
+                            cell[0] + c[0],
+                            cell[1] + c[1],
+                            cell[2] + c[2],
+                        );
+                        magnitude += (v as f64 * w).abs();
+                    }
+                }
+            }
+            read_magnitude.push(magnitude);
+        }
+
+        // `ROUNDINGS` is the number of `f32` roundings a value passes through on
+        // its way from a grid node to the conformation's energy: one per grid
+        // value entering the sum. It is a count, not a fudge factor, and the two
+        // things it counts are asserted next to it so it cannot drift away from
+        // them silently.
+        assert_eq!(
+            crate::grid::MAPS_PER_TYPE,
+            4,
+            "ROUNDINGS counts four slots per corner"
+        );
+        assert_eq!(n_atoms, 2, "ROUNDINGS counts two atoms per conformation");
+        const ROUNDINGS: f64 = 64.0; // 8 corners x 4 slots x 2 atoms
+        let eps32 = f32::EPSILON as f64;
+
+        let mut worst = 0.0f64;
+        let mut worst_at = 0usize;
         for (c, (g, w)) in got.iter().zip(want.iter()).enumerate() {
+            let diff = ((*g as f64) - *w).abs();
+            let tol = ROUNDINGS * eps32 * read_magnitude[c];
             assert!(
-                ((*g as f64) - *w).abs() < 1e-3,
-                "conformation {c}: GPU {g} vs CPU {w} (adapter {})",
+                diff <= tol,
+                "conformation {c}: GPU {g} vs CPU {w}, a difference of {diff:e} \
+                 against a derived band of {tol:e} ({ROUNDINGS} f32 roundings of \
+                 a read magnitude of {:e}); the worst seen so far is {worst:e} \
+                 (adapter {})",
+                read_magnitude[c],
                 ctx.adapter_name()
             );
+            if diff > worst {
+                worst = diff;
+                worst_at = c;
+            }
         }
-        eprintln!("GPU cross-check on adapter: {}", ctx.adapter_name());
+        // Report the number the assertion above only prints when it fails. A
+        // cross-check that says "they agree" without saying by how much cannot
+        // be used to notice the agreement getting worse.
+        let widest = ROUNDINGS * eps32 * read_magnitude[worst_at];
+        eprintln!(
+            "MEASURED on adapter {}: {} conformations, worst |GPU - CPU| = \
+             {worst:e} at conformation {worst_at}, against a derived band of \
+             {widest:e} there -- the difference used {:.1}% of the band. This is \
+             the number the no-adapter branch above declines to produce, so its \
+             absence there is visible rather than implied",
+            ctx.adapter_name(),
+            n_conf,
+            100.0 * worst / widest
+        );
     }
 }

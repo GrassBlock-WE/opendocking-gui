@@ -43,6 +43,7 @@ __all__ = [
     "write_pose",
     "split_pdbqt_models",
     "read_pdbqt_models",
+    "read_declared_bonds",
     "validate_pdbqt_columns",
     "PdbqtFormatError",
 ]
@@ -517,6 +518,83 @@ def validate_pdbqt_columns(
                 f"two letters or digits"
             )
     return problems
+
+
+#: The record that states how many `OD_BOND` records follow, and the record that
+#: carries one bond. Both are `REMARK` bodies, which is what makes them inert to
+#: a reader that has never heard of them -- see `dock-core/src/pdbqt.rs`.
+#:
+#: The two names share no prefix, and that is load-bearing rather than tidy:
+#: an earlier draft called the count `OD_BONDCOUNT`, which `OD_BOND` is a prefix
+#: of, so the obvious filter -- every line starting with the bond record name --
+#: also matched the count line. `OD_NBONDS` and `OD_BOND` cannot collide.
+_BOND_COUNT_RECORD = "REMARK OD_NBONDS"
+_BOND_RECORD = "REMARK OD_BOND"
+
+
+def read_declared_bonds(lines: Iterable[str]) -> dict[tuple[int, int], None] | None:
+    """The covalent bonds a pose file declares, as a set keyed by **atom serial**.
+
+    Returns ``None`` when the file carries no connectivity record at all, which
+    is the honest answer for a file written before the record existed or by
+    another tool: the caller then has to fall back to perceiving bonds, and
+    saying "no record" is what lets it tell that apart from "a record that
+    declares no bonds".
+
+    **Serials, not positions.** Every bond is ``(serial_i, serial_j)`` with
+    ``i < j``, and a serial is the number in columns 7-11 of the corresponding
+    ``ATOM`` record. That is the whole point of the record: ``poses.pdbqt`` is
+    not in serial order -- its serials run ``5,6,7,8,9,10,4,11,12,1,2,3`` --
+    so a bond keyed by file position would be wrong for most atoms in the
+    molecule. To get positions back, map each serial through the atom records:
+
+    .. code-block:: python
+
+        serials = [int(l[6:11]) for l in lines if l.startswith("ATOM")]
+        bonds = read_declared_bonds(lines) or set()
+        index = {s: n for n, s in enumerate(serials)}
+        edges = {(index[a], index[b]) for a, b in bonds}
+
+    A record whose ``OD_NBONDS`` does not match the number of bond records
+    that follow is a truncated or hand-edited file, and raises
+    :class:`PdbqtFormatError` rather than returning a short bond set: a
+    silently missing bond is the exact failure this record exists to remove.
+    """
+    declared: int | None = None
+    found: set[tuple[int, int]] = set()
+    for number, line in enumerate(lines, start=1):
+        stripped = line.strip()
+        if not stripped.startswith("REMARK"):
+            continue
+        body = stripped[len("REMARK"):].strip()
+        if body.startswith("OD_NBONDS"):
+            tokens = body.split()
+            if len(tokens) < 2 or not tokens[1].isdigit():
+                raise PdbqtFormatError(
+                    "<declared bonds>",
+                    [f"line {number}: OD_NBONDS without a count: {stripped!r}"],
+                )
+            declared = int(tokens[1])
+        elif body.startswith("OD_BOND"):
+            tokens = body.split()
+            serials = [t for t in tokens[1:] if t.isdigit()]
+            if len(serials) != 2:
+                raise PdbqtFormatError(
+                    "<declared bonds>",
+                    [f"line {number}: OD_BOND needs exactly two serials, got "
+                     f"{stripped!r}"],
+                )
+            a, b = int(serials[0]), int(serials[1])
+            found.add((min(a, b), max(a, b)))
+    if declared is None:
+        return None
+    if declared != len(found):
+        raise PdbqtFormatError(
+            "<declared bonds>",
+            [f"OD_NBONDS says {declared} bond(s) but the file carries "
+             f"{len(found)} distinct one(s)"],
+        )
+    return dict.fromkeys(found)
 
 
 def read_pdbqt_models(

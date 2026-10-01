@@ -42,6 +42,16 @@ EXAMPLES = ROOT / "examples"
 #: agreement is the whole reason this number is worth pinning, and it is not a
 #: claim that can be made about a count that only holds when an optional package
 #: happens to be installed. Lower it only after a real green run.
+#: The call-site census this file is supposed to have, declared here rather than
+#: in a table owned by another file -- see `GATE-DECLARE` in
+#: `check_scripts_declare.py` for the format and why it cannot drift. Both halves
+#: are compared against a walk of this file's own syntax tree, so adding a
+#: `check(...)` without moving this block turns `check_scripts_declare` red.
+#: derived: `_sites_of(structure_bond_check.py)` == (79, 6), guards digest as
+#: below. Comments only, so the numbers in `EXPECTED_CHECKS` above are unaffected.
+#: GATE-DECLARE 1
+#: sites: 79 unconditional + 6 guarded
+#: guards: sha256:a6d0261128538e2242982998589cca378fafa603ef78ff727ec4a82ea078481d
 EXPECTED_CHECKS = 85
 
 FAILURES: list[str] = []

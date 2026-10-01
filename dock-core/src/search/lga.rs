@@ -133,7 +133,7 @@ pub fn evolve(
         .into_par_iter()
         .map(|island| {
             let mut rng = rand::rngs::StdRng::seed_from_u64(
-                base_seed ^ (island as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15),
+                base_seed ^ (island as u64).wrapping_mul(super::WALK_SEED_STRIDE),
             );
             let mut pop: Vec<Individual> = (0..config.population_per_island)
                 .map(|_| {
@@ -180,7 +180,7 @@ pub fn evolve(
             .map(|(island, pop)| {
                 let mut rng = rand::rngs::StdRng::seed_from_u64(
                     base_seed
-                        ^ (island as u64).wrapping_mul(0x1234_5678_9ABC_DEF0)
+                        ^ (island as u64).wrapping_mul(super::ISLAND_SEED_STRIDE)
                         ^ pop.len() as u64,
                 );
                 (

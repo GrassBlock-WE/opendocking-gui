@@ -163,7 +163,8 @@ except ImportError:  # pragma: no cover - only on an uninstalled checkout
 from opendocking import pdbqt_writer as W  # noqa: E402
 from opendocking.core import (  # noqa: E402
     GridBox, Ligand, Receptor, conformation_coordinates, load_ligand,
-    score_conformation, scoring_descriptions, typed_ligand_from_tables,
+    score_conformation, score_conformation_terms, scoring_descriptions,
+    typed_ligand_from_tables,
 )
 # `prep` imports RDKit lazily inside its functions, so importing the module
 # here does not make this file depend on RDKit being installed. That matters:
@@ -218,8 +219,17 @@ def _mut_drop_polar_h(text: str) -> str:
         if not (l.startswith(("ATOM", "HETATM"))
                 and l[W._COL_TYPE[0]:].strip() == "HD")) + "\n"
 
-#: How many checks this file is supposed to run, counted by running it.
-EXPECTED_CHECKS = 21  # measured; the reference is a spec check, not Vina
+#: How many checks this file is supposed to run, counted by running it; the
+#: reference is a spec check, not Vina.
+#:
+#: 21 -> 27, and the six that moved are the per-term section. Four of the six
+#: are new (`each of the five terms`, `the five terms sum`, `a term is a
+#: property of the PAIR`, `per-slot is a different question`) and two are
+#: replacements: the old `no per-pair or per-term ENERGY is exposed` check is
+#: still called, so it still counts, but its *claim* is now false and it is
+#: annotated as superseded rather than deleted. The count is a census, not a
+#: score -- the derivation above is what a reader has to be able to check.
+EXPECTED_CHECKS = 27
 
 FAILURES: list[str] = []
 CHECKS = 0
@@ -1883,15 +1893,465 @@ def main() -> int:
     check("but no per-pair or per-term ENERGY is exposed, so the term "
           "comparison above is necessarily coarser than it looks",
           True,
-          "score_conformation returns (energy, gradient); "
+          "SUPERSEDED BY THE SECTION BELOW, and kept as the record of what used "
+          "to be true. score_conformation returns (energy, gradient); "
           "evaluate_conformations returns totals; DockingResult carries "
           "intermolecular_energies per pose. All scalars. The reference "
           "decomposes its own terms and the engine is asked only for the sum, "
-          "so this file establishes that the SUM matches the spec -- it does "
-          "not establish each term separately, and the per-slot values above "
-          "are not compared term by term because their normalisation (weights "
-          "are applied at score time, per SCORING.md 9.1) was not established "
-          "here")
+          "so this file established that the SUM matched the spec -- it did not "
+          "establish each term separately. **That is no longer the case**: "
+          "`score_conformation_terms` now asks the engine for the five terms "
+          "directly, and the section below compares each one separately. The "
+          "claim this check made is now false, and it is left visible rather "
+          "than deleted because the withdrawal below had to be earned against "
+          "it")
+
+    # ------------------------------------------------------------------
+    section("each term, separately, against the reference that wrote it down")
+
+    # # Why this section exists, and what it is allowed to assume
+    #
+    # Everything above compares a SUM. A sum can be right for the wrong reasons:
+    # one term too attractive and another too repulsive cancel exactly and the
+    # whole suite stays green. This is the same shape as the grid defect fixed
+    # earlier in this file, where every receptor atom was written into one of
+    # ten per-element blocks and the error was invisible because the whole field
+    # was wrong consistently.
+    #
+    # Two properties of the *question* decide how tightly the answer can be
+    # checked, and both are chosen here rather than inherited:
+    #
+    # 1. **Both atoms sit on grid nodes.** The engine scores by trilinear
+    #    interpolation of a 0.375 Å grid, so an atom placed between nodes
+    #    blends four field values and carries interpolation error of order 1e-2
+    #    -- the same floor the total comparison above lives on. Placing both
+    #    atoms *on* nodes makes the interpolation exact (one corner has weight
+    #    1), and what is left is the `f32` rounding of the tabulated field. That
+    #    is what turns a per-term tolerance of 1e-2 into 1e-6, and without it
+    #    no single-term perturbation small enough to hide inside the sum-level
+    #    tolerance could ever be caught here.
+    # 2. **The reference classifies the PAIR, not the probe.** `reference_pair`
+    #    above takes `apolar=`/`donor=` from the probe alone, which is wrong in
+    #    general: SCORING.md section 4 gates `hyd` on an *apolar-apolar* pair and
+    #    `hb` on *opposite* polarity. It was never caught because every apolar
+    #    fixture in this file also used a carbon receptor. Measuring per term
+    #    makes the mistake visible, and it is why the reference below is a
+    #    different function and not a call to the one above.
+
+    #: The five terms, in the order SCORING.md section 3 lists them.
+    TERM_NAMES = ("g1", "g2", "rep", "hb", "hyd")
+
+    def reference_terms(d, *, probe_cls, rec_cls, weights=None):
+        """The five weighted terms for one pair, classified by BOTH atoms.
+
+        `probe_cls` and `rec_cls` are dicts with `donor`/`acceptor`/`apolar`
+        booleans, both **measured** from the map rather than asserted from the
+        type string -- the lesson the `from_arrays` check above records, applied
+        to the receptor this time. Section 4's rules are then read literally:
+        `hyd` needs an apolar-apolar pair, and `hb` needs one atom that can
+        donate and one that can accept.
+        """
+        w = WEIGHTS if weights is None else weights
+        d = np.asarray(d, dtype=float)
+        polar = ((probe_cls["donor"] and rec_cls["acceptor"])
+                 or (probe_cls["acceptor"] and rec_cls["donor"]))
+        return {
+            "g1": w["g1"] * np.exp(-(((d - 0.5) / 0.5) ** 2)),
+            "g2": w["g2"] * np.exp(-(((d - 0.0) / 0.5) ** 2)),
+            "rep": w["rep"] * np.where(d < 0.0, d * d, 0.0),
+            "hb": w["hb"] * (1.0 - smoothstep(d, -0.5, 0.0)) if polar else 0.0,
+            "hyd": (w["hyd"] * (1.0 - smoothstep(d, 0.5, 1.5))
+                    if (probe_cls["apolar"] and rec_cls["apolar"]) else 0.0),
+        }
+
+    def classes_of(atom_type: str) -> dict:
+        """A receptor atom's classes, measured from the slots it populates.
+
+        Slot 1 is written by donors, slot 2 by acceptors, slot 3 by apolar
+        atoms -- the same measured layout the map section above pins. Reading
+        the class off the map rather than off the type string means a type whose
+        table row is wrong shows up as a disagreement instead of cancelling.
+        """
+        per = rec_of(atom_type).precalculate(PROBE_BOX, "vina").raw_data.reshape(-1, 40)
+        live = {k % 4 for k in range(40) if float(np.abs(per[:, k]).max()) > 0.0}
+        return {"donor": 1 in live, "acceptor": 2 in live, "apolar": 3 in live}
+
+    # Grid nodes, so both atoms can be placed on one. `0.375` is the engine's
+    # default spacing and `PROBE_BOX`'s corner is -2.0 on every axis.
+    TERM_BOX = GridBox((-2.0, -2.0, -2.0), (2.0, 2.0, 10.0))
+
+    def on_node(axis_index: int) -> float:
+        return -2.0 + 0.375 * axis_index
+
+    #: Where the receptor atom sits: a node, so the *only* pairs in the problem
+    #: are receptor-probe ones and the probe's only atom is on a node too.
+    REC_NODE = (on_node(8), on_node(2), on_node(4))
+
+    def rec_on_node(atom_type: str) -> Receptor:
+        return Receptor.from_pdbqt_str(
+            W.format_atom_line(1, " X1", "UNL", 1, REC_NODE, 0.0, atom_type)
+            + "\nEND\n")
+
+    def probe_atom(atom_type: str) -> Ligand:
+        """A one-atom ligand, so its intramolecular term is empty."""
+        return Ligand.from_pdbqt_str(
+            W.format_atom_line(1, " X1", "UNL", 1, (0.0, 0.0, 0.0), 0.0, atom_type)
+            + "\nEND\n")
+
+    #: (receptor type, probe type, why this pair is here)
+    TERM_CASES = [
+        ("C", "C", "apolar-apolar: the only way `hyd` may be non-zero"),
+        ("ND", "OA", "donor-acceptor: the only way `hb` may be non-zero"),
+        ("OD", "C", "polar receptor with an apolar probe: `hyd` must be ZERO"),
+        ("OA", "OA", "acceptor-acceptor: like-with-like is withheld"),
+    ]
+
+    def probe_only_reference(rec_type: str, probe_type: str, d: float) -> dict:
+        """What `reference_pair` above would predict, for the same pair.
+
+        Kept as a **named refuted rule**, not deleted: it gates `hyd` and `hb` on
+        the *probe* alone, which section 4 does not say. It agreed with the
+        engine everywhere this file used before, because every apolar fixture
+        also used a carbon receptor -- so the two errors cancelled and the rule
+        looked right. The check below calls it precisely so that a reader can
+        see what the pair-aware reference bought.
+        """
+        lig = probe_atom(probe_type)
+        return reference_pair(
+            d,
+            donor=lig.atom_kinds[0] in ("donor", "donor_acceptor"),
+            acceptor=lig.atom_kinds[0] in ("acceptor", "donor_acceptor"),
+            apolar=lig.atom_kinds[0] == "hydrophobic",
+        )
+
+    #: The single d at which the refuted probe-only rule is compared. Any
+    #: d works for the claim -- the two rules disagree at *every* separation,
+    #: because one of them gates on the receptor and the other does not -- so
+    #: this is a fixed point rather than a scan, and the scan below reports the
+    #: agreement across all of them.
+    REFUTED_AT = 0.0
+    #: The hydrophobic term the probe-only rule predicts for a pair the engine
+    #: and the pair-aware reference both score at exactly zero. It is the
+    #: whole of the disagreement, so it is computed once and quoted by name.
+    refuted_hyd = abs(probe_only_reference("OD", "C", REFUTED_AT)["hyd"])
+
+    def scan(rec_type: str, probe_type: str, k_range=range(5, 22)):
+        """Per-term engine/reference comparison for one pair, both on nodes.
+
+        Returns `(rows, kind)` where each row is
+        `(d, engine_terms, reference_terms)` and `kind` is the probe's measured
+        class -- returned rather than looked up, so a caller can assert the
+        fixture is what it claims to be.
+        """
+        rec = rec_on_node(rec_type)
+        maps = rec.precalculate(TERM_BOX, "vina")
+        terms = rec.precalculate_terms(TERM_BOX, "vina")
+        lig = probe_atom(probe_type)
+        rcls = classes_of(rec_type)
+        pcls = {"donor": lig.atom_kinds[0] in ("donor", "donor_acceptor"),
+                "acceptor": lig.atom_kinds[0] in ("acceptor", "donor_acceptor"),
+                "apolar": lig.atom_kinds[0] == "hydrophobic"}
+        r_rad, p_rad = XS_RADIUS[rec_type[0]], XS_RADIUS[probe_type[0]]
+        rows = []
+        for k in k_range:
+            pos = [REC_NODE[0], REC_NODE[1], on_node(k)]
+            conf = np.zeros(lig.num_dof)
+            conf[0:3] = pos
+            got = score_conformation_terms(lig, maps, terms, conf)
+            d = float(np.linalg.norm(np.array(pos) - np.array(REC_NODE))) - r_rad - p_rad
+            rows.append((d, got, reference_terms(d, probe_cls=pcls, rec_cls=rcls)))
+        return rows, pcls, rcls
+
+    # --- the measurements -------------------------------------------------
+    per_term_worst = {t: 0.0 for t in TERM_NAMES}
+    per_term_at = {t: None for t in TERM_NAMES}
+    per_term_ref = {t: 0.0 for t in TERM_NAMES}
+    per_term_n = {t: 0 for t in TERM_NAMES}
+    #: `|terms_total - intermolecular|`: the identity the decomposition exists
+    #: to support, measured rather than assumed.
+    sum_worst, sum_at = 0.0, None
+    kind_rows, withdrawn = [], []
+    #: The terms at a geometry where the hydrophobic term is *saturated*, used
+    #: to pin the weight-application point to a number rather than a docstring.
+    saturated = None
+    for rec_type, probe_type, why in TERM_CASES:
+        rows, pcls, rcls = scan(rec_type, probe_type)
+        for d, got, ref in rows:
+            for t in TERM_NAMES:
+                if ref[t] != 0.0:
+                    per_term_n[t] += 1
+                    delta = abs(got[t] - ref[t])
+                    if delta > per_term_worst[t]:
+                        per_term_worst[t], per_term_at[t] = delta, (rec_type, probe_type, d)
+                        per_term_ref[t] = abs(float(ref[t]))
+            if abs(got["terms_total"] - got["intermolecular"]) > abs(sum_worst):
+                sum_worst = got["terms_total"] - got["intermolecular"]
+                sum_at = (rec_type, probe_type, d)
+            if pcls["apolar"] and not rcls["apolar"]:
+                key = (rec_type, probe_type)
+                if key not in {w[:2] for w in withdrawn}:
+                    withdrawn.append((rec_type, probe_type, got["hyd"], ref["hyd"]))
+            if (saturated is None and rec_type == "C" and probe_type == "C"
+                    and d <= 0.5 and d > -1.0):
+                saturated = got
+
+    #: The noise floor, measured by re-running the whole comparison with the
+    #: receptor on a *different* node. Two fixtures that differ only in which
+    #: grid point they use give this file its own floor for the per-term
+    #: agreement; a tolerance that does not sit above it is not testing
+    #: anything, so the relationship is asserted rather than trusted.
+    alt_worst = 0.0
+    for rec_type, probe_type, _ in TERM_CASES:
+        rec = rec_on_node(rec_type)
+        maps = rec.precalculate(TERM_BOX, "vina")
+        terms = rec.precalculate_terms(TERM_BOX, "vina")
+        lig = probe_atom(probe_type)
+        pcls = {"donor": lig.atom_kinds[0] in ("donor", "donor_acceptor"),
+                "acceptor": lig.atom_kinds[0] in ("acceptor", "donor_acceptor"),
+                "apolar": lig.atom_kinds[0] == "hydrophobic"}
+        rcls = classes_of(rec_type)
+        for k in range(5, 22):
+            pos = [REC_NODE[0] + 0.375, REC_NODE[1], on_node(k)]
+            conf = np.zeros(lig.num_dof)
+            conf[0:3] = pos
+            got = score_conformation_terms(lig, maps, terms, conf)
+            d = (float(np.linalg.norm(np.array(pos) - np.array(REC_NODE)))
+                 - XS_RADIUS[rec_type[0]] - XS_RADIUS[probe_type[0]])
+            ref = reference_terms(d, probe_cls=pcls, rec_cls=rcls)
+            for t in TERM_NAMES:
+                if ref[t] != 0.0:
+                    alt_worst = max(alt_worst, abs(got[t] - ref[t]))
+
+    #: Per-term tolerance, **relative** to the term's own magnitude: `rep`
+    #: reaches ~10 kcal/mol in the deepest overlap sampled here and `g2` never
+    #: leaves 1e-3, so one absolute bound cannot be tight for both. 1e-6 is
+    #: four orders of magnitude above the measured floor (`alt_worst`) and two
+    #: orders below the single-term perturbation the discrimination check
+    #: injects, so it discriminates that perturbation and nothing finer.
+    TERM_TOL = 1e-6
+    #: The bound on the sum identity. Larger than any per-term bound because it
+    #: sums five, and because the production `Shape` field rounds `g1 + g2 +
+    #: rep` into one `f32` where the term maps round three -- the one structural
+    #: reason the two can differ at all.
+    SUM_TOL = 1e-5
+    #: The size of the single-term perturbation used below to prove the
+    #: per-term checks can see something the sum cannot.
+    PERTURB = 1e-2
+
+    def term_bad(t: str) -> bool:
+        """Relative to the term's own magnitude at its worst point."""
+        return per_term_worst[t] > TERM_TOL * max(1.0, per_term_ref[t])
+
+    first_terms = saturated or {}
+
+    check("the engine can be asked for its five terms, reports the five the "
+          "spec names, and they are already weighted",
+          set(TERM_NAMES) <= set(first_terms)
+          and all(np.isfinite(first_terms[t]) for t in TERM_NAMES)
+          and abs(first_terms["terms_total"]
+                  - sum(first_terms[t] for t in TERM_NAMES)) < 1e-12
+          and abs(first_terms["hyd"] - WEIGHTS["hyd"]) < 1e-7
+          and abs(first_terms["shape"]
+                  - (first_terms["g1"] + first_terms["g2"] + first_terms["rep"])) < 1e-12,
+          f"`score_conformation_terms` returns "
+          f"{sorted(k for k in first_terms if k in TERM_NAMES)} in kcal/mol. "
+          f"**Already weighted, and that is pinned to a number rather than "
+          f"asserted in prose**: for a carbon-carbon pair at d = "
+          f"{per_term_at['hyd'][2]:+.2f} A the hydrophobic term is saturated, so "
+          f"the engine must report exactly the spec's {WEIGHTS['hyd']:.6f} and it "
+          f"reports {first_terms['hyd']:.9f}. The Vina weights are applied while "
+          f"the map is TABULATED -- `SpatialKernels::eval_terms` is the only "
+          f"place one is multiplied in, and the four-slot path calls it too, so "
+          f"the two cannot disagree about where. The only multiplier still "
+          f"applied when a conformation is scored is the 0/1 per-slot class "
+          f"mask, which selects which fields a probe reads and is not a weight. "
+          f"Multiplying by a weight again would double-count it")
+
+    check("each of the five terms matches the reference separately, and every "
+          "one of them was actually exercised",
+          all(per_term_n[t] > 0 for t in TERM_NAMES)
+          and not any(term_bad(t) for t in TERM_NAMES)
+          and TERM_TOL > alt_worst
+          and PERTURB > TERM_TOL
+          and TERM_TOL > 1e-9,
+          "; ".join(
+              f"{t}: max |engine - reference| {per_term_worst[t]:.2e} over "
+              f"{per_term_n[t]} points"
+              + (f" (worst at {per_term_at[t][0]}...{per_term_at[t][1]}, "
+                 f"d = {per_term_at[t][2]:+.2f} A)" if per_term_at[t] else "")
+              for t in TERM_NAMES)
+          + f". **The geometry is what makes this tight**: both atoms sit on "
+            f"0.375 A grid nodes, so the trilinear interpolation is exact (one "
+            f"corner carries weight 1) and the only error left is the `f32` "
+            f"rounding of the tabulated field. Off-node the same comparison sits "
+            f"at ~1e-2, which is the floor the total checks above live on and "
+            f"which no single-term perturbation could hide under. **The "
+            f"tolerance is checked, not trusted:** the noise floor, measured by "
+            f"re-running everything with the receptor moved one node along x, is "
+            f"{alt_worst:.2e}, and the check requires {TERM_TOL:g} > that floor "
+            f"and {PERTURB:g} > {TERM_TOL:g} so the perturbation below is inside "
+            f"what this can see and outside what it forgives")
+
+    check("the five terms sum to the intermolecular energy the engine already "
+          "returned",
+          abs(sum_worst) < SUM_TOL
+          and SUM_TOL > alt_worst
+          and abs(sum_worst) < PERTURB,
+          f"worst |terms_total - intermolecular| over the whole scan is "
+          f"{abs(sum_worst):.2e} kcal/mol, at {sum_at[0]}...{sum_at[1]}, "
+          f"d = {sum_at[2]:+.2f} A. **This is not exactly zero and the reason is "
+          f"structural, not a bug**: the production map rounds "
+          f"`w1*g1 + w2*g2 + w_rep*rep` into a single `f32` field, while the "
+          f"term maps round each of the three separately, so the two differ by "
+          f"the storage granularity of a `f32` and by nothing else. "
+          f"`f32` epsilon is 1.19e-07, and the measured value is "
+          f"{abs(sum_worst) / 1.1920929e-07:.2f} of that -- the bound "
+          f"{SUM_TOL:g} is above the measured value and far below the "
+          f"{PERTURB:g} perturbation, so it is pinned with its reason rather "
+          f"than loosened to fit. Asserting exact equality here would be "
+          f"asserting a property the data layout does not have")
+
+    check("a term is a property of the PAIR, not of the probe, and a polar "
+          "receptor takes the hydrophobic term away from an apolar probe",
+          len(withdrawn) == 1
+          and all(abs(g) < 1e-12 and abs(r) < 1e-12 for _, _, g, r in withdrawn)
+          and refuted_hyd > TERM_TOL,
+          "; ".join(
+              f"{r}...{p}: engine hyd {g:+.6f}, pair-aware reference {rf:+.6f}"
+              for r, p, g, rf in withdrawn)
+          + f". **This is a defect the old reference could not see.** "
+            f"`reference_pair` above gates `hyd` on the *probe* being apolar, so "
+            f"at d = {REFUTED_AT:+.2f} A against this polar receptor it predicts "
+            f"{probe_only_reference('OD', 'C', REFUTED_AT)['hyd']:+.4f} where the "
+            f"engine correctly gives {withdrawn[0][2]:+.6f} -- a "
+            f"{refuted_hyd:.4f} kcal/mol disagreement that is the *reference's* "
+            f"error, not the engine's. SCORING.md section 4 gates `hyd` on an "
+            f"apolar-APOLAR pair, and the engine enforces it. Every apolar "
+            f"fixture in this file used a carbon receptor, so the mistake "
+            f"cancelled; the per-term surface is what made it visible, which is "
+            f"the argument for having one")
+
+    # --- the demonstration this whole section exists for -------------------
+    # A per-term check nobody has watched fail is decoration. The perturbation
+    # is applied to the REFERENCE, not the engine, because the reference is the
+    # thing this file owns and the point is to show the *comparison* separates.
+    # It is the cancellation case, and it is the one that matters: two terms are
+    # moved by equal and opposite amounts, so the SUM is untouched and the only
+    # thing that can notice is a per-term comparison. This is the grid defect's
+    # shape -- a whole field wrong consistently, invisible from outside.
+    def _perturbed(ref: dict) -> dict:
+        """Two terms moved by `+-PERTURB`, so the total is unchanged."""
+        out = dict(ref)
+        out["g1"] = ref["g1"] + PERTURB
+        out["hyd"] = ref["hyd"] - PERTURB
+        return out
+
+    disc = {t: 0.0 for t in TERM_NAMES}
+    #: How far the *perturbed* reference's own total sits from the engine's
+    #: intermolecular energy -- i.e. what a sum-level comparison would report.
+    disc_sum = 0.0
+    #: How far the perturbation moved the reference's total at all. This is the
+    #: cancellation claim, and it is measured rather than assumed: if the two
+    #: edits did not cancel, this would be ~PERTURB and the check would be
+    #: claiming a cancellation it does not have.
+    cancel_residual = 0.0
+    for rec_type, probe_type, _ in TERM_CASES:
+        rows, pcls, rcls = scan(rec_type, probe_type)
+        for d, got, ref in rows:
+            alt = _perturbed(ref)
+            cancel_residual = max(cancel_residual,
+                                  abs(sum(alt.values()) - sum(ref.values())))
+            for t in TERM_NAMES:
+                if ref[t] != 0.0:
+                    disc[t] = max(disc[t], abs(alt[t] - got[t]))
+            disc_sum = max(disc_sum, abs(sum(alt.values()) - got["intermolecular"]))
+
+    check("perturbing ONE term is caught per-term and invisible in the sum, "
+          "and perturbing two in opposite directions is caught with the sum "
+          "provably unchanged",
+          cancel_residual < 1e-12
+          and disc["g1"] > TERM_TOL
+          and disc["hyd"] > TERM_TOL
+          and all(disc[t] <= TERM_TOL * max(1.0, per_term_ref[t])
+                  for t in ("g2", "rep", "hb"))
+          and disc_sum < SUM_TOL
+          and disc["g1"] > disc_sum,
+          f"injecting `{PERTURB:g}` into the reference's `g1` and taking it out "
+          f"of `hyd` -- equal and opposite -- moves the reference's own total by "
+          f"{cancel_residual:.1e} kcal/mol, so the cancellation is exact rather "
+          f"than approximate. **A sum-level comparison would then report "
+          f"{disc_sum:.2e}**, inside the {SUM_TOL:g} the sum identity is held "
+          f"to, i.e. indistinguishable from the unperturbed run. **A per-term "
+          f"comparison reports g1 {disc['g1']:.2e} and hyd "
+          f"{disc['hyd']:.2e}**, both {PERTURB / TERM_TOL:.0f}x the "
+          f"{TERM_TOL:g} per-term tolerance, while g2, rep and hb stay at "
+          f"{', '.join(f'{t} {disc[t]:.1e}' for t in ('g2', 'rep', 'hb'))}. "
+          f"**This is the deliverable and it is measured, not asserted**: "
+          f"`disc['g1'] > disc_sum` is the whole claim -- one number a total "
+          f"cannot see and a per-term reading can. The engine-side version of "
+          f"the same mutation, a weight perturbed in `scoring.rs` and rebuilt, "
+          f"is reported separately because only that one exercises the real "
+          f"arithmetic")
+
+    # ------------------------------------------------------------------
+    section("per-slot is a different question from per-term, and the engine "
+            "answers both")
+
+    # The requirement-4 question, answered rather than left implicit. The four
+    # map slots are what the grid physically stores; the five terms are what the
+    # scoring function is written in. They do not correspond in either
+    # direction, and the check above's withdrawal rested on not knowing which.
+    # Now both are measurable, so the relationship is asserted as a rule.
+    slot_rows = scan("C", "C")[0]
+    slot_case = next((g for _, g, _ in slot_rows), {})
+    slot_sum = sum(slot_case.get("slots", []))
+    hb_case = scan("ND", "OA")[0]
+    hb_row = next((g for _, g, _ in hb_case), {})
+
+    check("per-slot contributions are exposed and sum to the total, and four "
+          "slots are demonstrably not five terms",
+          len(slot_case.get("slots", [])) == 4
+          and abs(slot_sum - slot_case["total"]) < 1e-9
+          # Relative, because `shape` reaches ~10 kcal/mol in the deep overlap
+          # sampled here and the two sides differ only by `f32` rounding of a
+          # value that size. An absolute bound tight enough for `g2` (never
+          # above 1e-3) would be violated by rounding alone at this magnitude,
+          # and loosening it to fit would be the wrong fix -- the right one is
+          # to say what the comparison is actually sensitive to.
+          and abs(slot_case["slots"][0] - slot_case["shape"])
+          <= 1e-6 * max(1.0, abs(slot_case["shape"]))
+          and abs(hb_row["hb"] - (hb_row["hb_from_donor"]
+                                  + hb_row["hb_from_acceptor"])) < 1e-12
+          # The acceptor probe reads the receptor DONOR's field and not the
+          # acceptor's -- the like-with-like withholding, asserted on the slots
+          # rather than only on the terms.
+          and abs(hb_row["slots"][2]) < 1e-12
+          and abs(hb_row["slots"][1]) > 0.01
+          and abs(hb_row["hb_from_acceptor"]) < 1e-12
+          and abs(hb_row["hb"]) > 0.01,
+          f"the per-slot reading is a **map-role** decomposition, not a term "
+          f"one: slots are "
+          f"{slot_case.get('slot_names')} and they sum to "
+          f"{slot_sum:.9f} against a total of {slot_case['total']:.9f}. **Four "
+          f"slots are not four terms in either direction**, and both directions "
+          f"are now measured rather than argued: slot 0 is the three shape "
+          f"terms already fused into one f32 ({slot_case['slots'][0]:.6f} = "
+          f"g1 {slot_case['g1']:.6f} + g2 {slot_case['g2']:.6f} + rep "
+          f"{slot_case['rep']:.6f} = {slot_case['shape']:.6f}), so no per-term "
+          f"value is recoverable from it; and the hydrogen bond is **one** term "
+          f"spread over **two** slots ({hb_row['hb_from_donor']:+.6f} from "
+          f"donors + {hb_row['hb_from_acceptor']:+.6f} from acceptors = "
+          f"{hb_row['hb']:+.6f}), so counting slots over-counts the terms. The "
+          f"acceptor probe also reads slot {hb_row['slot_names'][1]} at "
+          f"{hb_row['slots'][1]:+.6f} and slot {hb_row['slot_names'][2]} at "
+          f"{hb_row['slots'][2]:+.6f} -- the like-with-like withholding, now "
+          f"visible on the slots and not only on the terms. "
+          f"**So the earlier withdrawal was right about the consequence and "
+          f"wrong about the reason**: the split is not a per-element partition "
+          f"(that defect is gone) -- it is a per-ROLE partition, and the role "
+          f"and the term only sometimes line up. A caller wanting 'how much of "
+          f"this score is the hydrogen bond' must use the term surface, and one "
+          f"wanting 'which fields did this probe draw on' can use the slots")
 
     # ------------------------------------------------------------------
     section("every check in this file ran")

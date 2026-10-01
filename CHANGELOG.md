@@ -13,6 +13,103 @@ The project is pre-1.0. The `0.x` line is where the interfaces still move.
 
 ### Added
 
+- **The workbench now shows where a pose's energy came from.** A new *pose energy
+  breakdown* panel lists the five weighted terms for the selected pose, the sum of
+  them, the production path's intermolecular value, the intramolecular scale, the
+  pose's own total and the out-of-box penalty. Term names are the ones
+  `docs/SCORING.md` uses; the engine's own keys (`g1`, `g2`, `rep`, `hb`, `hyd`)
+  are in the tooltips, so a reader can get back to the source.
+  - **Every number comes from the one engine call.** Nothing is recomputed in
+    Python, and the caption says so, because a decomposition that is weighted
+    twice is a common and invisible mistake.
+  - **A term too small for four decimals is printed in exponent form**, so a
+    non-zero term is never displayed as `0`. A mutation that lowers the exponent
+    threshold prints `-1e-30` as `-0.0000` and three checks go red.
+  - **The pose that is selected is the pose that is described.** The gate proves
+    this by asking the engine a **second, independent time** for that pose's
+    numbers and comparing — not by comparing the panel against its own evaluator,
+    which would be a tautology. A mutation that always displays the first pose
+    is caught by six checks.
+  - **Honest limit:** the decomposition is keyed on the conformation vector, so it
+    exists for an in-memory run. A pose loaded from a file has only coordinates,
+    and the panel explains that rather than displaying the previous pose's
+    numbers.
+
+- **Selecting a pose now frames the pose instead of the search.** Clicking a row in
+  the pose table moves the camera to the pose **plus every receptor atom it is in
+  contact with**, and nothing else. The contacting atoms come along because the
+  overlays are lines drawn between exactly those two sets — a framing that kept the
+  pose and dropped its partners would leave every line pointing off the edge. The
+  search box and the site volume are deliberately out: all poses came out of that
+  one cube and sit in that one cloud, so framing either answers "where did the
+  engine look", at the scale that made the pose unreadable. Clicking a site still
+  does that.
+  - **Measured across all nine poses of the sample:** the pose's share of the frame
+    goes from **0.12% to 2.57%** (1.66–3.93% spread, a 12.5× improvement at the
+    median), the contacting receptor's from 5.57% to 8.01%, and the contact overlay
+    from **1 108 to 8 700 px** (7.9×) — the overlay is the deliverable of a
+    selection.
+  - **The site cloud steps aside for a pose selection.** It is drawn with depth
+    testing off and covers 9× the pose's footprint, and with it on, the pose is not
+    findable in the screenshot at all. This is the project's own measurement
+    deciding it: fading the cloud changes nothing, only removing it does.
+  - **The selected pose gets one colour, and it is not an element colour.** The
+    previous rule gave the pose element colours whenever the contact overlay was
+    off, and measurement says that is why nobody could find it: on the pose's own
+    23 092 px, its chroma median sat at the **60th percentile of the receptor's own
+    chroma distribution** — *inside* the protein's spread, not outside it. A
+    brightness or rim highlight was rejected for a concrete reason: one shader
+    lights and fogs both populations, so a highlight moves a pixel *along* the lit
+    surface and cannot move it out of the distribution. An object covering 2.5% of
+    the frame needs a difference in kind. The pose is now drawn in the project's
+    existing `COLOR_BEST_POSE`, and the discriminator is **hue direction, not
+    chroma**: 99.9% of its chromatic pixels are greener than both red and blue,
+    against 13.6% for the receptor. Chroma alone only reached the 80th percentile,
+    because a protein has coloured atoms of its own.
+    - **Given up, deliberately: element identity on the selected pose**, in every
+      representation, whenever a pose is selected. It is still readable in the
+      contact table and in the ligand view.
+    - The guard discriminates in both directions. Reverting to element colours
+      gives a margin of **−6.8%**; painting the *whole scene* the pose's colour
+      gives **+0.2%**, which an absolute floor alone would have passed; restored,
+      **+77.3%**.
+  - **It rejected a threshold that was standing in for the wrong question.** The
+    "receptor must occupy at least 10% of the frame" floor failed on **eight of the
+    nine poses** (measured spread 5.18%–12.13%, median 7.93%) — a receptor's share
+    is a fact about how much protein surrounds a given pose, not about the framing.
+    The question it proxied is now asked directly, by a containment bound over the
+    projected fill (0.72–0.82 for all nine, required inside the frame), which
+    answers *yes* on all eight poses the old floor rejected, including the worst
+    one at 5.18%. That makes the new bound more **specific**, not strictly
+    stronger: the two bound different quantities and no subset relation between
+    them is claimed.
+  - **Three instruments were wrong before the measurement was.** The camera fit
+    ignored perspective, so a pose that projected long along the view axis reached
+    `|ndc| 3.89` — outside the very frame built to contain it. The screenshot
+    helper looped `processEvents`, which does not advance a wall-clock `QTimer`, so
+    **up to 75% of the frame differed between two identical grabs** while the
+    camera moved. Two assertions sampled values the sampler structurally could not
+    observe. Fixed, and the noise floor is now 0.000%.
+
+- **`precalculate_terms()` and `score_conformation_terms()` expose the score
+  term by term.** `TermBreakdown` reports each contribution separately, so a
+  conformer's energy can be checked without re-deriving the function. This exists
+  because a single number cannot be falsified — the `scoring_cross_check` work
+  needed each term addressable, and so does anyone reading a ranking and asking
+  which term produced it.
+
+- **Pose files now declare their own connectivity.** PDBQT model output carries
+  `REMARK OD_NBODS` and `REMARK OD_BOND` records, so a reader can recover the
+  bonded topology from the file instead of inferring it from coordinates. Torsion
+  records were already declared; the bond graph was the remaining piece a consumer
+  had to guess.
+
+- **A cartoon representation that actually draws a cartoon, and a secondary
+  structure derived from the backbone rather than asserted.** Both are new
+  representation modes with their own gates, and the representation names were
+  renamed to match what they draw — an earlier name promised a representation it
+  did not implement, which is its own kind of defect.
+
 - **`scripts/scoring_cross_check.py` cross-checks the engine's scoring against
   the project's own written specification.** It is deliberately **not** a
   cross-validation against Vina, and the file says why at the top: the engine is

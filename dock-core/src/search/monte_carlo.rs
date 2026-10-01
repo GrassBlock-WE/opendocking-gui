@@ -85,6 +85,43 @@ pub struct Pose {
     pub coords: Vec<Vec3>,
     /// Symmetry-corrected RMSD to the best pose, if computed.
     pub rmsd: Option<f64>,
+    /// The analytic gradient of the reported energy with respect to the degrees
+    /// of freedom, at `conf`, when it was measured.
+    ///
+    /// Empty means **not measured**, not zero. A pose built by anything other
+    /// than the search -- a fixture, a future reader of a file on disk --
+    /// carries nothing here, and a consumer has to be able to tell that apart
+    /// from a pose that genuinely sits at a stationary point. Ask
+    /// [`Pose::measured_gradient`] rather than reading this vector's length.
+    ///
+    /// When present the length is `6 + num_torsions`, one entry per degree of
+    /// freedom, and the values are exactly what
+    /// [`ScoringContext::evaluate`](crate::search::ScoringContext::evaluate)
+    /// returns at `conf`.
+    ///
+    /// What this is **not**: the gradient the optimiser finished on. A reported
+    /// pose is a clustering representative, and the local search that proposed
+    /// it ended on a different iterate, so this number describes the pose that
+    /// was reported and not the path that produced it. It is the right input for
+    /// asking whether *this* point is stationary, and it is the only question it
+    /// can answer.
+    pub gradient: Vec<f64>,
+}
+
+impl Pose {
+    /// The gradient at this pose's conformation, or `None` when it was not
+    /// measured.
+    ///
+    /// A method rather than a bare read of the field because "absent" and "all
+    /// zeros" are different answers and a consumer should not have to know
+    /// which one a given producer meant.
+    pub fn measured_gradient(&self) -> Option<&[f64]> {
+        if self.gradient.is_empty() {
+            None
+        } else {
+            Some(&self.gradient)
+        }
+    }
 }
 
 /// Run the iterated local search.
@@ -131,7 +168,7 @@ pub fn search(
         .into_par_iter()
         .map(|w| {
             let mut rng = rand::rngs::StdRng::seed_from_u64(
-                base_seed ^ (w as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15),
+                base_seed ^ (w as u64).wrapping_mul(super::WALK_SEED_STRIDE),
             );
             run_walk(ligand, maps, scoring, config, &mut rng, box_)
         })
@@ -210,7 +247,13 @@ fn run_walk(
 
 /// Build a [`Pose`] from a conformation, capturing coordinates and the split.
 pub(crate) fn pose_from(ctx: &mut ScoringContext<'_>, conf: Conformation, energy: f64) -> Pose {
-    let (breakdown, _) = ctx.evaluate_full(&conf);
+    // The gradient used to be computed here and thrown away, because the only
+    // caller wanted the energy half of the same evaluation. It is now carried,
+    // and carrying it costs nothing at all: energy and gradient come from one
+    // pass, so this is the same number the pose reports, made available to
+    // whoever wants to check the pose rather than only to the search that
+    // produced it.
+    let (breakdown, gradient) = ctx.evaluate_full(&conf);
     let coords = ctx.current_coords().to_vec();
     Pose {
         conf,
@@ -219,6 +262,7 @@ pub(crate) fn pose_from(ctx: &mut ScoringContext<'_>, conf: Conformation, energy
         intramolecular: breakdown.intramolecular,
         coords,
         rmsd: None,
+        gradient,
     }
 }
 

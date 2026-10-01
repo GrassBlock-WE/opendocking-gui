@@ -40,12 +40,12 @@
 use std::sync::Arc;
 
 use dock_core::docking::{dock, DockingConfig, DockingResult, SearchMode};
-use dock_core::grid::{GridBox, GridMaps};
+use dock_core::grid::{GridBox, GridMaps, MapSlot, TermMaps};
 use dock_core::kinematics::Conformation;
 use dock_core::ligand::Ligand;
 use dock_core::pdbqt::{parse_pdbqt, ParsedStructure};
 use dock_core::receptor::Receptor;
-use dock_core::scoring::{ScoringFunction, VinaScoring};
+use dock_core::scoring::{probe_term_mask, ScoringFunction, VinaScoring};
 use dock_core::search::ScoringContext;
 use dock_core::types::{Atom, Element, Molecule};
 use numpy::{
@@ -209,6 +209,27 @@ impl PyReceptor {
             .precalculate(&box_.inner, &sc, spacing)
             .map_err(to_py_err)?;
         Ok(PyGridMaps {
+            inner: Arc::new(maps),
+        })
+    }
+
+    /// Precalculate the per-term maps: one field per Vina term, over the same
+    /// geometry [`Self::precalculate`] would use.
+    ///
+    /// Kept separate from [`Self::precalculate`] because it costs 1.5× the memory
+    /// and answers a question the docking path never asks. Use it to ask *why* a
+    /// pose scored what it scored; use `precalculate` to dock.
+    #[pyo3(signature = (box_, scoring = "vina".to_string(), spacing = 0.375))]
+    fn precalculate_terms(
+        &self,
+        box_: &PyGridBox,
+        scoring: String,
+        spacing: f64,
+    ) -> PyResult<PyTermMaps> {
+        let sc = scoring_from_name(&scoring)?;
+        let maps = TermMaps::precalculate(&self.inner.molecule, &box_.inner, &sc, spacing, 0)
+            .map_err(to_py_err)?;
+        Ok(PyTermMaps {
             inner: Arc::new(maps),
         })
     }
@@ -610,6 +631,35 @@ impl PyDockingResults {
         ))
     }
 
+    /// The gradient of pose `index`'s own energy, or `None` when it was not
+    /// measured.
+    ///
+    /// This is the number the search already computed at this conformation and
+    /// discarded, made readable. It is the input to "is *this* point a
+    /// stationary point of the field the engine scored", which a caller
+    /// otherwise cannot answer without going back to the engine with the
+    /// ligand, the maps and the conformation.
+    ///
+    /// It is **not** the gradient the optimiser finished on: a reported pose is
+    /// a clustering representative, and the local search that proposed it ended
+    /// on a different iterate. So this answers a question about the pose and
+    /// not about the search that found it.
+    ///
+    /// `None` and a zero vector are different answers and the difference is kept:
+    /// a zero gradient says the pose is stationary, and reporting that for a
+    /// pose nobody measured would be the most damaging wrong answer available.
+    ///
+    /// A plain method and not a `#[getter]`, like `pose_conformation` and
+    /// `pose_coords`: a getter takes no arguments, and this one is per-pose.
+    fn pose_gradient(&self, index: usize) -> PyResult<Option<Vec<f64>>> {
+        let pose = self
+            .result
+            .poses
+            .get(index)
+            .ok_or_else(|| PyValueError::new_err(format!("pose index {index} out of range")))?;
+        Ok(pose.measured_gradient().map(|g| g.to_vec()))
+    }
+
     /// Every pose stacked into an `(n_poses, n_atoms, 3)` array.
     fn all_pose_coords<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray3<f64>>> {
         let np = self.result.poses.len();
@@ -871,6 +921,234 @@ fn score(
     Ok(ctx.evaluate(&conf))
 }
 
+// ---------------------------------------------------------------------------
+// TermMaps
+// ---------------------------------------------------------------------------
+
+/// A second tabulation of the same receptor, carrying one field per Vina term.
+///
+/// # Why this is a separate object
+///
+/// The production map stores `g1`, `g2` and `rep` already summed and rounded
+/// into one `f32` (`Shape`), so the three cannot be recovered from it. This
+/// keeps them apart, at 1.5× the memory of the production map, and is built on
+/// demand — the docking path never allocates one. See
+/// [`dock_core::scoring`] for where the weights are applied.
+///
+/// # Units and the weight-application point
+///
+/// Every value it yields is in **kcal/mol** and is **already weighted**. The
+/// Vina weights are multiplied in while the map is tabulated, not when a
+/// conformation is scored; the only multiplier still applied at scoring time is
+/// the 0/1 per-slot *class mask*, which selects which fields a probe reads and
+/// is not a weight. Multiplying by a weight again would double-count it.
+#[pyclass(name = "TermMaps", module = "opendocking._dockpy")]
+pub struct PyTermMaps {
+    inner: Arc<TermMaps>,
+}
+
+#[pymethods]
+impl PyTermMaps {
+    /// Grid dimensions `[nx, ny, nz]`.
+    #[getter]
+    fn dims(&self) -> [usize; 3] {
+        self.inner.dims()
+    }
+
+    /// Grid spacing in Ångström.
+    #[getter]
+    fn spacing(&self) -> f64 {
+        self.inner.spacing()
+    }
+
+    /// Number of tabulated grid points.
+    #[getter]
+    fn num_points(&self) -> usize {
+        self.inner.dims()[0] * self.inner.dims()[1] * self.inner.dims()[2]
+    }
+
+    /// Approximate memory footprint, in megabytes.
+    #[getter]
+    fn memory_mb(&self) -> f64 {
+        (self.inner.data_len() * 4) as f64 / (1024.0 * 1024.0)
+    }
+
+    /// The box these maps cover.
+    #[getter]
+    fn box_(&self) -> PyGridBox {
+        PyGridBox {
+            inner: self.inner.grid_box(),
+        }
+    }
+
+    /// The only backend that can produce a decomposition from these maps.
+    ///
+    /// Read from the engine's own associated constant — `TermMaps::BACKEND` —
+    /// and not spelled out here, so this cannot disagree with the type it
+    /// describes. There is one variant and the reason there is one is written
+    /// at the enum: the WGSL entry point takes a `GridMaps` and there is no
+    /// overload, no generic and no trait through which a `TermMaps` could
+    /// reach a device, so a `TermMaps` is 60 floats per point against a
+    /// kernel hard-coded to the production 40.
+    ///
+    /// The value is lower-cased from the Rust variant name, which is how the
+    /// `backend` key of `score_conformation_terms` is spelled too. Spelling
+    /// the string in two places would be a duplication; deriving both from the
+    /// same enum means a second variant would move them together or neither.
+    #[getter]
+    fn backend(&self) -> String {
+        format!("{:?}", TermMaps::BACKEND).to_lowercase()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "TermMaps(dims={:?}, spacing={})",
+            self.inner.dims(),
+            self.inner.spacing()
+        )
+    }
+}
+
+/// The per-term decomposition of one conformation's intermolecular energy,
+/// plus the numbers it has to be consistent with.
+///
+/// Returns a dict with:
+///
+/// | key | meaning |
+/// |-----|---------|
+/// | `g1`, `g2`, `rep`, `hb`, `hyd` | the five Vina terms, kcal/mol, **already weighted** |
+/// | `hb_from_donor`, `hb_from_acceptor` | the two halves of `hb`, by receptor polarity |
+/// | `terms_total` | the five terms added together |
+/// | `intermolecular` | what the **production** map path returns for the same pose |
+/// | `intramolecular` | the production path's ligand-internal half, before scaling |
+/// | `total` | the production path's total, `intermolecular + scale·intramolecular` |
+/// | `out_of_box_penalty` | the out-of-box penalty, if any atom left the grid |
+/// | `slots` | the four production map slots, `[shape, hb_donor, hb_acc, hyd]` |
+///
+/// # The identity this exists to support
+///
+/// `terms_total` must equal `intermolecular` up to the `f32` storage rounding
+/// described on [`dock_core::grid::TermMaps`]; the engine does not assert that
+/// here, and neither should a caller, because a caller comparing them is exactly
+/// the independent check that the identity is real.
+///
+/// `slots` is the **per-slot** decomposition, a different question from the
+/// per-term one: slot 0 is the three shape terms fused, and the hydrogen bond is
+/// one term spread over two slots. Four slots are not four terms in either
+/// direction.
+#[pyfunction]
+#[pyo3(signature = (ligand, maps, term_maps, conformation, scoring = "vina".to_string()))]
+fn score_terms<'py>(
+    py: Python<'py>,
+    ligand: &PyLigand,
+    maps: &PyGridMaps,
+    term_maps: &PyTermMaps,
+    conformation: PyReadonlyArray1<'_, f64>,
+    scoring: String,
+) -> PyResult<Bound<'py, PyDict>> {
+    let sc = scoring_from_name(&scoring)?;
+    let conf = conformation_from(&ligand.inner, &conformation)?;
+
+    // The production path's own numbers, for the identity above.
+    let mut ctx = ScoringContext::new(&ligand.inner, &maps.inner, &sc);
+    let (breakdown, _) = ctx.evaluate_full(&conf);
+    let coords = ligand.inner.tree.coordinates(&conf);
+    let scale = sc.intramolecular_scale();
+
+    let masks: Vec<[bool; dock_core::scoring::TERM_FIELDS]> = ligand
+        .inner
+        .molecule
+        .atoms
+        .iter()
+        .map(probe_term_mask)
+        .collect();
+    let terms = term_maps
+        .inner
+        .conformation_terms(&ligand.inner.type_index, &masks, &coords);
+
+    // The per-slot reading of the production map at the same coordinates.
+    let mut slots = [0.0f64; dock_core::grid::MAPS_PER_TYPE];
+    for (i, p) in coords.iter().enumerate() {
+        if let Some(v) =
+            maps.inner
+                .interpolate_by_slot(ligand.inner.type_index[i], &ligand.inner.weights[i], *p)
+        {
+            for s in 0..dock_core::grid::MAPS_PER_TYPE {
+                slots[s] += v[s];
+            }
+        }
+    }
+
+    let d = PyDict::new(py);
+    d.set_item("g1", terms.gauss1)?;
+    d.set_item("g2", terms.gauss2)?;
+    d.set_item("rep", terms.repulsion)?;
+    d.set_item("hb", terms.hbond)?;
+    d.set_item("hyd", terms.hydrophobic)?;
+    d.set_item("hb_from_donor", terms.hbond_from_donor)?;
+    d.set_item("hb_from_acceptor", terms.hbond_from_acceptor)?;
+    d.set_item("shape", terms.shape())?;
+    d.set_item("terms_total", terms.terms_total())?;
+    d.set_item("intermolecular", breakdown.intermolecular)?;
+    d.set_item("intramolecular", breakdown.intramolecular)?;
+    d.set_item("total", breakdown.total(scale))?;
+    d.set_item("intramolecular_scale", scale)?;
+    d.set_item("out_of_box_penalty", terms.out_of_box_penalty)?;
+    // The backend, read from the engine's own field on the breakdown rather than
+    // inferred from which Python path produced this dict. The Rust docstring for
+    // `TermBreakdown::backend` promises a caller holding a breakdown can ask
+    // which backend produced it, and from Python that promise was false: the key
+    // simply was not here, so the only way to answer it was to reason about the
+    // call path, which is the thing the field exists to avoid.
+    //
+    // The value comes from `terms`, which is the `TermBreakdown` that
+    // `conformation_terms` returned -- not from `breakdown`, which is the
+    // production map's `EnergyBreakdown` and carries no backend at all. Those
+    // are two different structs that both decompose an energy, and only one of
+    // them knows what produced it.
+    //
+    // `TermBackend` has exactly one variant today, so this is not yet a
+    // *choice* between two answers -- but the whole point of putting it in the
+    // enum is that a second variant is a deliberate act, and a value that has to
+    // be reconstructed per language binding is one that will be forgotten the
+    // next time the enum grows.
+    d.set_item("backend", format!("{:?}", terms.backend).to_lowercase())?;
+    d.set_item("slots", slots.to_vec().into_pyarray(py).to_owned())?;
+    d.set_item(
+        "slot_names",
+        ["shape", "hb_from_donor", "hb_from_acceptor", "hydrophobic"],
+    )?;
+    let _ = MapSlot::ALL;
+    Ok(d)
+}
+
+/// Build a [`Conformation`] from a packed degree-of-freedom vector, validating
+/// both its length and its finiteness.
+///
+/// Shared by [`score_terms`] and [`conformation_coordinates`] so the two cannot
+/// disagree about what a valid conformation is.
+fn conformation_from(ligand: &Ligand, arr: &PyReadonlyArray1<'_, f64>) -> PyResult<Conformation> {
+    let a = arr.as_array();
+    let n_dof = 6 + ligand.num_torsions();
+    if a.len() != n_dof {
+        return Err(PyValueError::new_err(format!(
+            "conformation must have {n_dof} entries, got {}",
+            a.len()
+        )));
+    }
+    let conf = Conformation {
+        position: [a[0], a[1], a[2]],
+        orientation: [a[3], a[4], a[5]],
+        torsions: (0..ligand.num_torsions()).map(|t| a[6 + t]).collect(),
+    };
+    let mut flat = Vec::with_capacity(n_dof);
+    flat.extend_from_slice(&conf.position);
+    flat.extend_from_slice(&conf.orientation);
+    flat.extend_from_slice(&conf.torsions);
+    check_finite(&flat, "conformation")?;
+    Ok(conf)
+}
+
 /// Version of the engine, as a string.
 #[pyfunction]
 fn version() -> String {
@@ -949,11 +1227,13 @@ fn _dockpy(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyGridBox>()?;
     m.add_class::<PyReceptor>()?;
     m.add_class::<PyGridMaps>()?;
+    m.add_class::<PyTermMaps>()?;
     m.add_class::<PyLigand>()?;
     m.add_class::<PyDockingResults>()?;
     m.add_function(wrap_pyfunction!(dock_py, m)?)?;
     m.add_function(wrap_pyfunction!(evaluate_conformations, m)?)?;
     m.add_function(wrap_pyfunction!(score, m)?)?;
+    m.add_function(wrap_pyfunction!(score_terms, m)?)?;
     m.add_function(wrap_pyfunction!(version, m)?)?;
     m.add_function(wrap_pyfunction!(scoring_functions, m)?)?;
     m.add_function(wrap_pyfunction!(conformation_coordinates, m)?)?;

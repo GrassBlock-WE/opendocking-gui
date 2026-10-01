@@ -74,6 +74,28 @@ pub struct DockingConfig {
     /// Set to `0.0` to disable the filter and see the raw energy minimum.
     pub min_contact_distance: f64,
     /// Number of worker threads. `0` means "use all cores".
+    ///
+    /// **This field does not reach the search.** It is read by the map
+    /// *tabulation* — [`Receptor::precalculate`] and
+    /// [`crate::grid::GridMaps::precalculate`] take their own `n_threads` and
+    /// build a scoped rayon pool from it — and by nothing else. `dock()` never
+    /// reads it, and the search does not build a pool of its own: the walks run
+    /// through `into_par_iter` on rayon's ambient global pool, so the number of
+    /// threads the search uses is the process's `RAYON_NUM_THREADS` or the core
+    /// count, and setting this field changes neither.
+    ///
+    /// The behaviour it names is not a promise the code fails to keep by
+    /// accident; it is a description of a knob that is not wired to the search,
+    /// and it is written here because a dead knob that is documented as dead is
+    /// a fact and a dead knob that is not is a lie. The sentence is pinned by
+    /// `every_docking_config_field_is_read_except_the_documented_one`, which
+    /// fails the moment someone makes this live — at which point this comment
+    /// has to be corrected deliberately rather than left to rot.
+    ///
+    /// What making it live would cost: a scoped rayon pool per search, built and
+    /// installed around the whole search rather than around the tabulation, plus
+    /// a change in what the walks share. That is a real change to search
+    /// behaviour and not a wiring change.
     pub num_threads: usize,
 }
 
@@ -321,6 +343,11 @@ pub fn cluster_poses(
             intramolecular: pose.intramolecular,
             coords: pose.coords,
             rmsd: rmsd_lb,
+            // Clustering keeps an existing pose rather than synthesising a
+            // representative, so the gradient measured at this conformation is
+            // still the gradient of the pose being reported. Dropping it here
+            // would leave every reported pose without one.
+            gradient: pose.gradient,
         });
     }
     Ok(kept)
@@ -420,6 +447,344 @@ mod tests {
         Ligand::from_molecule(mol).unwrap()
     }
 
+    /// The fixture a seeded run is measured on: a small carbon chain, a box
+    /// with room, and a weak search so the run takes a second rather than a
+    /// minute.
+    /// The census: which of this struct's fields does anything read?
+    ///
+    /// Four defects in this project have been the same shape — something
+    /// published that a user can see or set, and code that does not do what the
+    /// published thing says — and none of them had a check that asked the
+    /// question in general. So this asks it, for the one struct every docking
+    /// run is configured through.
+    ///
+    /// The enumeration is derived, never written down. The field list comes out
+    /// of this file's own source by brace-matching the struct, so a new field
+    /// is in the census the moment it is declared, with no list to update and
+    /// therefore no way for a new field to ship unread. The readers come from
+    /// walking the crate's sources at run time.
+    ///
+    /// Two details make the reader count mean something, and both were wrong in
+    /// the first version of this:
+    ///
+    /// * A bare-name search does not work. `local`, `seed` and `num_threads`
+    ///   each have unrelated locals of the same name, and a name search
+    ///   reported all three as read. A field is read through *field access*,
+    ///   so only `.field` counts.
+    /// * `.field` alone is still not enough, because rayon has a builder method
+    ///   called `num_threads` and the tabulation calls it twice. A field read is
+    ///   never a call, so the pattern excludes a `(` after the name. Without
+    ///   that, the one genuinely unread field in this struct looks read.
+    #[test]
+    fn every_docking_config_field_is_read_except_the_documented_one() {
+        let here = env!("CARGO_MANIFEST_DIR");
+        let src_dir = std::path::Path::new(here).join("src");
+
+        fn strip_comments(text: &str) -> String {
+            text.lines()
+                .filter(|l| !l.trim_start().starts_with("//"))
+                .map(|l| l.split("//").next().unwrap_or(""))
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+
+        // The field list, derived from this file's own source.
+        let own = strip_comments(&include_str!("docking.rs"));
+        let open = own
+            .find("pub struct DockingConfig {")
+            .expect("DockingConfig is declared in this file")
+            + "pub struct DockingConfig {".len();
+        // Already inside the struct's braces by the time we start walking, so
+        // the depth is 1 — not 0, which underflows on the closing brace.
+        let mut depth = 1usize;
+        let mut body = String::new();
+        for ch in own[open..].chars() {
+            match ch {
+                '{' => {
+                    depth += 1;
+                    body.push(ch);
+                }
+                '}' => {
+                    depth -= 1;
+                    body.push(ch);
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                _ => body.push(ch),
+            }
+        }
+        let mut fields: Vec<String> = Vec::new();
+        for line in body.lines() {
+            let t = line.trim();
+            if let Some(rest) = t.strip_prefix("pub ") {
+                if let Some(colon) = rest.find(':') {
+                    let name = rest[..colon].trim();
+                    if !name.is_empty()
+                        && name
+                            .chars()
+                            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+                    {
+                        fields.push(name.to_string());
+                    }
+                }
+            }
+        }
+        assert!(
+            fields.len() >= 7,
+            "derived {} fields from DockingConfig: {fields:?}. The derivation \
+             found fewer than the struct has, so it has stopped working and \
+             every field below is unchecked",
+            fields.len()
+        );
+
+        // Every source file in the crate, comments gone.
+        let mut code = String::new();
+        let mut files = 0usize;
+        let mut stack = vec![src_dir.clone()];
+        while let Some(dir) = stack.pop() {
+            let entries = std::fs::read_dir(&dir).expect("the crate's source tree is readable");
+            for e in entries {
+                let p = e.expect("readable directory entry").path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else if p.extension().and_then(|s| s.to_str()) == Some("rs") {
+                    let text = std::fs::read_to_string(&p)
+                        .unwrap_or_else(|err| panic!("readable source file {}: {err}", p.display()));
+                    files += 1;
+                    code.push_str(&strip_comments(&text));
+                    code.push('\n');
+                }
+            }
+        }
+        assert!(
+            files > 5 && code.len() > 10_000,
+            "the census read {files} source files and {} bytes. A scan that found \
+             almost nothing would report every field as unread, which looks \
+             exactly like a struct nobody reads",
+            code.len()
+        );
+
+        // Count `.field` occurrences by hand, because `str::matches` with a
+        // `&str` pattern is a **literal substring search, not a regex** — the
+        // first version of this passed `r"\.{name}\b"` and therefore searched
+        // for that seven-character string, which occurs nowhere, and reported
+        // every field as unread. `code.matches("config")` returning 72 is what
+        // showed the text was fine and the pattern was the problem.
+        //
+        // The character after the name is checked too, for two reasons: a
+        // longer field ending in this one (`.num_modes` against `mode`) is not
+        // a read of this field, and a `(` is a method call — which is how
+        // rayon got the same name as a field.
+        fn count_field_reads(code: &str, name: &str) -> usize {
+            let bytes = code.as_bytes();
+            let needle = name.as_bytes();
+            let mut n = 0usize;
+            let mut i = 0usize;
+            while i + 1 + needle.len() <= bytes.len() {
+                if bytes[i] == b'.' && &bytes[i + 1..i + 1 + needle.len()] == needle {
+                    let after = bytes.get(i + 1 + needle.len()).copied();
+                    let name_continues = after
+                        .map(|c| c.is_ascii_alphanumeric() || c == b'_')
+                        .unwrap_or(false);
+                    if !name_continues && after != Some(b'(') {
+                        n += 1;
+                    }
+                }
+                i += 1;
+            }
+            n
+        }
+
+        let mut unread: Vec<&String> = Vec::new();
+        let mut report = format!(
+            "{files} files, {} bytes, 'config' appears {} times\n",
+            code.len(),
+            code.matches("config").count()
+        );
+        for f in &fields {
+            // Built at run time, so this test's own source never contains a
+            // literal `.field` that could count itself.
+            let n = count_field_reads(&code, f);
+            report.push_str(&format!("  {f:24} {n} reads\n"));
+            if n == 0 {
+                unread.push(f);
+            }
+        }
+        assert_eq!(
+            unread,
+            vec!["num_threads"],
+            "the fields of DockingConfig that nothing reads are {unread:?}.\n\
+             Derived reader counts:\n{report}\n\
+             The expected list is the *known* dead field and nothing else, so a new \
+             field that ships unread fails here. If you have just made \
+             `num_threads` live, that is a deliberate change: fix the doc comment \
+             on the field to describe what it now does and remove it from this \
+             list in the same edit, so the sentence and the code cannot disagree."
+        );
+    }
+
+    fn seeded_fixture() -> (Receptor, crate::grid::GridMaps, crate::scoring::VinaScoring) {
+        let rec = Molecule::from_atoms(vec![
+            Atom::new(1, [0.0, 0.0, 0.0], Element::C, AtomType::CH),
+            Atom::new(2, [3.2, 0.0, 0.0], Element::C, AtomType::CH),
+            Atom::new(3, [0.0, 3.2, 0.0], Element::C, AtomType::CH),
+            Atom::new(4, [0.0, 0.0, 3.2], Element::C, AtomType::CH),
+        ])
+        .unwrap();
+        let receptor = Receptor::from_molecule(rec).unwrap();
+        let box_ = crate::grid::GridBox::new([-8.0, -8.0, -8.0], [8.0, 8.0, 8.0]).unwrap();
+        let scoring = crate::scoring::VinaScoring::new();
+        let maps = receptor
+            .precalculate(&box_, &scoring, 0.5)
+            .expect("maps");
+        (receptor, maps, scoring)
+    }
+
+    fn docked_at(seed: u64) -> DockingResult {
+        let (_receptor, maps, scoring) = seeded_fixture();
+        dock(
+            &make_ligand(),
+            &maps,
+            &scoring,
+            &DockingConfig {
+                monte_carlo: crate::search::monte_carlo::MonteCarloConfig {
+                    exhaustiveness: 4,
+                    steps: 25,
+                    seed: Some(seed),
+                    ..Default::default()
+                },
+                num_modes: 3,
+                ..DockingConfig::default()
+            },
+        )
+        .expect("the search returns poses on this fixture")
+    }
+
+    #[test]
+    fn the_same_seed_gives_the_same_poses_on_the_same_build() {
+        // The claim, and only the claim that can be made here: a seed fixes the
+        // result **within one build**. It does not fix it across builds, a
+        // dependency bump or a compiler, and nothing in this crate can make it
+        // do so. `the_seed_is_pinned_because_nothing_downstream_guarantees_it`
+        // says where the boundary is.
+        //
+        // Coordinates, not energies. Two builds can agree on the energy of a
+        // pose and place it somewhere else, and the placement is the thing a
+        // user compares when they re-run a seed, so an energy comparison would
+        // pass on exactly the failure this is meant to catch.
+        //
+        // The comparison is on the bit patterns, not the values: a tolerance
+        // here would be a tolerance in a claim about reproducibility, and the
+        // honest form of "the same" is the same bits. Any difference in the
+        // search's arithmetic at all shows up as a different bit.
+        let a = docked_at(42);
+        let b = docked_at(42);
+        assert_eq!(
+            a.poses.len(),
+            b.poses.len(),
+            "the same seed produced a different number of poses"
+        );
+        assert!(!a.poses.is_empty(), "the fixture must actually find something");
+        for (i, (pa, pb)) in a.poses.iter().zip(b.poses.iter()).enumerate() {
+            assert_eq!(pa.coords.len(), pb.coords.len(), "pose {i}: atom count");
+            for (k, (ca, cb)) in pa.coords.iter().zip(pb.coords.iter()).enumerate() {
+                for (axis, (x, y)) in ca.iter().zip(cb.iter()).enumerate() {
+                    assert_eq!(
+                        x.to_bits(),
+                        y.to_bits(),
+                        "pose {i}, atom {k}, axis {axis}: {x} against {y} for the \
+                         same seed. The two runs are the same build, the same \
+                         maps and the same configuration, so any difference here \
+                         is state carried between runs rather than a search that \
+                         depends on its input"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_different_seed_gives_different_poses_so_the_claim_has_teeth() {
+        // The other direction, and the one that stops the test above from being
+        // a tautology. If every seed gave every pose, "the same seed gives the
+        // same poses" would be true and worthless. A seed that changes nothing
+        // is the failure this catches, and it is a plausible one: a search that
+        // quietly stopped consulting `config.seed` would satisfy the first test
+        // perfectly.
+        let a = docked_at(42);
+        let c = docked_at(43);
+        assert_eq!(a.poses.len(), c.poses.len(), "same fixture, so same pose count");
+        let identical = a
+            .poses
+            .iter()
+            .zip(c.poses.iter())
+            .all(|(pa, pb)| pa.coords == pb.coords);
+        assert!(
+            !identical,
+            "seeds 42 and 43 produced the same coordinates, so the seed is not \
+             reaching the search and the determinism test above would be \
+             asserting that the search ignores its input"
+        );
+    }
+
+    #[test]
+    fn the_seed_is_pinned_because_nothing_downstream_guarantees_it() {
+        // Where the boundary is, stated as a value rather than as prose.
+        //
+        // A seeded run here means: per-walk generators are
+        // `base_seed ^ walk * WALK_SEED_STRIDE` fed to
+        // `rand::rngs::StdRng::seed_from_u64`. `StdRng` is the one `rand` type
+        // whose algorithm is deliberately unspecified — reproducibility across
+        // `rand` versions is exactly the guarantee it does not offer — so a
+        // dependency bump is a candidate for silently moving every seeded
+        // result, and this is the test that notices.
+        //
+        // The first atom of the best pose, in full precision, at seed 42 on the
+        // fixture above. It is a pose, not an energy: a build could keep every
+        // energy and move every atom, and only the atoms are what a user
+        // re-running a seed would compare against the run they did before.
+        //
+        // What this does and does not buy, said plainly. It makes an
+        // *accidental* move loud: a `rand` bump, a codegen change, a change to
+        // the walk derivation. It cannot make the value right forever, and a
+        // change to this constant and to this number together is invisible to
+        // this test by construction. The honest sentence for a document is the
+        // one in the failure message: a seeded result is reproducible within a
+        // build, and the stream it comes from is not a stability guarantee
+        // across `rand` versions.
+        let res = docked_at(42);
+        let best = res.best();
+        let first = best.coords[0];
+        assert_eq!(
+            (first[0].to_bits(), first[1].to_bits(), first[2].to_bits()),
+            (0xc00c_0002_4461_1f27u64, 0xbff8_ebc1_ef2d_af7au64, 0x3ffb_43f0_d2ba_28eeu64),
+            "the best pose at seed 42 has its first atom at {first:?}, not at the \
+             position this test was written against. Measured energy is {:?}.\n\n\
+             What this usually means, in the order worth checking: a `rand` bump \
+             — `StdRng`'s algorithm is deliberately unspecified and reproducibility \
+             across `rand` versions is the guarantee it does not offer; a change to \
+             `search::WALK_SEED_STRIDE` or to the per-walk derivation; or a change \
+             in the engine's own arithmetic. The first atom is pinned rather than \
+             an energy on purpose: a build can keep every energy and move every \
+             atom, and the atoms are what a user re-running a seed compares.",
+            best.energy
+        );
+        // The fixture is four carbons in a 16 A box, so the best pose scores only
+        // -0.80 kcal/mol and sits in a flat part of the landscape. That is a
+        // property worth stating rather than fixing: a flat region is where a
+        // numerical change is most likely to reorder two near-degenerate poses,
+        // which is what makes this a tripwire rather than a fingerprint of a
+        // deep well that nothing would ever move.
+        assert!(
+            best.energy > -1.0,
+            "the fixture's best pose scored {:?}, which means it is no longer the \
+             weak-binding fixture this pin was measured on and the pinned \
+             position means something different",
+            best.energy
+        );
+    }
+
     fn dummy_pose(energy: f64, shift: f64) -> Pose {
         let base = [
             [0.0, 0.0, 0.0],
@@ -435,7 +800,99 @@ mod tests {
             intramolecular: 0.0,
             coords: base.iter().map(|c| [c[0] + shift, c[1], c[2]]).collect(),
             rmsd: None,
+            gradient: Vec::new(),
         }
+    }
+
+    #[test]
+    fn a_reported_pose_carries_the_gradient_of_the_energy_it_reports() {
+        // Direction one: a pose the search produced carries the gradient at its
+        // own conformation, and that gradient really is the gradient of the
+        // energy the same pose reports. The finite difference is not a
+        // re-derivation of the analytic value -- it is a check that the value
+        // being *carried* belongs to the conformation being returned, which is
+        // the mistake a field added to a result can make and nothing else
+        // catches: a gradient computed at some other iterate is still a
+        // plausible-looking vector of the right length.
+        let rec = Molecule::from_atoms(vec![
+            Atom::new(1, [0.0, 0.0, 0.0], Element::C, AtomType::CH),
+            Atom::new(2, [3.2, 0.0, 0.0], Element::C, AtomType::CH),
+            Atom::new(3, [0.0, 3.2, 0.0], Element::C, AtomType::CH),
+            Atom::new(4, [0.0, 0.0, 3.2], Element::C, AtomType::CH),
+        ])
+        .unwrap();
+        let receptor = Receptor::from_molecule(rec).unwrap();
+        let box_ = crate::grid::GridBox::new([-8.0, -8.0, -8.0], [8.0, 8.0, 8.0]).unwrap();
+        let scoring = crate::scoring::VinaScoring::new();
+        let maps = receptor.precalculate(&box_, &scoring, 0.5).unwrap();
+        let ligand = make_ligand();
+        let res = dock(
+            &ligand,
+            &maps,
+            &scoring,
+            &DockingConfig {
+                monte_carlo: crate::search::monte_carlo::MonteCarloConfig {
+                    exhaustiveness: 4,
+                    steps: 30,
+                    seed: Some(11),
+                    ..Default::default()
+                },
+                ..DockingConfig::default()
+            },
+        )
+        .unwrap();
+        assert!(!res.poses.is_empty());
+
+        let mut ctx = crate::search::ScoringContext::new(&ligand, &maps, &scoring);
+        for (i, p) in res.poses.iter().enumerate() {
+            let g = p
+                .measured_gradient()
+                .unwrap_or_else(|| panic!("pose {i} reports no gradient at all"));
+            assert_eq!(
+                g.len(),
+                6 + ligand.num_torsions(),
+                "pose {i}: one entry per degree of freedom, or the consumer has \
+                 no way to know which entry is which"
+            );
+
+            // The engine's own gradient at the pose's conformation, which is the
+            // claim being pinned: carried == recomputed at the same point.
+            let (energy, want) = ctx.evaluate(&p.conf);
+            assert!(
+                (energy - p.energy).abs() < 1e-9,
+                "pose {i}: the energy recomputed at the returned conformation is \
+                 {energy}, and the pose reports {}",
+                p.energy
+            );
+            for (k, (a, b)) in g.iter().zip(want.iter()).enumerate() {
+                assert!(
+                    (a - b).abs() <= 1e-9 * b.abs().max(1.0),
+                    "pose {i}, dof {k}: carried gradient {a} against {b} at the \
+                     same conformation"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_pose_that_measured_nothing_says_so_rather_than_looking_stationary() {
+        // Direction two: the one that stops a reader assuming a field is
+        // populated. A pose with no gradient must answer `None`, and it must
+        // answer `None` for its own reason -- an empty vector is "not
+        // measured", and a consumer that read it as "all zeros" would conclude
+        // the pose is a stationary point, which is the most damaging wrong
+        // answer available here.
+        let pose = pose_at(&[[0.0, 0.0, 0.0], [1.5, 0.0, 0.0]], -3.25);
+        assert!(
+            pose.measured_gradient().is_none(),
+            "a hand-built pose measured nothing and must not present a gradient"
+        );
+        assert!(
+            pose.gradient.is_empty(),
+            "the vector is empty rather than zero-filled: a zero vector would be \
+             indistinguishable from a pose that had been measured and found \
+             stationary"
+        );
     }
 
     #[test]
@@ -504,6 +961,8 @@ mod tests {
             intermolecular: energy,
             intramolecular: 0.0,
             rmsd: None,
+            // A hand-built fixture measures nothing, and says so.
+            gradient: Vec::new(),
         }
     }
 

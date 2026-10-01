@@ -45,6 +45,19 @@ __all__ = [
     "BACKBONE_BONDS",
     "SIDECHAIN_BONDS",
     "KNOWN_RESIDUES",
+    # Secondary structure. Public because the viewer draws its ribbon from
+    # these and a caller has to be able to ask the same question the drawing
+    # asked: `MoleculeView.backbone_ribbon` calls `secondary_structure`, so an
+    # unexported one is a product behaviour with no supported way to inspect it.
+    "secondary_structure",
+    "geometric_secondary_structure",
+    "backbone_hydrogen_bonds",
+    "dihedral",
+    "SS_RANGES",
+    "SS_MIN_SHEET",
+    "HELIX_TURNS",
+    "HBOND_STRICT",
+    "HBOND_LOOSE",
 ]
 
 #: Covalent radii in ångström, used only to audit perceived bonds.

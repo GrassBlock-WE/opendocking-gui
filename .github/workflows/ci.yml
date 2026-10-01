@@ -80,8 +80,10 @@ jobs:
         include:
           - features: default
             cargo: ""
+            all_features: "convergence-budget"
           - features: gpu
             cargo: "--features gpu"
+            all_features: "gpu,convergence-budget"
     steps:
       - uses: actions/checkout@v4
 
@@ -117,6 +119,21 @@ jobs:
 
       - name: Unit tests
         run: cargo test --workspace --locked ${{ matrix.cargo }}
+
+      # What four times the search budget actually buys. `cargo test` above
+      # cannot run this target: it sits behind a *named* feature, so the opt-in
+      # is the word "convergence-budget" and it is spelled out here. That is the
+      # point -- an `#[ignore]`d test would have kept the cost at zero and the
+      # count honest-looking, and nothing would have gone red when it stopped
+      # running. Deleting this step is a visible deletion, not a silent change
+      # of behaviour. Release profile, because the same target costs 419 s
+      # unoptimised and about 9 s optimised; the measurement is the product, not
+      # the wall clock.
+      - name: What a larger search budget buys (named feature, release profile)
+        run: >-
+          cargo test --locked --release
+          --features ${{ matrix.all_features }}
+          --test convergence_budget
 
       # Zero tolerance, in both feature configurations. The matrix already
       # covers that; a separate job would just duplicate it.

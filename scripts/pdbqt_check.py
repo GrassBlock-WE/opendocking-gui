@@ -52,6 +52,9 @@ Run:  python scripts/pdbqt_check.py
 
 from __future__ import annotations
 
+import importlib
+import importlib.metadata
+import importlib.util
 import math
 import re
 import sys
@@ -166,6 +169,104 @@ def _energy_of(lines: list[str]) -> float | None:
     return None
 
 
+def meeko_diagnosis() -> tuple[bool, str]:
+    """Is meeko usable here, and if not, **which module** is missing.
+
+    # Why this exists instead of a bare `except ImportError`
+
+    A bare handler reported ``meeko is not importable (ModuleNotFoundError)``
+    and told the reader to install meeko. On the CI runner meeko **was**
+    installed -- the step log reads ``Successfully installed ... meeko-0.8.0`` --
+    so the message sent the person trying to fix it to install the one thing
+    they already had. `ModuleNotFoundError` carries the name of the module that
+    was actually missing in its `.name` attribute, and the bare handler threw
+    that field away, which is the only piece of evidence the exception holds.
+
+    So the question is no longer "is meeko importable" but "which import failed",
+    and the two cases need different sentences:
+
+    * **meeko itself is absent** -- `.name` is ``"meeko"``. Install meeko.
+    * **meeko is installed and one of *its* imports is absent** -- `.name` is
+      something else, and meeko is on disk. Install *that* module.
+
+    The second is not hypothetical. meeko declares **no** `Requires-Dist` at
+    all, so pip resolves nothing for it and every runtime import it makes is
+    undeclared. Measured on meeko 0.7.1, `import meeko` pulls in
+    ``gemmi, numpy, pandas, prody, rdkit, scipy`` and a TOML reader at import
+    time; none of those is a declared dependency, and a runner that installs
+    meeko alone gets a package that cannot be imported. That is a packaging
+    fact about meeko, not a mistake in this file, and the only correct response
+    to it is to install the named module rather than to re-install meeko.
+
+    The three questions are asked in the order that discriminates them, and the
+    first two are asked *without executing meeko*, so a broken meeko cannot stop
+    the diagnosis from describing it.
+    """
+    # 1. Is the distribution recorded at all? Read from metadata, so it works
+    #    even when importing the module would fail.
+    try:
+        version = importlib.metadata.version("meeko")
+    except importlib.metadata.PackageNotFoundError:
+        return False, (
+            "meeko is NOT installed: there is no installed distribution named "
+            "'meeko' for this interpreter. Install it (pip install meeko)."
+        )
+    except Exception as exc:  # noqa: BLE001 - the message is the evidence
+        return False, (
+            f"meeko's installed distribution could not be read "
+            f"({type(exc).__name__}: {exc}), so its version is unknown."
+        )
+
+    # 2. Is the module itself on this interpreter's path? `find_spec` locates
+    #    the file without executing it, which separates "installed but not on
+    #    this path" from "installed and merely broken on import".
+    try:
+        spec = importlib.util.find_spec("meeko")
+    except Exception as exc:  # noqa: BLE001 - a broken meeko raises here
+        return False, (
+            f"meeko {version} IS installed, but finding its module raised "
+            f"{type(exc).__name__}: {exc}"
+        )
+    if spec is None:
+        return False, (
+            f"meeko {version} IS installed as a distribution, but no importable "
+            f"module 'meeko' is on this interpreter's sys.path. That means the "
+            f"wrong interpreter or a split install path, not a missing package: "
+            f"check which python is running ({sys.executable})."
+        )
+
+    # 3. Actually import it. This is where a missing *dependency* surfaces, and
+    #    `.name` is the one field that says which dependency.
+    try:
+        importlib.import_module("meeko")
+    except ModuleNotFoundError as exc:
+        missing = exc.name or "<not reported by the exception>"
+        if missing == "meeko" or missing.startswith("meeko."):
+            return False, (
+                f"meeko {version} IS installed at {spec.origin}, but importing it "
+                f"raised ModuleNotFoundError for {missing!r} -- meeko is "
+                f"present and still incomplete. This is a broken meeko install, "
+                f"not a missing one; re-installing meeko itself is the fix."
+            )
+        return False, (
+            f"meeko {version} IS installed and importable as a file "
+            f"({spec.origin}), but `import meeko` failed because ITS OWN "
+            f"dependency {missing!r} is not installed. Do NOT install meeko -- it "
+            f"is already there. Install {missing!r} instead. meeko declares no "
+            f"`Requires-Dist` at all, so pip installed nothing on its behalf and "
+            f"every import it makes is undeclared. To see the full set meeko "
+            f"pulls in, run: python -c \"import meeko, sys; "
+            f"print(sorted(m for m in sys.modules if '.' not in m))\""
+        )
+    except Exception as exc:  # noqa: BLE001 - the message is the evidence
+        return False, (
+            f"meeko {version} IS installed at {spec.origin}, but importing it "
+            f"raised {type(exc).__name__}: {exc} -- not a missing module, so "
+            f"there is nothing to install."
+        )
+    return True, f"meeko {version} at {spec.origin}"
+
+
 def main() -> int:
     # ------------------------------------------------------------------
     section("the module's column constants, against the table written here")
@@ -204,20 +305,31 @@ def main() -> int:
     # the count is the same would be the "check that cannot fail" mistake wearing
     # a different hat. Failing loudly puts the requirement in front of whoever
     # wires CI.
-    try:
-        import meeko  # noqa: F401
-    except Exception as exc:  # pragma: no cover - depends on the environment
-        print(f"  meeko is not importable ({type(exc).__name__}), so the "
-              f"third-party half of this check cannot run.")
-        print("  Install meeko, or accept that only the byte-level and "
-              "in-tree comparisons are being made.")
+    #
+    # The report is the *diagnosis*, not a verdict on meeko. An earlier version
+    # caught the exception bare and printed "meeko is not importable
+    # (ModuleNotFoundError) ... Install meeko", which was false on the CI runner
+    # where the same step's log reads `Successfully installed ... meeko-0.8.0`:
+    # the reader was told to install the one package they already had, and
+    # `ModuleNotFoundError.name` -- the only field naming what was really absent
+    # -- was discarded. `meeko_diagnosis` asks that field and distinguishes the
+    # two cases, so the sentence here names something the reader can act on.
+    ok, why = meeko_diagnosis()
+    if not ok:
+        print("  MEEKO UNAVAILABLE -- the third-party half of this check cannot run.")
+        print(f"  {why}")
+        print(f"  Stopped after {CHECKS} check(s); EXPECTED_CHECKS "
+              f"({EXPECTED_CHECKS}) was NOT evaluated, so this is a hard failure "
+              f"and not a reduced-but-green run.")
         return 1
     import meeko as _meeko
     check("meeko is installed, and it is not part of this project",
           "site-packages" in str(Path(_meeko.__file__).parent).replace("\\", "/")
           and "odock-mcode" not in str(Path(_meeko.__file__)),
           f"meeko {getattr(_meeko, '__version__', '?')} at "
-          f"{Path(_meeko.__file__).parent}")
+          f"{Path(_meeko.__file__).parent}. The import-time dependency set was "
+          f"measured, not assumed: meeko declares no `Requires-Dist`, so its "
+          f"requirements are whatever `import meeko` happens to pull in")
 
     # The property that makes meeko worth consulting at all. A parser that
     # splits on whitespace would accept a line whose columns are wrong, and its

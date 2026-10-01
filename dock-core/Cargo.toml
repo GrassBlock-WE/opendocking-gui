@@ -28,9 +28,31 @@ default = []
 # Cross-platform GPU compute backend (Vulkan / Metal / DirectX 12).
 # Kept opt-in: it substantially increases build time and requires an adapter.
 gpu = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]
+# The convergence measurement (defect 222): what ends the local optimiser, how
+# |grad| and the energy decay against a larger iteration budget, and what a
+# larger budget costs. Off by default because it drives full docking searches
+# and takes minutes in the unoptimised profile `cargo test` uses.
+#
+# It is a named feature rather than a `#[ignore]` or an environment variable on
+# purpose, and the difference is not cosmetic. `#[ignore]` removes the test from
+# the run *and* from the count, so a reader of "N passed" cannot tell the
+# difference between "the measurement passed" and "the measurement did not
+# exist"; an environment variable is invisible in the manifest entirely. Here
+# the opt-in is a line in this file, it is named in the same place as the target
+# it gates, and deleting the `required-features` below is a visible edit to the
+# same stanza. CI runs it as its own step, so dropping it leaves a step that
+# names a target cargo no longer builds -- a failure, not a silence.
+convergence-budget = []
 
 [dev-dependencies]
 approx = "0.5"
+
+# The same reason as the feature above: `tests/` is not auto-discovered for this
+# one, so the target exists only when the feature is on.
+[[test]]
+name = "convergence_budget"
+path = "tests/convergence_budget.rs"
+required-features = ["convergence-budget"]
 
 [[bench]]
 name = "docking_bench"

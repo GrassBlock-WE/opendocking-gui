@@ -35,12 +35,21 @@ import numpy as np
 ROOT = Path(__file__).resolve().parent.parent
 EXAMPLES = ROOT / "examples"
 sys.path.insert(0, str(EXAMPLES))
+# `secondary_render` and `secondary_reference` live beside this file. They are
+# imported by name below rather than through a package, because they are
+# fixtures and an offscreen renderer for this suite, not product code.
+if str(ROOT / "scripts") not in sys.path:
+    sys.path.insert(0, str(ROOT / "scripts"))
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 from PyQt6 import QtCore, QtGui, QtOpenGLWidgets, QtWidgets  # noqa: E402
 from PyQt6.QtTest import QTest  # noqa: E402
 
-from opendocking.workbench import COLOR_BEST_POSE, COLOR_RECEPTOR  # noqa: E402
+from opendocking.workbench import (  # noqa: E402
+    COLOR_BEST_POSE,
+    COLOR_RECEPTOR,
+    crashguard,
+)
 from opendocking.workbench.app import (  # noqa: E402
     POCKET_OPACITY_COMPARE,
     POCKET_OPACITY_PLAIN,
@@ -50,6 +59,13 @@ from opendocking.workbench.app import (  # noqa: E402
     _draw_colours_for,
     _walks_wanted,
 )
+from opendocking.workbench.structure import (  # noqa: E402
+    parse_structure,
+    secondary_structure,
+)
+
+import secondary_reference as ss_ref  # noqa: E402
+import secondary_render as ss_render  # noqa: E402
 
 OUT = ROOT / "dist" / "workbench_interaction"
 OUT.mkdir(parents=True, exist_ok=True)
@@ -86,7 +102,167 @@ results: list[tuple[str, str, str]] = []
 #: added nothing to the total by itself: a skip was already being counted, and
 #: a suite that reports "unanswerable" as a result and "231 passed" in its
 #: headline has quietly told the reader that everything was fine.
-EXPECTED_CHECKS = 243
+#: Plus 2 for closing the two places where the total used to move with the
+#: environment, which is the defect this file's pin exists to catch and which
+#: CI found on a headless runner: "the viewport's frame could be read" was
+#: registered only when the frame was blank (243 with a framebuffer, 244
+#: without), and section 11c's eleven site-selection checks were registered only
+#: when the pocket search found more than one site. Both now register in every
+#: branch, the first unconditionally, the second as a named skip list, and the
+#: list is itself checked against what the block recorded.
+#:
+#: Plus 1 for a guard that shows the fast-machine skip above cannot hide a
+#: genuinely blocked window, and the reason the total is now environment-free.
+#:
+#: Plus 19 for section 10c, measured the same way: the secondary structure a
+#: ribbon is drawn from has to be read off a real receptor and off a synthetic
+#: ideal alpha helix, has to agree with the published annotation of 1CRN, has to
+#: leave the loop residues alone, and has to change the rendered pixels. The
+#: 19 are 4 stating what the classifier answered (the backbone was read, the
+#: states are not all one class on either the prepared file or the raw PDB, and
+#: the guard reverse-verifies), 5 for the five published 1CRN segments, 2
+#: pinning the three residues where the answer departs from that annotation
+#: (so the reference cannot be quietly widened to match the code), 1 for the
+#: loops, 2 for the ideal helix (its geometry, then its classification), 1
+#: saying the offscreen render draws the very mesh the viewport draws, and 4
+#: measured in pixels. Each has a skip registered in the same branch it can be
+#: skipped in, so a machine with no offscreen context reports the skips rather
+#: than a smaller total.
+#: Plus 3 for the space-filling mode, measured the same way. Adding a
+#: representation gives every per-representation loop one more leg, and the
+#: three are the legs that moved: 2 in section 10 (the selector reaching the
+#: viewport, and the mode drawing something), and 1 in section 7b's overlay
+#: hierarchy sweep. The other per-representation loops in this file are fixed
+#: tuples and were not widened: 7d's three representations and 10b's three.
+#:
+#: Plus 3 more for the change that mode forced, none of them a re-pin of a
+#: number that had merely been overtaken:
+#:
+#:   * 1 in 7b, the control for `POSE_CHROMA_FLOOR`. Section 7b's relative
+#:     saturation clause is the one threshold the new mode invalidated, and it
+#:     was re-derived rather than widened: it read 2.0 against a mode that
+#:     measures 1.9, and it is now 1.0, which is the boundary of the claim it
+#:     was expressing ("the pose is at least as chromatic as the ghosts"). The
+#:     control exists because a floor that any pose passes is not a floor, and
+#:     it measures a half-chroma pose at 0.97x, which the floor rejects.
+#:   * 1 in section 10, the space-filling mode against the small-sphere mode as
+#:     pictures. A mode that drew the default's frame under a new label would
+#:     be the defect this change is about wearing a different hat, so the two
+#:     are compared. This one started life as an *area* comparison with the
+#:     floor justified by "a continuous surface fills the gaps", and both
+#:     halves of that are gone now; see the "276 -> 276" note below.
+#:   * 1 in section 11c, the site cloud measured in all six representations.
+#:     This one is a check that came out *against* its own hypothesis: the
+#:     expectation was that a van der Waals surface would bury a cloud of
+#:     points that sits inside the protein, and the measurement says the cloud
+#:     covers the same 23 719 px in every mode, because `_draw_pocket` runs
+#:     with the depth test off. So what is pinned is the true claim -- the site
+#:     stays visible in every representation -- rather than the expected one.
+#:
+#: **271 -> 276 is five added checks.** Four are `POSE_FRAMING_CHECKS` -- the
+#: new section 11e, which asks whether selecting a pose *moves* the camera and
+#: whether the move lands where it was aimed. The fifth is in section 11b, on
+#: the residue selection that was here already: it asserted the camera arrived
+#: *near* the contact centroid, within 1.0 A, and a move that stopped 0.9 A
+#: short satisfied it. It now also asks whether the move arrived *exactly*
+#: where `focus_residue` computed, which is a different claim and the one that
+#: catches a transition ending off-target.
+#:
+#: Nothing was removed. Two thresholds moved, and both moved because the first
+#: number was **unreachable by a correct implementation** rather than because a
+#: measurement came out badly:
+#:
+#:   * that new residue drift floor was an absolute 1e-6 A on a float32
+#:     camera, where one ulp at 16.64 A is already 2.0e-06. It failed at
+#:     3.58e-06, which is the representation's own resolution and not a
+#:     thousandth of an angstrom of product error. It is now 1e-6 *relative*,
+#:     about eight ulps.
+#:   * the pose-move sampling required every observed frame to be strictly
+#:     between the two ends, and the first sample is the frame *before* the
+#:     tween's first tick, so it reads the start. It now asserts a strictly
+#:     decreasing sequence and a minimum sample count, which is what the check
+#:     was for: that the camera moved rather than cut.
+#: **276 -> 275 is one check fewer, and one rule reversed.** The three checks
+#: that asked what colour a pose wears became two. The two that remain ask a
+#: better question than the one that went: the dropped check asserted "with the
+#: overlay off the pose goes back to element colours", which was a documented
+#: decision and is now **reversed by measurement** -- over the pose's own 23 092
+#: pixels its chroma median was 8 against the receptor's 7, which is the
+#: receptor's own 60th percentile, so the pose sat *inside* the protein's colour
+#: distribution and a person could not point at it in the picture at all. A pose
+#: now wears its flat identity colour whether or not the compare overlay is up,
+#: and the surviving check is the absolute one ("the pose wears its own colour")
+#: plus the one it was really about ("the pose and the ghosts differ in kind").
+#: Nothing else was removed, and the four section-11e checks from the previous
+#: round are unchanged.
+#: **275 -> 276 is one check split into two.** The check that asserted "turning
+#: the compare overlay off gives the site cloud its opacity back" asserted a rule
+#: that no longer holds and should not: the cloud's presence follows *what the
+#: user is looking at*, and with a pose selected and no site chosen it stays
+#: away. Under the old rule the path "select a pose, turn the overlay on, turn
+#: it off" ended with the cloud back on top of the pose -- drawn with the depth
+#: test off, owning nine times the pose's pixels -- which is the defect the
+#: selection framing exists to remove. So the one check became two: the cloud
+#: stays away when a pose is selected, *and* a site selection brings it back. A
+#: rule that can only ever say "off" is not a rule about what to draw, and only
+#: the first half would have caught that.
+#:
+#: **276 -> 276, and no number moved: one check re-derived, and the pin above
+#: is not the thing that changed.** Section 10's space-filling comparison was
+#: measuring the *difference of two footprint areas* against a 10% floor that
+#: its own comment justified with "a continuous surface fills the gaps between
+#: separated spheres, so it has to cover materially more". Two measurements
+#: killed both halves of that. The direction is backwards on this fixture: with
+#: the pose out of the frame the receptor alone reads 5.6% and 4.6% across two
+#: runs, and in both the *separated* mode covers more than the CPK surface
+#: (590 061 against 558 676, and 579 624 against 554 256), because `spheres`
+#: also draws bonds and small spheres plus sticks beat a vdW surface here. And
+#: the number is not a property of the two modes at all, because the main
+#: window docks unseeded -- section 7b of this file says so -- so the selected
+#: pose, and the camera round 1's `_frame_selection` then frames on it, differ
+#: every run. Three runs of this same code read 6.8%, 24.2% and 24.9%. A floor
+#: that low with a number that moves that far is a coin.
+#:
+#: So the check now asks a question that is a property of the modes: how many
+#: pixels change when the mode does, at the background mask's own tolerance. The
+#: pose is hidden for the sweep, because a check that depends on a random dock
+#: result depends on a random dock result. The floor is still 10%, and it is
+#: not lowered to sit under the 4.6% the old quantity measured. Three green
+#: runs read 33.0%, 24.9% and 23.0%; the mutation, which makes `space_filling`
+#: draw the small-sphere picture under its own label, reads 0 px and goes red.
+#:
+#: **276 -> 277, and the one is a wait.** Section 7b read the camera distance
+#: while a pose-selection move was still running, and `processEvents()` does not
+#: advance a wall-clock `QTimer`, so the read was a moment of a move rather than
+#: a camera position: the same pose, out of the same nine fixed-seed poses,
+#: measured 23.6 A on one run and 45.4 A on another. The distance is now taken
+#: after a clock wait that ends when the camera is at rest, and that the camera
+#: got there is itself a check, because "it settled" and "it settled somewhere
+#: else" are different answers.
+#:
+#: The direction that number was compared against is gone as well, and it was
+#: the wrong claim rather than a wrong number: the overlay reframes to all nine
+#: poses, which on this fixture is 23.6 A -> 31.4 A, *back* rather than in,
+#: because row 0 is the worst-energy pose and the most isolated one. What is
+#: asserted now is the geometry a user would recognise -- every pose on screen
+#: is inside the picture -- which is direction-free and which a camera that did
+#: not reframe cannot satisfy. The old threshold also passed on 45.4 A, a
+#: distance left over from an unrelated earlier framing.
+# Plus 14 for section 12, measured the same way: an uncaught exception in a Qt
+# slot ends the process with `0xC0000409` and prints nothing, so the 6 fault
+# children are 1 for the same fault with the hook removed, 1 for the print-only
+# hook that was refused (it ends the same fault at 0, which is why the exit code
+# is the point), 1 for the shipped hook's exit code, and 1 each for the file, the
+# line, the exception and the message it names, 1 that the code came back out of
+# the product's own `run()` rather than out of a kill, 1 that the failure is
+# recorded, and 1 for the chain under a re-raise. Then 3 more: 1 that an
+# exception the slot catches itself never reaches the hook, 1 that a clean run
+# of the same entry point is untouched, and 1 that `odgui --check --json` gives
+# the same verdict and the same exit code with the hook in place as without it
+# (two wall-clock fields excluded and named). The last 2 are in-process: the
+# `finalise` backstop, and the two branches of `_stop` with the hard exit
+# recorded rather than performed.
+EXPECTED_CHECKS = 291
 
 #: Every section this file is supposed to reach, in file order. A section that
 #: is entered always prints a header, and every header is closed by the next
@@ -110,9 +286,12 @@ EXPECTED_SECTIONS = (
     "9. a receptor at negative coordinates",
     "10. display representations",
     "10b. a ribbon on a real protein",
+    "10c. the ribbon knows what shape it is drawing",
     "11. pose/receptor interactions",
     "11c. pocket search drives the box",
+    "11e. selecting a pose frames it, and the move lands on target",
     "11d. the pocket search does not block the window",
+    "12. an unhandled exception in a slot is reported, and exits non-zero",
     "summary",
 )
 
@@ -206,6 +385,175 @@ def _verify_pixel_guard():
         f"blank framebuffer -> {got[0]}, good render -> {got[1]}, "
         f"empty render -> {got[2]} (want {'/'.join(want)})",
     )
+
+
+def _verify_degenerate_guard(trace, atoms):
+    """Reverse-verify the guard the secondary-structure checks depend on.
+
+    A guard that cannot fail is not a guard. This swaps the classifier for one
+    that returns a single constant for every residue -- the exact bug a naive
+    implementation of this feature always has, because "no hydrogen bonds
+    found" and "coil" are the same answer -- and shows the guard reporting it.
+
+    Two directions, because either one alone is unfalsifiable:
+
+    * with the real classifier the guard must PASS, or it is guarding nothing;
+    * with a constant-returning classifier it must FAIL, or it is vacuous.
+
+    The mutation is applied to the module attribute this suite calls through,
+    and put back in a `finally`: a guard that leaves the product patched after
+    a failed run would make the rest of the file's own results meaningless.
+    """
+    import opendocking.workbench.structure as structure_module
+
+    real = structure_module.secondary_structure
+    try:
+        verdicts = {}
+        for label, impl in (
+            ("real", real),
+            ("constant coil", lambda *a, **k: ["coil"] * len(a[0])),
+        ):
+            structure_module.secondary_structure = impl
+            verdicts[label] = "PASS" if not ss_render.degenerate(impl(trace, atoms)) else "FAIL"
+    finally:
+        structure_module.secondary_structure = real
+
+    # And back again, so the second reading is not just the first one cached.
+    restored = "PASS" if not ss_render.degenerate(real(trace, atoms)) else "FAIL"
+    want = ("PASS", "FAIL", "PASS")
+    got = (verdicts["real"], verdicts["constant coil"], restored)
+    return (
+        "a classifier that returns one state for every residue fails the "
+        "non-degenerate guard",
+        got == want,
+        f"real -> {got[0]}, constant 'coil' -> {got[1]}, restored -> {got[2]} "
+        f"(want {'/'.join(want)})",
+    )
+
+
+def search_overlap_verdict(was_running: bool, still_running: bool) -> str:
+    """What a run that observed `was_running` then `still_running` can claim.
+
+    Three outcomes, and the middle one is the whole point of this function.
+
+    * **FAIL** when the search was *not* running even at the start. That is a
+      product defect -- `find_pockets()` is supposed to return while the work is
+      outstanding, and the check before this one already asserts it. A search
+      that was already finished here was run inline.
+    * **SKIP** when it was running at the start and had finished by the end. The
+      search was in flight, and the event loop did turn, but the two never
+      overlapped *as observed*, so this run cannot witness a window blocked by a
+      running search. That is the environment being unable to answer, which is a
+      different claim from the answer being "no", and the suite already has a
+      word for it.
+    * **PASS** only when the search was still running after the loop turned, so
+      the turns measured were turns made while it was in flight.
+
+    This existed as a bare `was_running and still_running`, which is a FAIL in
+    all three cases. On a fast runner the search finished inside the second of
+    event pumping and the check reported a defect that does not exist -- and
+    worse, it was *more* reliable the slower the machine, so the slower the
+    runner the more confident a check about the window became. A check whose
+    confidence rises as the machine gets worse is measuring the machine.
+
+    Being a pure function is what makes it testable: the skip branch is
+    reachable only when `still_running` is False, so a run with a *running*
+    search can never take it, and a blocked loop during a running search is
+    caught by the liveness threshold instead. `_verify_blocked_window_guard`
+    shows all of that.
+    """
+    if not was_running:
+        return "FAIL"
+    if not still_running:
+        return "SKIP"
+    return "PASS"
+
+
+def _verify_blocked_window_guard() -> tuple:
+    """Reverse-verify that a genuinely blocked window still turns this red.
+
+    The skip added by :func:`search_overlap_verdict` is only safe if it cannot
+    hide a real block. Two things have to hold, and both are checked here rather
+    than argued in a comment:
+
+    1. the skip is reachable **only** when the search was no longer running, so
+       a run that observed a live search is never excused;
+    2. a live search with a held event loop still fails -- the liveness
+       threshold is what catches it, and `_verify_loop_turns_guard` already
+       shows the threshold separates a held loop from a free one.
+
+    Every combination is listed, including the two that must never be SKIP, so
+    a future edit that widens the skip turns this red instead of quietly making
+    the section green on a broken window.
+    """
+    held = [4] * 5             # what a loop held 50 ms per turn reads
+    free = [179] * 5           # what a live loop reads on a fast machine
+    want = {
+        # (search running at start, at end, held loop?) -> verdict
+        (True, True, False): "PASS",
+        (True, True, True): "FAIL",    # a real block, with the search live
+        (True, False, False): "SKIP",  # the search beat the loop: cannot answer
+        (True, False, True): "SKIP",
+        (False, True, False): "FAIL",  # never ran: the defect
+        (False, False, False): "FAIL",
+    }
+    got = {}
+    for (was, still, is_held), expect in want.items():
+        turns = held if is_held else free
+        overlap = search_overlap_verdict(was, still)
+        # The section is red if *either* the overlap claim or the liveness
+        # threshold is red, because both are claims about the same window.
+        alive = "PASS" if max(turns) >= 10 else "FAIL"
+        got[(was, still, is_held)] = (
+            "RED" if "FAIL" in (overlap, alive) else overlap
+        )
+    # Red whenever the overlap claim is red, *or* whenever the loop was held --
+    # a held loop means the event loop was blocked, and that is worth reporting
+    # whether or not a search happened to still be running. SKIP survives only
+    # when the search beat the loop *and* the loop was free.
+    expect_red = {k for k, v in want.items() if v == "FAIL" or k[2]}
+    ok = all(got[k] == ("RED" if k in expect_red else v) for k, v in want.items())
+    return (
+        "a window blocked while a search is running is still reported, and the "
+        "fast-machine skip cannot hide one",
+        ok,
+        "; ".join(
+            f"search {was}->{still}, loop {'held' if h else 'free'} -> {got[(was, still, h)]}"
+            for (was, still, h) in want
+        )
+        + " (want RED whenever the search never ran or the loop was held; SKIP "
+        "only when the search finished before the loop turned and the loop was "
+        f"free; PASS otherwise; got {'ok' if ok else 'MISMATCH'})",
+    )
+
+
+#: The checks that section 11c only runs when the pocket search found more than
+#: one site for the fixture, which is the same shape of bug as the framebuffer
+#: check that used to live only in its failure branch: a whole block of checks
+#: that is *invisible* on a machine whose search found a single site, so the
+#: total moves with the environment and the pin can no longer tell anyone
+#: whether a check was removed or merely never ran.
+#:
+#: Listed here so the `rows <= 1` branch can register a skip for each one, and
+#: verified against what the block actually recorded, so renaming a check inside
+#: the block without updating this list turns a check red on a machine with more
+#: than one site rather than silently shrinking the total on a machine with one.
+SITE_SELECTION_CHECKS: tuple[str, ...] = (
+    "selecting a row moves the box",
+    "and the spin boxes follow it",
+    "and the camera goes to the site it just selected",
+    "the camera is far enough out to see the box, not inside it",
+    "the status bar names the site and its residues",
+    "the selected site is actually drawn",
+    "clearing the selection clears the site volume, rather than leaving one "
+    "site's cloud inside another's box",
+    "reselecting puts it back",
+    "the site cloud stays visible in every representation, the space-filling "
+    "one included",
+    "the site-volume checkbox gates the draw",
+    "and the picture really changed, not just the flag",
+    "switching it back restores the cloud",
+)
 
 
 def _close_section() -> None:
@@ -611,6 +959,34 @@ def _greener_fraction(frame, mask) -> float:
 #: extremes, and far below `COLOR_BEST_POSE`'s green.
 CHROMA_MIN = 24
 
+#: The selected pose has to be the vivid thing: this much more chromatic than
+#: the ghosts it is read against. Re-derived when the space-filling mode joined
+#: the per-representation sweep, and the derivation is the point rather than the
+#: number.
+#:
+#: The clause exists so a pose that has lost its colour cannot pass on hue
+#: alone: both hue fractions are absolute, so a uniformly desaturated pose
+#: could in principle be "not slate" and "not green" at the same time. What the
+#: clause has to express is therefore "the pose is at least as chromatic as the
+#: ghosts", and 1.0 is the exact boundary of that claim. Any number above it is
+#: a preference about how vivid a pose ought to look, not a statement about
+#: which failures this catches.
+#:
+#: Measured pose-over-ghost chroma across all six representations: 3.5x
+#: (`spheres`), 4.9x (`ball_and_stick`), 5.0x (`stick`), 5.1x (`ribbon`), 5.1x
+#: (`cartoon`), 1.9x (`space_filling`). The last is low because *the ghosts got
+#: brighter*, not because the pose got worse: at CPK radii the receptor is a
+#: solid lit surface, so the ghosts sit against that surface instead of against
+#: background and 47% of their pixels pick up a hue they would not otherwise
+#: have had. The pose's own chromatic fraction in that mode is 89%, the
+#: highest of the six, which is the part of the claim that has to hold.
+#:
+#: This read `2.0`, which `space_filling` misses at 1.9. Choosing 1.5 would have
+#: been the same decision with more decimals, so it is 1.0 -- and the floor is
+#: checked against a control below, because a floor that any pose passes is not
+#: a floor.
+POSE_CHROMA_FLOOR = 1.0
+
 
 def _chromatic(frame) -> np.ndarray:
     """Per-pixel channel spread -- how much colour a pixel carries.
@@ -799,6 +1175,219 @@ def rects_overlap(a: QtCore.QRect, b: QtCore.QRect) -> bool:
     return a.intersects(b) and (a & b).width() > 0 and (a & b).height() > 0
 
 
+# ---------------------------------------------------------------------------
+# Section 12: the crash guard, and the children that drive it.
+#
+# The children are written to a temp directory and run by path rather than with
+# `-c`, for one reason: a traceback from `python -c` names `<string>`, and a
+# guard whose subject is "the file and the line are named" cannot be satisfied by
+# a filename that is not a file. As files they also make the expected line
+# number derivable from the source the child was given, which is what makes
+# check 12's line check independent of the hook it is checking.
+#
+# `offscreen`, forced on the children and not on this process: the fault under
+# test is a Python-level slot, which the Qt dispatch raises regardless of the
+# platform, and a child that opened a window on the desktop would be a nuisance
+# to run as part of a gate. The product's viewport cannot get a context there,
+# which costs the child its painting and nothing else -- `run()` still returns
+# the code `crashguard` asked for.
+# ---------------------------------------------------------------------------
+_SLOT_FAULT_CHILD = r'''
+import json
+import sys
+
+from opendocking.workbench import app as appmod
+from opendocking.workbench import crashguard
+
+mode = sys.argv[1]
+if mode == "nohook":
+    # The product exactly as it was before `crashguard` existed: the hook
+    # `install()` replaced, put back. Same code, same dispatch, same fault.
+    sys.excepthook = crashguard.replaced_hook()
+elif mode == "plain":
+    # The shape that was refused: print the traceback and return. Kept in the
+    # suite so the reason for the exit code is measured rather than asserted.
+    import traceback
+
+    def _print_only(exc_type, exc, tb):
+        traceback.print_exception(exc_type, exc, tb)
+
+    sys.excepthook = _print_only
+
+from PyQt6 import QtCore, QtWidgets
+
+qt = QtWidgets.QApplication(sys.argv[:1])
+
+
+def _raise_in_slot(self):
+    raise ValueError("injected: the term map could not be keyed")
+
+
+def _chain_in_slot(self):
+    try:
+        raise KeyError("injected: the term-map key went missing")
+    except KeyError as exc:
+        raise ValueError("injected: the term map could not be keyed") from exc
+
+
+def _catch_in_slot(self):
+    try:
+        raise KeyError("injected, and caught in the slot on purpose")
+    except KeyError as exc:
+        print(f"slot caught it: {exc}", file=sys.stderr, flush=True)
+
+
+_FAULTS = {
+    "hook": _raise_in_slot,
+    "nohook": _raise_in_slot,
+    "plain": _raise_in_slot,
+    "chained": _chain_in_slot,
+    "caught": _catch_in_slot,
+}
+if mode in _FAULTS:
+    appmod.MainWindow._on_contact_visibility = _FAULTS[mode]
+
+
+def _click_contacts():
+    # A real control, toggled for real: the fault is raised from a signal the
+    # window itself connected, dispatched by Qt, which is the boundary.
+    for widget in QtWidgets.QApplication.topLevelWidgets():
+        box = getattr(widget, "cb_contacts", None)
+        if box is not None:
+            box.click()
+            print("clicked the contacts checkbox", file=sys.stderr, flush=True)
+            return
+    print("no window carried a contacts checkbox", file=sys.stderr, flush=True)
+
+
+QtCore.QTimer.singleShot(400, _click_contacts)
+QtCore.QTimer.singleShot(2500, QtWidgets.QApplication.quit)
+code = appmod.run()
+print(f"run() returned {code}", file=sys.stderr, flush=True)
+print(f"failures={crashguard.failures()!r}", file=sys.stderr, flush=True)
+# The record as JSON, not as the repr above: a Windows path in a repr is
+# backslash-escaped, so a parent matching on the text would be matching on an
+# encoding rather than on the record.
+print("RECORD " + json.dumps([dict(r) for r in crashguard.failures()]),
+      file=sys.stderr, flush=True)
+sys.exit(code)
+'''
+
+_CHECK_AB_CHILD = r'''
+"""`odgui --check`, once with the hook in place and once with it removed."""
+import json
+import sys
+
+from opendocking.workbench import crashguard  # noqa: F401
+from opendocking.workbench import app as _app  # noqa: F401  installs the hook
+from opendocking.workbench import launcher
+
+if sys.argv[1] == "off":
+    sys.excepthook = crashguard.replaced_hook()
+code = launcher._report_check(as_json=True)
+print("HARNESS " + json.dumps({
+    "exit": code,
+    "active": crashguard.active(),
+    "failures": len(crashguard.failures()),
+}), file=sys.stderr, flush=True)
+raise SystemExit(code)
+'''
+
+
+def _crash_child(script: Path, args: list[str], budget: float = 180.0,
+                 platform: str | None = "offscreen") -> tuple:
+    """Run one section-12 child in the foreground; return `(exit, out, err)`.
+
+    Foreground and unbuffered on purpose. A child that dies on the way out can
+    leave a pipe buffer half-written, and this project's two worst "crashes"
+    were both a pipeline closing early rather than a process dying -- so the
+    exit code, the stdout and the stderr are collected by `subprocess` itself
+    and printed by this file.
+
+    `platform=None` leaves the platform alone, which the `--check` child needs:
+    offscreen has no OpenGL, so the diagnostic under `--check` there answers "no
+    context" and the comparison would be between two failures. The fault child is
+    the opposite case -- its subject is a Python-level slot, which the Qt
+    dispatch raises on any platform, and offscreen keeps a window off the
+    desktop while a gate runs.
+    """
+    import os
+    import subprocess
+
+    env = dict(os.environ)
+    if platform is None:
+        env.pop("QT_QPA_PLATFORM", None)
+    else:
+        env["QT_QPA_PLATFORM"] = platform
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    # The children import the product, so they have to be able to find the copy
+    # this process is testing rather than one that happens to be installed.
+    env["PYTHONPATH"] = os.pathsep.join(p for p in sys.path if p)
+    proc = subprocess.run(
+        [sys.executable, "-u", str(script), *args],
+        env=env, capture_output=True, text=True, encoding="utf-8",
+        errors="replace", timeout=budget,
+    )
+    return proc.returncode, proc.stdout or "", proc.stderr or ""
+
+
+def _record_of(stderr: str) -> list:
+    """The `RECORD` line a fault child printed: `crashguard.failures()` as JSON."""
+    import json
+
+    for line in stderr.splitlines():
+        if line.startswith("RECORD "):
+            try:
+                loaded = json.loads(line[len("RECORD "):])
+            except ValueError:
+                return []
+            if isinstance(loaded, list):
+                return loaded
+    return []
+
+
+def _verdict_of(stdout: str) -> dict | None:
+    """The `--check` JSON object a child printed, or `None` if it printed none."""
+    import json
+
+    for line in reversed(stdout.strip().splitlines()):
+        try:
+            loaded = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(loaded, dict) and "verdict" in loaded:
+            return loaded
+    return None
+
+
+#: The `--check` payload fields that are wall-clock readings of one run and so
+#: cannot be equal across two runs. Named here, and stripped by
+#: `_without_timings` from the same tuple, because a list of excused fields
+#: spelled somewhere other than the code that removes them is a list that will
+#: drift.
+TIMING_KEYS = ("waited", "show_seconds")
+
+
+def _without_timings(payload: dict | None) -> dict:
+    """A `--check` payload with the wall-clock fields removed, recursively.
+
+    Two runs of the same diagnostic cannot agree on how long they took, so
+    those fields are excluded and named in the check. Everything else -- the
+    verdict, the exit code, the GL version, the provenance digest -- has to be
+    equal, and is.
+    """
+
+    def strip(value):
+        if isinstance(value, dict):
+            return {k: strip(v) for k, v in value.items() if k not in TIMING_KEYS}
+        if isinstance(value, list):
+            return [strip(v) for v in value]
+        return value
+
+    return strip(payload) if isinstance(payload, dict) else {}
+
+
 def main() -> int:
     # `PIXELS_OK` is read by `pixel_check`; assigning it here without this
     # would create a local and silently leave the flag at its default.
@@ -916,17 +1505,37 @@ def main() -> int:
     # result. A skip here is the honest reading of "this box cannot render":
     # it says nothing about the viewport, and it is CI's `xvfb-run` that
     # answers the question on a machine that can.
-    _claim = (
-        "this machine can give Qt an OpenGL context, so the pixel checks below "
-        "are real"
-    )
+    #
+    # The two branches name *different things on purpose*. A single name that
+    # asserted the outcome -- "this machine can give Qt an OpenGL context" --
+    # produced a line reading "can" next to a reason reading "cannot", because
+    # a skip is a name plus a reason and only the second half followed the
+    # truth. The skip branch now names the question instead of its answer.
     if GL_OK:
-        check(_claim, True, GL_VERDICT or "")
+        check(
+            "this machine can give Qt an OpenGL context, so the pixel checks "
+            "below are real",
+            True,
+            GL_VERDICT or "",
+        )
     else:
-        skip(_claim, GL_VERDICT or "no OpenGL context")
+        skip(
+            "whether the launcher's own OpenGL probe could give Qt a context",
+            GL_VERDICT or "no OpenGL context",
+        )
     # Decide once, here, whether the framebuffer is readable at all. A blank
     # or missing grab means every pixel-dependent check below would be
     # measuring the environment rather than the viewport.
+    #
+    # Note this is decided by the *product's* framebuffer, not by `GL_OK`.
+    # Those disagree, and the disagreement is measured rather than assumed: on
+    # the machine this was written on, the launcher's probe reports no context
+    # (`GL_OK` False) while the workbench's own `QOpenGLWidget` renders and its
+    # framebuffer reads back thousands of pixels. The probe builds a bare
+    # `QOpenGLContext`; the product is a `QOpenGLWidget` with a real FBO, and
+    # the second is what a viewer sees. Gating the pixel checks on the probe
+    # would skip them on machines that render perfectly well, so they are gated
+    # on the product's own frame instead.
     if base_px == 0:
         PIXELS_OK = False
         print(
@@ -936,9 +1545,18 @@ def main() -> int:
             "\n        Every non-pixel check still runs, and this one is counted"
             "\n        in the summary as a skip."
         )
-        # Counted, not just printed: a run where the picture could not be read
-        # has to say so in its summary line, or "N passed, 0 failed" reads the
-        # same as a run that looked at every pixel and liked them all.
+    # Counted, not just printed, and registered in **both** branches. This used
+    # to exist only in the `base_px == 0` branch, which made the total move
+    # with the environment: 243 on a machine that could read its framebuffer and
+    # 244 on one that could not, on a commit whose pin said 243. A pin that only
+    # holds where the picture is readable is not a pin. One result either way.
+    if PIXELS_OK:
+        check(
+            "the viewport's frame could be read",
+            True,
+            f"{base_px} non-background px in the first grab",
+        )
+    else:
         skip(
             "the viewport's frame could be read",
             SHOT_PROBLEM or "grabFramebuffer returned a uniformly coloured image",
@@ -1912,6 +2530,21 @@ def main() -> int:
         app.processEvents()
         pw2.pose_table.setCurrentCell(pw2.pose_table.pose_row_of(0), 0)
         app.processEvents()
+        # Selecting a pose starts a camera move, and both the screenshot and
+        # the distance below used to be taken while it was still running. That
+        # is not a rounding error: `processEvents()` does not advance a
+        # wall-clock `QTimer`, so the read was a moment of a move. Measured
+        # with the nine poses identical -- this window docks with the fixed seed
+        # 20260901 -- the same pose measured 23.6 A on one run and 45.4 A on
+        # another, and only the timing differed. Waiting on the clock is what
+        # makes this a camera position.
+        _settled = _settle_camera(pw2, app)
+        check(
+            "the camera comes to rest on the pose it selected",
+            _settled,
+            f"the move finished inside the budget: moving="
+            f"{pw2.viewport.moving} after waiting on the clock",
+        )
         before_pixels, _ = shot(pw2, "07b_pose_alone")
         cam_before = float(pw2.viewport.camera.distance)
         check(
@@ -2046,33 +2679,24 @@ def main() -> int:
             f"{sorted(ghost_cols)} (want exactly {sorted(ghost_want)})",
         )
         check(
-            "the selected pose wears its own colour while poses are being compared",
-            len({tuple(np.round(c, 3)) for c in _draw_colours_for(pose_view, True)}) == 1
-            and {tuple(np.round(c, 3)) for c in _draw_colours_for(pose_view, True)}
-            == pose_want,
-            f"while comparing the pose is drawn in "
-            f"{sorted({tuple(np.round(c, 3)) for c in _draw_colours_for(pose_view, True)})}"
-            f", which is its own identity colour {COLOR_BEST_POSE}",
+            "the selected pose wears its own colour, and not only while comparing",
+            pose_cols == pose_want,
+            f"the pose is drawn in {sorted(pose_cols)} whether or not the "
+            f"compare overlay is up, which is its own identity colour "
+            f"{COLOR_BEST_POSE}. It used to be element-coloured with the "
+            f"overlay off, and the measurement that reversed that is in "
+            f"`_draw_colours_for`: over the pose's own 23 092 pixels its chroma "
+            f"median was 8 against the receptor's 7 -- the receptor's own 60th "
+            f"percentile, so the pose sat *inside* the protein's colour "
+            f"distribution and there was nothing to find it by",
         )
         check(
-            "and goes back to element colours with the overlay off, where the question is what it is",
-            len(pose_cols) > 1,
-            f"with the overlay off the pose is drawn in {len(pose_cols)} atom "
-            f"colours, so the flat colour is a comparison state and not a "
-            f"permanent repaint of the molecule",
-        )
-        check(
-            "and the two differ in kind, not only in strength",
-            len(pose_cols) > 1
-            and pose_cols.isdisjoint(ghost_cols)
-            and {tuple(np.round(c, 3)) for c in _draw_colours_for(pose_view, True)}.isdisjoint(
-                ghost_cols
-            ),
-            f"on its own the pose is in {len(pose_cols)} atom colours, the ghosts "
-            f"in {len(ghost_cols)}, and while comparing the pose is in "
-            f"{sorted(pose_want)} against the ghosts' {sorted(ghost_cols)}: a "
-            f"green molecule in a field of slate ones is a difference the eye "
-            f"makes before it reads a number",
+            "and the pose and the ghosts differ in kind, not only in strength",
+            pose_cols.isdisjoint(ghost_cols) and len(pose_cols) == 1,
+            f"the pose is in {sorted(pose_cols)} and the ghosts in "
+            f"{sorted(ghost_cols)}: a green molecule in a field of slate ones is "
+            f"a difference the eye makes before it reads a number, and the two "
+            f"sets share no colour at all",
         )
         check(
             "the ghost colour is not the receptor's, which is what made it invisible",
@@ -2140,12 +2764,62 @@ def main() -> int:
         after_pixels, _ = shot(pw2, "07b_pose_all")
         repr_before = pw2.viewport.representation
         cam_after = float(pw2.viewport.camera.distance)
+        # **What is asserted here is the geometry, not a direction.** The claim
+        # this replaces was "turning it on moves the camera *in*", against
+        # `cam_after < cam_before * 0.75`, and it was wrong twice over.
+        #
+        # The direction is not a property of the product. The camera frames the
+        # one selected pose, and turning the overlay on reframes it to all nine.
+        # This window docks with the fixed seed 20260901, so the nine poses are
+        # the same every run, and with the tween settled the distance goes
+        # 23.6 A -> 31.4 A: *back*, not in. Row 0 is the worst-energy pose and
+        # the most isolated one, so a close-up of it is closer than a frame of
+        # the whole set. An assertion about which way the camera went would be
+        # an assertion about which pose happens to be selected.
+        #
+        # And the number that used to make it pass, 45.4 A, was the distance
+        # left over from an unrelated earlier framing -- the check was passing
+        # on a different feature of the same run.
+        #
+        # So the claim is the one a user would recognise, and the one a broken
+        # `_frame_poses` cannot satisfy: once the overlay is up, every pose on
+        # screen is inside the picture. A camera that did not reframe would
+        # leave eight of the nine outside it.
+        from opendocking.workbench.framing_selection import (  # noqa: PLC0415
+            FramingTarget as _FramingTarget,
+            projected_fill as _projected_fill,
+        )
+
+        _cam7b = pw2.viewport.camera
+        _right, _up, _forward = _cam7b.basis()
+        _aspect = pw2.viewport.width() / max(pw2.viewport.height(), 1)
+        _shown = [m for m in pw2.viewport.molecules
+                  if m.role in ("pose", "pose_ghost") and m.visible]
+        _all_pose_pts = (
+            np.vstack([np.asarray(m.coords, np.float64) for m in _shown])
+            if _shown else np.zeros((0, 3), np.float64)
+        )
+        _target7b = _FramingTarget(
+            center=np.asarray(_cam7b.center, np.float64),
+            distance=float(_cam7b.distance),
+            pose_atoms=0,
+            partner_atoms=0,
+            partner_residues=(),
+        )
+        _span7b = (
+            _projected_fill(_all_pose_pts, _target7b, _right, _up, _forward,
+                            fov=_cam7b.fov, aspect=_aspect)
+            if len(_all_pose_pts) else 0.0
+        )
         check(
-            "turning it on moves the camera in to the poses, not the whole scene",
-            cam_after < cam_before * 0.75,
-            f"camera distance {cam_before:.1f} A -> {cam_after:.1f} A: the poses "
-            "are twenty atoms inside the protein, so the overlay is a smudge "
-            "unless you go and look at it",
+            "turning the overlay on reframes to the whole pose set, not one pose",
+            len(_shown) >= 2 and _span7b <= 1.0,
+            f"camera {cam_before:.1f} A -> {cam_after:.1f} A, and the "
+            f"{len(_shown)} pose views on screen reach {_span7b:.2f} of the way "
+            f"to the frame edge, so all of them are inside the picture. The "
+            f"distance went back rather than in because row 0 is the "
+            f"worst-energy pose and the most isolated one, which is why the "
+            f"direction is reported and not asserted",
         )
         pixel_check(
             "the picture really changed when the overlay came on",
@@ -2160,6 +2834,7 @@ def main() -> int:
         # gets while the object model said everything was fine. One check per
         # representation, each measured off its own frame, is what catches that
         # class; a single check on the default would not.
+        chroma_ratios: dict[str, tuple[float, float, float]] = {}
         for key in REPRESENTATION_KEYS:
             pw2.viewport.representation = key
             pf, pm = _own_pixels(pw2, lambda: _hide_role(pw2, "pose"))
@@ -2204,15 +2879,36 @@ def main() -> int:
             gb = _bluer_fraction_chromatic(gf, gm)
             pc = _chromatic_fraction(pf, pm)
             gc = _chromatic_fraction(gf, gm)
+            chroma_ratios[key] = (pc, gc, pc / max(gc, 1e-9))
             pixel_check(
                 name,
-                pg >= 0.90 and gb >= 0.95 and pc >= 2.0 * gc,
+                pg >= 0.90 and gb >= 0.95 and pc >= POSE_CHROMA_FLOOR * gc,
                 f"pose greener {100 * pg:.1f}% of its {int(pm.sum())} px that have "
                 f"a hue ({100 * pc:.0f}% of its own pixels do), ghosts bluer "
                 f"{100 * gb:.1f}% of {int(gm.sum())} px; the pose is "
                 f"{pc / max(gc, 1e-9):.1f}x as saturated as the ghosts",
             )
         pw2.viewport.representation = repr_before
+
+        # The control for `POSE_CHROMA_FLOOR`. A relative threshold is only
+        # worth having if it rejects the picture it was written to reject, and
+        # lowering a floor is exactly the change that can quietly remove that.
+        # Halving the pose's own measured chroma is the failure the clause
+        # exists for -- a pose that has lost its colour -- so the halved number
+        # has to fail, and it has to fail against the *measured* ghost fraction
+        # of the representation it was measured in rather than a remembered one.
+        if "space_filling" in chroma_ratios:
+            pc, gc, _ = chroma_ratios["space_filling"]
+            check(
+                "the chroma floor still rejects a pose that has lost half its colour",
+                pc / 2.0 < POSE_CHROMA_FLOOR * gc,
+                f"the space-filling pose measures {pc:.3f} chromatic against "
+                f"{gc:.3f} for the ghosts ({POSE_CHROMA_FLOOR}x floor), and half "
+                f"of that pose's chroma -- {pc / 2.0:.3f} -- reads "
+                f"{pc / 2.0 / max(gc, 1e-9):.2f}x, which the floor rejects. A "
+                f"floor that a half-grey pose passes is not a floor; this is "
+                f"what makes lowering the number from 2.0 defensible",
+            )
 
         # One crop per representation as well, because a threshold passing and
         # a picture reading are different claims and only the second one is the
@@ -2268,12 +2964,46 @@ def main() -> int:
             [m.role for m in pw2.viewport.molecules].count("pose_ghost") == 0,
             f"roles {[m.role for m in pw2.viewport.molecules]}",
         )
+        # The cloud's presence follows *what the user is looking at*, not which
+        # control they last touched. A pose is selected here and no site has
+        # been chosen, so the cloud stays out of the picture -- and that is the
+        # change from the rule this replaced, which had the compare overlay
+        # alone decide. Under that rule the path "select a pose, turn the
+        # overlay on, turn it off" ended with the cloud back on top of the pose,
+        # which is the defect the selection framing exists to remove: the cloud
+        # is drawn with the depth test off and owns nine times the pose's
+        # pixels.
         check(
-            "and gives the site cloud its opacity back",
-            abs(pw2.viewport.pocket_opacity - POCKET_OPACITY_PLAIN) < 1e-9,
-            f"pocket opacity {pw2.viewport.pocket_opacity}, expected "
-            f"{POCKET_OPACITY_PLAIN}: the comparison dimmed it, not the site table",
+            "and does not bring back a cloud that a selected pose removed",
+            abs(pw2.viewport.pocket_opacity - POCKET_OPACITY_COMPARE) < 1e-9,
+            f"pocket opacity {pw2.viewport.pocket_opacity} with pose "
+            f"{pw2._current_pose + 1} selected and no site chosen: expected "
+            f"{POCKET_OPACITY_COMPARE}. Turning the compare overlay off used to "
+            f"restore the cloud unconditionally, which put it back over the pose "
+            f"the selection had just framed",
         )
+        # The positive direction, and the half that matters: something must be
+        # able to bring the cloud back, or the rule above is just "always off".
+        if pw2.pocket_table.rowCount():
+            pw2.pocket_table.selectRow(0)
+            app.processEvents()
+            check(
+                "and selecting a site does bring it back",
+                abs(pw2.viewport.pocket_opacity - POCKET_OPACITY_PLAIN) < 1e-9,
+                f"pocket opacity {pw2.viewport.pocket_opacity} after selecting a "
+                f"site row, expected {POCKET_OPACITY_PLAIN}. The cloud follows "
+                f"the question the user is asking -- a pose or a site -- so both "
+                f"directions are asserted: a floor that only ever says 'off' is "
+                f"not a rule about what to draw",
+            )
+        else:
+            skip(
+                "and selecting a site does bring it back",
+                f"this window's pocket table is empty "
+                f"({pw2.pocket_table.rowCount()} rows), so there is no site to "
+                f"select and the direction cannot be witnessed here; the check "
+                f"is not absent, it is unanswered",
+            )
     finally:
         dispose_window(app, pw2)
 
@@ -2796,8 +3526,8 @@ def main() -> int:
     # something bound later in the same function.
     check(
         "the display selector offers every representation",
-        set(REPRESENTATION_KEYS) == {"spheres", "ball_and_stick", "stick",
-                                     "ribbon", "cartoon"},
+        set(REPRESENTATION_KEYS) == {"spheres", "space_filling", "ball_and_stick",
+                                     "stick", "ribbon", "cartoon"},
         ", ".join(REPRESENTATION_KEYS),
     )
     check(
@@ -2819,13 +3549,20 @@ def main() -> int:
         CONTACT_LABELS,
     )
 
+    # Scoped to the legend row itself. This used to reach for every `QLabel` in
+    # the window and tell a legend word from other text by its stylesheet, so
+    # any new secondary-text label in the panel counted as a legend entry and
+    # "every swatch names itself" went red on a panel that was telling the
+    # truth -- the pose breakdown's own note, which is styled the way this
+    # window styles all its secondary text. A check about a legend has to look
+    # at the legend.
     swatches = [
         (w.text(), w.styleSheet())
-        for w in win.findChildren(QtWidgets.QLabel)
+        for w in win.legend_row.findChildren(QtWidgets.QLabel)
         if w.styleSheet().startswith("color: rgb(")
     ]
     legend_words = [
-        w.text() for w in win.findChildren(QtWidgets.QLabel)
+        w.text() for w in win.legend_row.findChildren(QtWidgets.QLabel)
         if w.styleSheet().startswith("color: #9aa3ad")
     ]
     check(
@@ -2862,6 +3599,54 @@ def main() -> int:
         f"{legend_words}",
     )
 
+    repr_footprint: dict[str, int] = {}
+    # **The site cloud is taken out of the frame for this sweep, and that is a
+    # confound removal rather than a convenience.** The cloud is drawn with the
+    # depth test off, so it is in front of both sphere modes, and it is
+    # *translucent*, so it does not add the same number of pixels to both: it
+    # shifts them across this suite's absolute mask threshold by different
+    # amounts in each mode, and it moves them the wrong way. Measured on this
+    # fixture with everything else held fixed:
+    #
+    #     cloud at POCKET_OPACITY_PLAIN (0.34)   spheres 803 990  CPK 791 824
+    #                                            -> CPK covers LESS than separated
+    #                                                spheres, which is backwards
+    #     cloud at POCKET_OPACITY_COMPARE (0.0)  spheres 705 478  CPK 837 500
+    #                                            -> 18.7%, the direction the
+    #                                                physics predicts
+    #
+    # A check asking "does a mode that drew the default's picture under a new
+    # label exist" cannot have a translucent overlay drawn over both answers.
+    # The floor is unchanged at 10%; what changed is that the thing being
+    # compared is the two representations.
+    #
+    # This is also the other half of a product fix. `pocket_opacity` had three
+    # writers -- the compare toggle, the site table and the pose selection --
+    # and nothing said which won, so which of the three ran last decided this
+    # check's number, and that is why it read 0.1%, 3.9%, 23.0% and 2.7% on
+    # four consecutive runs of the same code. `MainWindow._sync_pocket_opacity`
+    # now derives it from state, so the picture no longer depends on which
+    # handler happened to run last; pinning it here is what makes the comparison
+    # about the representations regardless.
+    cloud_before_sweep = win.viewport.pocket_opacity
+    win.viewport.pocket_opacity = POCKET_OPACITY_COMPARE
+    repr_frame: dict[str, np.ndarray] = {}
+    # **The pose is taken out of the sweep for the same reason the cloud is,
+    # and the reason is measured rather than suspected.** The main window docks
+    # unseeded -- its seed is 0, which means random, and section 7b of this file
+    # says so -- so the pose that ends up selected is a different molecule every
+    # run, and round 1's `_frame_selection` then frames the camera on that
+    # different pose. Three runs of this file's own code, a check that included
+    # the pose read 6.8%, 24.2% and 24.9%: that is not a renderer flickering, it
+    # is an input moving. A check that depends on a random dock result depends on
+    # a random dock result, so the two sphere modes are compared on a frame whose
+    # content is the same every run. The pose goes back the moment the sweep is
+    # over, and nothing downstream of here reads whether it is visible.
+    pose_views = [m for m in win.viewport.molecules if m.role == "pose"]
+    pose_visible_before = [m.visible for m in pose_views]
+    for m in pose_views:
+        m.visible = False
+    app.processEvents()
     for key in REPRESENTATION_KEYS:
         index = win.cmb_representation.findData(key)
         win.cmb_representation.setCurrentIndex(index)
@@ -2874,6 +3659,8 @@ def main() -> int:
         if PIXELS_OK:
             arr, _ = shot(win, f"11_repr_{key}")
             drawn = non_background(arr)
+            repr_footprint[key] = drawn
+            repr_frame[key] = arr
             check(
                 f"'{key}' draws something",
                 drawn > 500,
@@ -2881,6 +3668,71 @@ def main() -> int:
             )
         else:
             skip(f"'{key}' draws something", "no framebuffer to read")
+
+    # The space-filling mode earns its name from its geometry, and a mode that
+    # drew the default's picture under a new label would be the defect this
+    # whole change is about wearing a different hat. So the two sphere modes
+    # are compared as pictures.
+    #
+    # **What is compared is the number of pixels that change when the mode
+    # does, not the difference between the two footprint areas.** The area
+    # difference is not a property of these two representations on this fixture,
+    # and saying so is a measurement rather than an opinion: with the pose out of
+    # the frame, the receptor alone reads 5.6% and 4.6% in two runs, and in both
+    # the *separated* mode covers MORE than the CPK surface -- 590 061 px against
+    # 558 676, and 579 624 against 554 256. The comment this replaces explained
+    # the direction by saying a continuous surface fills the gaps between
+    # separated spheres and must therefore cover more. On this fixture that is
+    # backwards, because `spheres` also draws the bonds (see `_draw_molecule`),
+    # and small spheres plus sticks beat a vdW surface here. A floor sitting on
+    # top of a quantity that reads 4.6% one way and 24.9% the other is not a
+    # floor; it is a coin. The 10% is not moved, and the direction is not
+    # asserted either: what is asserted is that switching the mode repaints a
+    # materially different part of the frame.
+    #
+    # The tolerance is the background mask's own (12 summed over three channels),
+    # so this counts "changed visibly" and not "changed by a dithering step".
+    # Measured on this fixture with the pose out: 146 316 px change out of a
+    # 554 256 px footprint, 25.2%. The control for the quantity is a same-mode
+    # grab compared with itself, which measures 0 px -- so 10% is a line under a
+    # number that is zero when nothing happened, not a line drawn under a number
+    # that is never small.
+    if "spheres" in repr_frame and "space_filling" in repr_frame:
+        small_frame = repr_frame["spheres"]
+        solid_frame = repr_frame["space_filling"]
+        small = non_background(small_frame)
+        solid = non_background(solid_frame)
+        changed = int(
+            (np.abs(small_frame.astype(np.int16) - solid_frame.astype(np.int16))
+             .sum(axis=2) > 12).sum()
+        )
+        pixel_check(
+            "the space-filling mode draws a different picture from the "
+            "small-sphere one",
+            changed > 0.10 * max(1, max(small, solid)),
+            f"{changed} px of the frame change when the mode does, "
+            f"{100 * changed / max(1, max(small, solid)):.1f}% of the larger "
+            f"footprint ({max(small, solid)} px), against a 10% floor. The two "
+            f"areas are {small} and {solid} px, a difference of only "
+            f"{abs(solid - small)} px, which is why the areas are reported but "
+            f"not the thing being measured",
+        )
+    else:
+        skip(
+            "the space-filling mode draws a different picture from the "
+            "small-sphere one",
+            "no framebuffer was readable, so there were no pictures to "
+            "compare",
+        )
+    # Put the pose back, next to the cloud, in both branches, so the state the
+    # rest of the suite runs in is the one it would have been in.
+    for m, was in zip(pose_views, pose_visible_before):
+        m.visible = was
+    app.processEvents()
+    # Put the cloud back, in both branches, so the state the rest of the suite
+    # runs in is the one it would have been in and not the one the sweep needed.
+    win.viewport.pocket_opacity = cloud_before_sweep
+    app.processEvents()
 
     # A ribbon needs a backbone. The example receptor is a synthetic blob, so
     # it must fall back rather than pretend, and the status bar has to say so.
@@ -2995,6 +3847,272 @@ def main() -> int:
         dispose_window(app, win3)
     else:
         skip("a ribbon on a real protein", f"{crambin.name} is not present")
+
+    # ------------------------- 10c. secondary structure the viewer can see
+    #
+    # Section 10b proves a ribbon is *built*. It cannot tell a helix from a coil,
+    # because both are a swept quad strip and both render. Everything below
+    # exists because "a ribbon was drawn" is satisfied by a classifier that
+    # returns one state for every residue -- the answer is still a ribbon, still
+    # the right number of triangles, still on screen. So the checks come in
+    # pairs: a positive claim about the states, and a guard that the *shape* of
+    # the answer is not degenerate.
+    section("10c. the ribbon knows what shape it is drawing")
+
+    receptor_path = EXAMPLES / "1crn_prep.pdbqt"
+    if not receptor_path.is_file():
+        skip("10c. secondary structure", f"{receptor_path.name} is not present")
+    else:
+        prot_text = receptor_path.read_text(encoding="utf-8")
+        prot = parse_structure(prot_text, receptor_path.name)
+        prot_trace = prot.backbone()
+        prot_states = secondary_structure(prot_trace, prot.atoms)
+        prot_resids = [prot.atoms[ca].resid for _, ca, _ in prot_trace]
+        found = ss_ref.segments(prot_states, prot_resids)
+
+        check(
+            "the shipped receptor's backbone is read for classification",
+            len(prot_trace) > 0 and len(prot_states) == len(prot_trace),
+            f"{len(prot_trace)} residues, {len(prot_states)} states",
+        )
+        # The guard, and the single most important check in this section. A
+        # classifier that finds no hydrogen bonds returns "coil" 46 times, the
+        # ribbon is drawn, and every other check in the file still passes.
+        check(
+            "the states are not all the same class",
+            not ss_render.degenerate(prot_states),
+            f"{ {k: prot_states.count(k) for k in ('helix', 'sheet', 'coil')} }",
+        )
+        # Same question asked of the raw PDB, whose hydrogens are the raw PDB's
+        # own: a prepared receptor keeps polar hydrogens and a hand-written
+        # backbone usually has none, so agreeing on both means the answer is
+        # coming from the geometry and not from a hydrogen list.
+        raw = parse_structure(
+            (EXAMPLES / "1crn_receptor.pdb").read_text(encoding="utf-8"), "1crn_receptor.pdb"
+        )
+        raw_states = secondary_structure(raw.backbone(), raw.atoms)
+        check(
+            "the states are not all the same class on the raw PDB either",
+            not ss_render.degenerate(raw_states),
+            f"{ {k: raw_states.count(k) for k in ('helix', 'sheet', 'coil')} } on the "
+            "unprepared file, which carries no polar hydrogens to donate",
+        )
+        name, ok, detail = _verify_degenerate_guard(prot_trace, prot.atoms)
+        check(name, ok, detail)
+
+        # Agreement with a reference whose right answer can be stated. Each
+        # entry of `CRAMBIN_1CRN_SS` is a published segment of 1CRN; the check
+        # asks for a *run* of that state covering it, because an annotation is
+        # a list of segments and a terminus moving by one residue is not a
+        # disagreement.
+        # Agreement with a reference whose right answer can be stated. Each
+        # entry of `CRAMBIN_1CRN_SS` is a published segment of 1CRN; the check
+        # asks for a *run* of that state covering the range this module reports,
+        # because an annotation is a list of segments and a terminus moving by
+        # one residue is not a disagreement. The three residues where the
+        # reported range and the published one differ are pinned separately
+        # below rather than quietly folded into the reference.
+        state_of = {r: s for r, s in zip(prot_resids, prot_states)}
+        for lo, hi, want, what, rlo, rhi in ss_ref.CRAMBIN_1CRN_SS:
+            inside = [r for r in prot_resids if rlo <= r <= rhi]
+            ok = bool(inside) and all(state_of[r] == want for r in inside)
+            check(
+                f"1CRN {what} is classified {want}",
+                ok,
+                f"residues {rlo}-{rhi}: "
+                + "".join(state_of[r][0].upper() for r in inside)
+                + f" (want {want[0].upper() * len(inside)})",
+            )
+
+        # The exact set of residues where the answer differs from the published
+        # annotation, in both directions. Pinning it is what stops "the
+        # reference was adjusted to fit" from being possible: any change to
+        # either side turns this red.
+        published = {
+            r: want
+            for lo, hi, want, _what, _rlo, _rhi in ss_ref.CRAMBIN_1CRN_SS
+            for r in range(lo, hi + 1)
+        }
+        off = {r: (published[r], state_of.get(r, "absent")) for r in published
+               if r in state_of and state_of[r] != published[r]}
+        check(
+            "the only published segment this module contradicts is residue 32",
+            off == {32: ("sheet", "coil")},
+            f"annotated segment residues answered differently: {off or 'none'}; "
+            "want residue 32 alone, called coil because 1CRN's only inter-strand "
+            "bonds are 35->1 and 33->3, so 32 is neither bridged nor interior "
+            "to a bridged stretch",
+        )
+        # ...and the other direction: residues outside every published segment
+        # that are nevertheless called structured. Two of them, one at the
+        # C-terminal end of each alpha helix, because the 4-turn 20->16 and
+        # 31->27 each still form.
+        extra = sorted(
+            r for r, s in state_of.items()
+            if s != "coil" and r not in published
+        )
+        check(
+            "the only structured residues outside the published segments are "
+            "the two helix termini",
+            extra == [20, 31],
+            f"structured residues the annotation does not cover: {extra}; want "
+            "[20, 31] (one past the C-terminal end of each alpha helix)",
+        )
+
+        # The residues the annotation calls loop. A classifier that called the
+        # whole protein helix would still pass every check above: the segments
+        # are a small fraction of a 46-residue chain, and "everything is helix"
+        # agrees with all of them.
+        loop_resids = [r for r in ss_ref.CRAMBIN_1CRN_LOOPS if r in state_of]
+        loop_states = [state_of[r] for r in loop_resids]
+        check(
+            "1CRN's loop residues are not called helix or sheet",
+            all(s == "coil" for s in loop_states),
+            f"{len(loop_resids)} residues {loop_resids}: "
+            + "".join(s[0].upper() for s in loop_states)
+            + " (want all C)",
+        )
+
+        # The ideal helix: no reference structure behind it at all. Every
+        # residue is helical by construction, so "coil" here can only mean the
+        # classifier is wrong.
+        helix_text = ss_ref.ideal_alpha_helix(16)
+        geom = ss_ref.ideal_helix_geometry(helix_text)
+        helix_shape_ok = all(
+            lo <= geom[key] <= hi for key, (lo, hi) in ss_ref.IDEAL_HELIX_RANGES.items()
+        )
+        check(
+            "the ideal-helix fixture really is an ideal alpha helix",
+            helix_shape_ok,
+            ", ".join(f"{k} {geom[k]:.2f}" for k in ss_ref.IDEAL_HELIX_RANGES)
+            + " A; want "
+            + ", ".join(f"{k} {lo}-{hi}" for k, (lo, hi) in ss_ref.IDEAL_HELIX_RANGES.items()),
+        )
+        ideal = parse_structure(helix_text, "ideal_alpha_helix")
+        ideal_trace = ideal.backbone()
+        ideal_states = secondary_structure(ideal_trace, ideal.atoms)
+        # The two termini have no turn to be part of -- residue 1 cannot donate
+        # a hydrogen bond and residue 16's would come from a residue 17 that
+        # does not exist -- so the interior is the claim, not all sixteen.
+        interior = ideal_states[1:-1]
+        check(
+            "every residue of an ideal alpha helix is called helix",
+            bool(interior) and all(s == "helix" for s in interior),
+            f"{len(interior)} interior residues: "
+            + f"{sum(1 for s in interior if s == 'helix')} helix, "
+            + f"termini {ideal_states[0]}/{ideal_states[-1]}",
+        )
+
+        # ---- the class has to reach the pixels, measured not asserted.
+        # Every render below uses the *same* trace and the *same*
+        # `geometry.ribbon`; only the states differ, so any difference between
+        # two frames is the classification and nothing else.
+        renderer = ss_render.OffscreenRenderer.open(900, 700)
+        if renderer is None:
+            reason = f"no offscreen OpenGL context ({ss_render.LAST_PROBLEM})"
+            skip("a helix-only and a sheet-only ribbon are different pictures", reason)
+            skip("a helix-only and a coil-only ribbon are different pictures", reason)
+            skip("the receptor's own ribbon is not the all-coil one", reason)
+            skip("the classified ribbon carries helix colour and the all-sheet "
+                 "one does not", reason)
+        else:
+            from opendocking.workbench import Camera
+
+            xyz = np.asarray([a.xyz for a in prot.atoms], np.float64)
+            centre = xyz.mean(axis=0)
+            cam = Camera()
+            cam.center = centre.astype(np.float32)
+            cam.distance = float(np.linalg.norm(xyz - centre, axis=1).max()) * 2.6
+
+            n_res = len(prot_trace)
+            # The offscreen render is only evidence about the product if it
+            # draws the product's mesh. `MoleculeView.backbone_ribbon` is the
+            # call the viewport makes; `secondary_render.ribbon_for_states`
+            # re-derives the side vectors so that an arbitrary list of states
+            # can be drawn. The two have to agree vertex for vertex, or every
+            # pixel number below is about a picture the workbench does not show.
+            product_mesh = None
+            why = ""
+            try:
+                from opendocking.workbench import MoleculeView
+
+                product_mesh = MoleculeView.from_pdbqt(
+                    receptor_path, receptor_path.stem, COLOR_RECEPTOR, 0.30,
+                    role="receptor",
+                ).backbone_ribbon()
+            except Exception as exc:  # noqa: BLE001 - reported as a FAIL below
+                why = f"the product's own ribbon could not be built: {exc}"
+            mine = ss_render.ribbon_for_states(prot, prot_states)
+            check(
+                "the offscreen render draws the same mesh the viewport draws",
+                product_mesh is not None
+                and len(product_mesh.indices) == len(mine.indices)
+                and np.array_equal(
+                    np.asarray(product_mesh.positions, np.float32),
+                    np.asarray(mine.positions, np.float32),
+                )
+                and np.array_equal(
+                    np.asarray(product_mesh.colors, np.float32),
+                    np.asarray(mine.colors, np.float32),
+                ),
+                why
+                or f"{len(product_mesh.indices)} triangles from the product, "
+                f"{len(mine.indices)} from the offscreen path; positions and "
+                "per-vertex colours compared exactly",
+            )
+            # Rendered empty. The backdrop is a *gradient*, so this -- not a
+            # modal colour -- is what the ribbon's own pixels are measured
+            # against; see `secondary_render.ribbon_mask`.
+            blank = renderer.render([], cam, 900, 700)
+            frames = {}
+            for label, states in (
+                ("real", prot_states),
+                ("helix", ss_render.flat_states(n_res, "helix")),
+                ("sheet", ss_render.flat_states(n_res, "sheet")),
+                ("coil", ss_render.flat_states(n_res, "coil")),
+            ):
+                frames[label] = renderer.render(
+                    [(ss_render.ribbon_for_states(prot, states), 1.0)], cam, 900, 700
+                )
+            renderer.close()
+
+            hx_sh = differing_pixels(frames["helix"], frames["sheet"])
+            check(
+                "a helix-only and a sheet-only ribbon are different pictures",
+                hx_sh > 5000,
+                f"{hx_sh} differing px of {frames['helix'].shape[0] * frames['helix'].shape[1]}",
+            )
+            hx_co = differing_pixels(frames["helix"], frames["coil"])
+            check(
+                "a helix-only and a coil-only ribbon are different pictures",
+                hx_co > 5000,
+                f"{hx_co} differing px",
+            )
+            real_co = differing_pixels(frames["real"], frames["coil"])
+            check(
+                "the receptor's own ribbon is not the all-coil one",
+                real_co > 5000,
+                f"{real_co} differing px between the classified ribbon and an "
+                "all-coil one; 0 would mean the classification changed nothing",
+            )
+            # Colour, because colour is what a viewer reads first, and measured
+            # two-sided so a threshold that merely counts bright pixels cannot
+            # pass it. At a 20-level red-over-green margin on this receptor:
+            # all-helix 0.727, all-sheet 0.000, all-coil 0.000, classified
+            # 0.487.
+            mask_real = ss_render.ribbon_mask(frames["real"], blank)
+            mask_sheet = ss_render.ribbon_mask(frames["sheet"], blank)
+            frac_real = ss_render.red_excess(frames["real"], mask_real)
+            frac_sheet = ss_render.red_excess(frames["sheet"], mask_sheet)
+            check(
+                "the classified ribbon carries helix colour and the all-sheet "
+                "one does not",
+                frac_real > 0.15 and frac_sheet < 0.02,
+                f"{frac_real:.1%} of the classified ribbon's "
+                f"{int(mask_real.sum())} px are 20+ levels redder than green, "
+                f"against {frac_sheet:.1%} of the all-sheet ribbon's "
+                f"{int(mask_sheet.sum())} px",
+            )
 
     # ------------------------------------------------- 11. interactions panel
     section("11. pose/receptor interactions")
@@ -3127,6 +4245,42 @@ def main() -> int:
                                         - after_centre.astype(np.float32)))
             check("the camera is over that residue's contacts, not the protein's middle",
                   off < 1.0, f"{off:.2f} A from the contact centroid")
+            # The check above asks whether the move *arrived near* the contact,
+            # which a move that stopped 0.9 A short of it also satisfies. This
+            # one asks whether it arrived *exactly* where the framing said, by
+            # re-deriving that framing here from the same contacts. Between them
+            # a transition that ends off-target fails: the 1.0 A check is the
+            # loose one a user would not notice failing, and this is the one
+            # that catches a tween whose last step is not its endpoint.
+            want_c = pts.mean(axis=0)
+            want_d = max(
+                6.0,
+                float(np.linalg.norm(pts - want_c, axis=1).max()) * 5.0,
+            )
+            drift = max(
+                float(np.abs(np.asarray(win5.viewport.camera.center, np.float64)
+                             - np.asarray(want_c, np.float64)).max()),
+                abs(float(win5.viewport.camera.distance) - want_d),
+            )
+            # A *relative* floor, and the first version of this check used an
+            # absolute 1e-6 and failed at 3.58e-06. That is not the product
+            # being 3.6 milliangstroms out: `Camera.center` and the framing's
+            # arithmetic are float32, and at 16.64 A one ulp is already
+            # 2.0e-06, so an absolute 1e-6 floor is *below the representation's
+            # own resolution* and no correct implementation could ever meet it.
+            # A floor a correct answer cannot reach is not a floor.
+            tol = 1e-6 * want_d
+            check("and lands exactly on the framing focus_residue computed",
+                  drift < tol,
+                  f"the camera is {drift:.2e} A / A from the {want_d:.2f} A "
+                  f"framing at {np.round(want_c, 4)} that focus_residue derives "
+                  f"from the same contacts, against a floor of {tol:.2e} A "
+                  f"(1e-6 of the framing's own distance, about eight float32 "
+                  f"ulps at that size). float32 at 16.64 A has an ulp of 2.0e-06, "
+                  f"so the absolute 1e-6 this first used was unreachable by "
+                  f"construction; the 1.0 A check above is the loose one a user "
+                  f"would not notice failing, and this is the one that catches a "
+                  f"transition stopping a thousandth of an angstrom short")
 
         win5.cb_contacts.setChecked(False)
         app.processEvents()
@@ -3266,6 +4420,13 @@ def main() -> int:
         # Selecting a row has to move the box *and* the camera, and has to do
         # it through the spins -- setting `box_center` directly would leave
         # three stale numbers on screen describing a box that no longer exists.
+        #
+        # The eleven checks below need a second row to select, so they only run
+        # when the search found one. The `else` branch registers a skip for each
+        # of them by name, so the total is the same either way -- see
+        # `SITE_SELECTION_CHECKS`. Leaving them unregistered is how this file
+        # once reported 244 checks against a pin of 243.
+        _before = len(results)
         if rows > 1:
             before_centre = np.array(pw.viewport.box_center, copy=True)
             before_dist = float(pw.viewport.camera.distance)
@@ -3337,6 +4498,56 @@ def main() -> int:
                 len(pw.viewport.pocket_points) > 0,
                 f"{len(pw.viewport.pocket_points)} points",
             )
+            # What the space-filling mode costs, measured rather than assumed.
+            #
+            # The expectation going in was that a CPK surface would bury the
+            # site cloud: the cloud is drawn as 0.42 A points *inside* the
+            # protein, and a closed van der Waals shell is between the camera
+            # and anything inside it. The measurement says otherwise, and the
+            # reason is in the draw order -- `_draw_pocket` runs after the
+            # molecules with the depth test off, which is the only reason a site
+            # inside a protein is visible at all. So the cloud's footprint is
+            # the same number in every representation, and what the solid view
+            # actually costs is legibility of the *protein*, not the cloud.
+            #
+            # Measured: 23 719 px of cloud in all six, identical to the pixel.
+            # The claim pinned here is therefore the one that is true and that
+            # would be worth losing: the site stays visible in every
+            # representation, including the solid one. It goes red if depth
+            # testing is ever enabled for the cloud, or if a representation is
+            # added that fills the site -- which is the failure a user would
+            # experience as "the pocket controls do nothing".
+            cloud_px: dict[str, int] = {}
+            repr_keep_cloud = pw.viewport.representation
+            no_cloud = np.zeros((0, 3), np.float32)
+            for key in REPRESENTATION_KEYS:
+                pw.viewport.representation = key
+                app.processEvents()
+                keep_points = pw.viewport.pocket_points
+                with_cloud, _ = shot(pw, f"11c_cloud_{key}")
+                pw.viewport.pocket_points = no_cloud
+                app.processEvents()
+                without_cloud, _ = shot(pw, f"11c_nocloud_{key}")
+                pw.viewport.pocket_points = keep_points
+                app.processEvents()
+                cloud_px[key] = (differing_pixels(with_cloud, without_cloud)
+                                 if with_cloud is not None and without_cloud is not None
+                                 else -1)
+            pw.viewport.representation = repr_keep_cloud
+            app.processEvents()
+            pixel_check(
+                "the site cloud stays visible in every representation, the "
+                "space-filling one included",
+                bool(cloud_px) and all(v > 500 for v in cloud_px.values()),
+                "deleting all "
+                f"{len(pw.viewport.pocket_points)} cloud points changes "
+                + ", ".join(f"{k} {v} px" for k, v in cloud_px.items())
+                + ". Identical in every mode because the cloud is drawn with "
+                "the depth test off, which is how a site inside a protein is "
+                "visible at all; a solid surface therefore does not hide the "
+                "site, and the expectation that it would is what this "
+                "measurement replaced",
+            )
             # The toggle has to actually gate the draw, not just the checkbox.
             shown_before = pw.viewport.show_pocket
             before, _ = shot(pw, "pockets_cloud_on")
@@ -3367,6 +4578,28 @@ def main() -> int:
                 pw.viewport.show_pocket is True
                 and len(pw.viewport.pocket_points) > 0,
             )
+        else:
+            for _name in SITE_SELECTION_CHECKS:
+                skip(
+                    _name,
+                    f"the pocket search reported {rows} site(s) for this fixture, "
+                    "so there is no second row to select and this run cannot "
+                    "witness it; the checks are not absent, they are unanswered",
+                )
+        # Registered in both branches, and the only guard on the list above
+        # staying in step with the block. It runs on a machine with more than
+        # one site -- the ordinary case -- and compares what the block recorded
+        # against the names the `else` branch would skip, so a check renamed
+        # inside the block without updating `SITE_SELECTION_CHECKS` shows up
+        # here instead of quietly costing a machine with a single site eleven
+        # results.
+        _recorded = tuple(r[1] for r in results[_before:])
+        check(
+            "every site-selection check is listed for the skip branch too",
+            rows <= 1 or _recorded == SITE_SELECTION_CHECKS,
+            f"{len(_recorded)} recorded, {len(SITE_SELECTION_CHECKS)} listed"
+            + ("" if rows <= 1 else f"; unmatched: {set(_recorded) ^ set(SITE_SELECTION_CHECKS)}"),
+        )
     finally:
         dispose_window(app, pw)
 
@@ -3403,6 +4636,114 @@ def main() -> int:
             )
         finally:
             dispose_window(app, empty)
+
+    section("11e. selecting a pose frames it, and the move lands on target")
+    # The other camera-move checks in this file ask *whether* the camera went
+    # somewhere. This one asks *where it ended up*, because a transition is a
+    # different claim from a position: a move that stops 0.9 A short of its
+    # target, or that eases towards it and never reaches it, passes every
+    # "did the camera move" check there is and leaves the user somewhere the
+    # product never meant to put them.
+    #
+    # Three separate claims, and they fail separately:
+    #   * the move happens at all, and it *moves* rather than snapping -- a
+    #     camera that snaps satisfies "the camera ended on target" perfectly;
+    #   * it ends exactly on the target, to 1e-6, not merely near it;
+    #   * the target is the framing of the pose and its contacts, which is the
+    #     point of the change and is checked in
+    #     `scripts/framing_selection_check.py` against the pixels as well.
+    # Reuses `win`, the window the suite has had open since the start, and that
+    # is not a convenience. The first version of this block opened its own
+    # `MainWindow`, and by this point in the run the machine had already created
+    # and released nine GL contexts; the eleventh took the process down with
+    # 0xC0000409 and no traceback -- which is the failure `_draw_pocket`'s
+    # docstring already records for an exception inside a paint event, and which
+    # looks exactly like a driver crash rather than like a test. One more
+    # window is not worth a whole section; the existing one has nine poses in
+    # it and nothing here needs a second receptor.
+    sel = win
+    if not _run_camera_move(sel, app):
+        for _name in POSE_FRAMING_CHECKS:
+            skip(
+                _name,
+                "the camera move did not run to completion on this machine, so "
+                "the frames along it are unknown; the checks are not absent, "
+                "they are unanswered",
+            )
+    else:
+        plan = sel._last_selection_plan
+        cam = sel.viewport.camera
+        drift = max(
+            float(np.abs(np.asarray(cam.center, np.float64)
+                         - np.asarray(plan.target.center, np.float64)).max()),
+            abs(float(cam.distance) - float(plan.target.distance)),
+        )
+        check(POSE_FRAMING_CHECKS[0], drift < 1e-6,
+              f"row {plan_row}: the move ran "
+              f"{plan.start_distance:.2f} -> {plan.target.distance:.2f} A in "
+              f"{plan.steps} steps, and the camera finished {drift:.2e} A / A "
+              f"from the target, against a floor of 1e-6. A move that eases "
+              f"towards its target without reaching it ends a thousandth of an "
+              f"angstrom short forever, and a check written against the target "
+              f"then has to tolerate a floating-point remainder to stay "
+              f"reliable on a machine it was not written on")
+        seen = plan_distances
+        # **Distinct values, not a strictly decreasing sequence.** The sampler
+        # polls every 5 ms and the tween ticks every 20 ms, so most frames record
+        # the value that is already there; the first version required a strict
+        # decrease between consecutive samples and failed on 30 of its 32 pairs
+        # for that reason alone. The claim being made is "the camera took a path
+        # to get there rather than jumping", and the number that carries it is
+        # how many different values it was observed at: a snap yields one or two
+        # whatever the sample rate.
+        distinct = sorted(set(round(d, 6) for d in seen), reverse=True)
+        # Monotone in *either* direction: selecting a pose can move the camera in
+        # or out, and a move that eases towards a target it is already near
+        # moves out. Requiring a decrease would have failed on a selection whose
+        # target is further away than where the camera happened to be, which is
+        # a correct product state and not a wandering camera.
+        falling = all(seen[i] >= seen[i + 1] for i in range(len(seen) - 1))
+        rising = all(seen[i] <= seen[i + 1] for i in range(len(seen) - 1))
+        check(POSE_FRAMING_CHECKS[1],
+              len(distinct) >= plan.steps - 2 and (falling or rising),
+              f"{len(seen)} frames sampled, {len(distinct)} of them distinct, over "
+              f"{plan.steps} steps: {' -> '.join(f'{d:.2f}' for d in distinct)} A"
+              + ("" if (falling or rising)
+                 else f" -- NOT monotone in either direction: {seen}, and a move "
+                      f"that wanders is not a move that eases")
+              + f". The sampler polls at 5 ms and the tween ticks at 20 ms, so "
+                f"most samples repeat the value already there; a camera that "
+                f"snapped would show one or two distinct values however often it "
+                f"was sampled, and {len(distinct)} is what rules that out. This "
+                f"is the assertion that the product *moves* rather than cutting, "
+                f"and it is the half of 'a transition' that a "
+                f"final-framing-only check cannot see"
+              + ". It deliberately says nothing about the endpoint: the sampler "
+                "stops appending the moment `moving` goes false, so its last "
+                "sample is one tick *short* of the target by construction. An "
+                "earlier version asserted `arrived` here and failed at 2.1e-03 A "
+                "for exactly that reason -- the instrument cannot see the thing "
+                "it was asked to confirm. The endpoint is asserted exactly, to "
+                "1e-6, by the check above and again by "
+                "`scripts/framing_selection_check.py` section 4")
+        check(POSE_FRAMING_CHECKS[2],
+              plan.target.pose_atoms == len(_pose_coords(sel))
+              and plan.target.partner_atoms == len(_partner_coords(sel))
+              and plan.target.pose_atoms > 0,
+              f"the target frames {plan.target.pose_atoms} pose atoms and "
+              f"{plan.target.partner_atoms} contacting receptor atoms over "
+              f"{len(plan.target.partner_residues)} residues "
+              f"{list(plan.target.partner_residues)}; the 22 A search box and "
+              f"the site volume are in neither. The overlays are lines drawn "
+              f"between exactly those two sets, so this is what makes them "
+              f"readable rather than a separate nicety")
+        check(POSE_FRAMING_CHECKS[3], sel.viewport.pocket_opacity == 0.0,
+              f"the site cloud's opacity is {sel.viewport.pocket_opacity} with "
+              f"a pose selected, against {POCKET_OPACITY_PLAIN} when a site is. "
+              f"Framing the pose is no use if the subject of the picture is "
+              f"behind something nine times its own size, and opacity scales "
+              f"brightness rather than footprint, so a dimmer cloud covers the "
+              f"same pixels -- the cloud has to leave, not fade")
 
     section("11d. the pocket search does not block the window")
     # Measured, not guessed: the search takes 0.07 s for crambin's 382 atoms,
@@ -3483,12 +4824,36 @@ def main() -> int:
         # A third thing this measurement could be about instead: the search
         # finishing early, which would leave the loop turning over nothing.
         # That is a different claim from "turning while the search runs", so it
-        # gets its own check rather than being folded into the threshold.
-        check(
-            "the search really was still running while the loop turned",
-            was_running and still_running,
-            f"thread running at the start: {was_running}, at the end: {still_running}",
-        )
+        # gets its own check rather than being folded into the threshold -- and
+        # on a machine fast enough to finish the search inside the second of
+        # pumping below, that run genuinely cannot witness a window blocked by
+        # a running search, so it is a skip with a reason rather than a failure
+        # about a defect that is not there. See `search_overlap_verdict`.
+        overlap = search_overlap_verdict(was_running, still_running)
+        if overlap == "PASS":
+            check(
+                "the search really was still running while the loop turned",
+                True,
+                f"thread running at the start: {was_running}, at the end: "
+                f"{still_running}, so the {len(windows)} windows measured were "
+                "measured while it was in flight",
+            )
+        elif overlap == "SKIP":
+            skip(
+                "the search really was still running while the loop turned",
+                "the search completed before the event loop turned, so this run "
+                "cannot witness a window blocked by a running search; the turns "
+                f"measured ({windows}) are turns over a finished search and are "
+                "not evidence either way",
+            )
+        else:
+            check(
+                "the search really was still running while the loop turned",
+                False,
+                f"thread running at the start: {was_running}, at the end: "
+                f"{still_running}; the search was already over when control came "
+                "back, so find_pockets() ran it inline",
+            )
         best = max(windows) if windows else 0
         check(
             "the event loop keeps turning while the search runs",
@@ -3498,6 +4863,7 @@ def main() -> int:
             "in any window",
         )
         check(*_verify_loop_turns_guard())
+        check(*_verify_blocked_window_guard())
         wait_until = time.perf_counter() + 120
         while time.perf_counter() < wait_until and tw._pocket_thread is not None \
                 and tw._pocket_thread.isRunning():
@@ -3525,6 +4891,238 @@ def main() -> int:
             time.perf_counter() - t_close < 20.0,
             f"closed in {time.perf_counter() - t_close:.2f} s",
         )
+
+    # ------------------------------------------------- section 12: the crash guard
+    section("12. an unhandled exception in a slot is reported, and exits non-zero")
+    # A fault in a signal handler is invisible from here: the exception crosses
+    # the Qt dispatch, the process ends with `0xC0000409`, and stderr is empty.
+    # Every other section in this file can only say a run was green; this one
+    # says what happens when it is not, and it asks the question through the
+    # product's own entry point rather than through a stand-in for it.
+    #
+    # The children are run as files under `%TEMP%`, not with `-c`, so a
+    # traceback names a real path and a line number that means something -- and
+    # so the expected line can be derived from the source the child was given,
+    # independently of what the hook reports. A guard that read the line back out
+    # of the hook's own output would agree with a hook that reported nothing.
+    crash_dir = Path(tempfile.mkdtemp(prefix="odw_crash_"))
+    slot_child = crash_dir / "slot_fault.py"
+    slot_child.write_text(_SLOT_FAULT_CHILD, encoding="utf-8", newline="\n")
+    check_child = crash_dir / "check_ab.py"
+    check_child.write_text(_CHECK_AB_CHILD, encoding="utf-8", newline="\n")
+    # The line in the child that raises, found by reading the file that was just
+    # written. `+1` because enumerate starts at 1 and an editor counts the same.
+    raise_line = next(
+        n for n, text in enumerate(slot_child.read_text(encoding="utf-8").splitlines(), 1)
+        if text.strip() == 'raise ValueError("injected: the term map could not be keyed")'
+    )
+
+    nohook = _crash_child(slot_child, ["nohook"])
+    plain = _crash_child(slot_child, ["plain"])
+    hooked = _crash_child(slot_child, ["hook"])
+    chained = _crash_child(slot_child, ["chained"])
+    caught = _crash_child(slot_child, ["caught"])
+    clean = _crash_child(slot_child, ["clean"])
+
+    check(
+        "with the hook removed, the fault does not come back as this project's "
+        "failure code",
+        nohook[0] != crashguard.EXIT_UNHANDLED,
+        f"exit {nohook[0]} (0x{nohook[0] & 0xFFFFFFFF:08X}) with "
+        f"{len(nohook[2])} bytes on stderr, against the shipped "
+        f"{crashguard.EXIT_UNHANDLED}. The number is quoted rather than pinned: "
+        f"it is what this PyQt6 does at the boundary, and the claim is only that "
+        f"it is not the code this project defines for a failure",
+    )
+    check(
+        "and the shape that was refused would have called the same fault a pass: "
+        "a hook that prints and returns ends at 0",
+        plain[0] == 0 and "Traceback (most recent call last)" in plain[2],
+        f"a print-only hook gave exit {plain[0]} with a traceback on stderr. "
+        f"This is why `crashguard` also ends the process, and why the check "
+        f"below is about the exit code rather than about the log",
+    )
+    check(
+        "with the hook in place, the process ends with the project's unhandled "
+        "code: not 0, and not the code the unhooked run died with",
+        hooked[0] == crashguard.EXIT_UNHANDLED
+        and hooked[0] not in (0, nohook[0]),
+        f"exit {hooked[0]}, against 0 and {nohook[0]} (0x{nohook[0] & 0xFFFFFFFF:08X}) "
+        f"for the same fault without the hook",
+    )
+    check(
+        "and the traceback names the file the exception was raised in",
+        str(slot_child) in hooked[2],
+        f"the header must name {slot_child}; stderr carries it"
+        if str(slot_child) in hooked[2]
+        else f"{slot_child} does not appear in the {len(hooked[2])} bytes of stderr",
+    )
+    check(
+        "and it names the line, and the line is the one the child's own source "
+        "raises on",
+        f"{slot_child.name}:{raise_line}" in hooked[2]
+        and f"line {raise_line}" in hooked[2],
+        f"the `raise ValueError` is on line {raise_line} of the child as written, "
+        f"and the hook has to report that number rather than one of its own",
+    )
+    check(
+        "and it names the exception and what it said",
+        "ValueError" in hooked[2]
+        and "injected: the term map could not be keyed" in hooked[2],
+        "the type and the message, both from the exception itself",
+    )
+    # The code the product's `run()` handed back, read as a number rather than as
+    # a substring. A substring test here is vacuous under the one mutation that
+    # matters most: with `EXIT_UNHANDLED` set to 0, "run() returned 0" contains
+    # "run() returned 0" and the check passes while the process is reporting a
+    # crash as a success. So the number is compared, and `!= 0` is asserted in
+    # its own right rather than only as a difference from the constant.
+    run_line = next(
+        (ln.strip() for ln in hooked[2].splitlines()
+         if ln.strip().startswith("run() returned ")),
+        "",
+    )
+    run_code = run_line.partition("run() returned ")[2].strip()
+    check(
+        "and the 70 came back out of the product's own `run()`, so the window "
+        "closed the way it closes for any other exit",
+        run_code == str(crashguard.EXIT_UNHANDLED) and run_code != "0",
+        f"the child reported {run_line!r}. The hook asked the event loop for the "
+        f"code and `run()` returned it. An `os._exit` would have killed the "
+        f"process here and this line would not exist, which is the difference "
+        f"between the two branches in `crashguard`",
+    )
+    check(
+        "and the failure is recorded where a caller can ask for it, with the "
+        "same file and line",
+        _record_of(hooked[2])[0].get("where") == f"{slot_child}:{raise_line}"
+        and _record_of(hooked[2])[0].get("exception") == "ValueError",
+        f"`crashguard.failures()` gave {_record_of(hooked[2])}, read as JSON "
+        f"rather than as a repr. The log is for the person reading it; this is "
+        f"what a program would ask for",
+    )
+    check(
+        "a chained exception prints the chain and names the original, not just "
+        "the re-raise",
+        "KeyError" in chained[2]
+        and "injected: the term-map key went missing" in chained[2]
+        and "the original failure was KeyError" in chained[2],
+        f"exit {chained[0]}; both tracebacks, plus the line naming the bottom of "
+        f"the chain, which is the one with the actual cause",
+    )
+    check(
+        "an exception the slot catches itself never reaches the hook, and the "
+        "run ends 0 as it should",
+        caught[0] == 0
+        and "failures=()" in caught[2]
+        and "slot caught it" in caught[2],
+        f"exit {caught[0]}, `crashguard.failures()` empty, and the slot's own "
+        f"message on stderr. The hook is only reached by exceptions that escape, "
+        f"so the product's `except TermsUnavailable` and friends are untouched",
+    )
+    check(
+        "a run where nothing goes wrong is untouched: exit 0, nothing recorded, "
+        "and not one line from the hook",
+        clean[0] == 0
+        and "failures=()" in clean[2]
+        and "workbench:" not in clean[2],
+        f"exit {clean[0]}, `crashguard.failures()` empty, and no 'workbench:' "
+        f"line among the {len(clean[2])} bytes of stderr",
+    )
+
+    # The clean-run comparison. Two runs of the same diagnostic in the same tree,
+    # differing only in whether the hook is `sys.excepthook` at the time, and
+    # both asked for the same answer. A hook that changed a clean run's output
+    # would be a hook able to make a failure look like a pass, so this is a
+    # check and not a note.
+    ab_on = _crash_child(check_child, ["on"], platform=None)
+    ab_off = _crash_child(check_child, ["off"], platform=None)
+    payload_on = _verdict_of(ab_on[1])
+    payload_off = _verdict_of(ab_off[1])
+    stripped_on = _without_timings(payload_on)
+    stripped_off = _without_timings(payload_off)
+    differing = sorted(
+        k for k in set(stripped_on) | set(stripped_off)
+        if stripped_on.get(k) != stripped_off.get(k)
+    )
+    check(
+        "`odgui --check --json` gives the same verdict and the same exit code "
+        "with the hook in place as with it removed",
+        ab_on[0] == ab_off[0]
+        and payload_on is not None
+        and payload_off is not None
+        and not differing,
+        f"exit {ab_on[0]} with the hook and {ab_off[0]} without; every field "
+        f"equal except the wall-clock fields {list(TIMING_KEYS)} (raw.waited, "
+        f"widget.show_seconds, widget.waited), which are timings of two separate "
+        f"runs and cannot be equal. Fields that differed: "
+        f"{differing if differing else 'none'}. Both runs report the same "
+        f"provenance digest, so they measured the same file",
+    )
+
+    # In-process, and reversible: the two branches of `_stop` without paying for
+    # a process per branch. `_hard_exit` is replaced *before* the first probe,
+    # not after: the very first probe is deliberately made outside any
+    # `event_loop()`, which is the branch that ends the process, and a first
+    # version of this block that called the hook before the replacement killed
+    # the run itself with exit 70 and no summary. That is the branch working
+    # exactly as written, which is a poor way to learn it.
+    #
+    # `_records` and `_hard_exit` are put back afterwards, so the module is as
+    # the next section would find it.
+    import io as _io
+
+    from opendocking.workbench import crashguard as _cg
+
+    saved_records = list(_cg._records)
+    saved_hard_exit = _cg._hard_exit
+    hard_codes: list[int] = []
+    try:
+        _cg._hard_exit = hard_codes.append
+        # Probe one: no loop of ours, so the code has to be handed over by
+        # ending the process. The recorder stands in for `os._exit`.
+        _cg._records[:] = []
+        with contextlib.redirect_stderr(_io.StringIO()):
+            _cg._hook(ValueError, ValueError("in-process probe, no loop"), None)
+        outside_codes = list(hard_codes)
+        recorded = _cg.failure()
+        zeroed = _cg.finalise(0)
+        other = _cg.finalise(3)
+        # Probe two: inside `event_loop()`, where the QApplication has to be
+        # asked for the code and the hard exit must not be reached.
+        _cg._records[:] = []
+        hard_codes.clear()
+        with contextlib.redirect_stderr(_io.StringIO()), crashguard.event_loop():
+            _cg._hook(ValueError, ValueError("in-process probe, loop owned"), None)
+        inside_hard = bool(hard_codes)
+    finally:
+        _cg._records[:] = saved_records
+        _cg._hard_exit = saved_hard_exit
+    check(
+        "a recorded failure cannot be reported as 0, and a clean code is left "
+        "alone",
+        zeroed == crashguard.EXIT_UNHANDLED and zeroed != 0 and other == 3,
+        f"after the hook ran, `crashguard.failure()` gave "
+        f"{recorded and recorded['exception']!r} and `finalise(0)` gave {zeroed} "
+        f"while `finalise(3)` gave {other}. This is the backstop under the "
+        f"event-loop branch: even if the loop returned 0 the process still ends "
+        f"non-zero",
+    )
+    check(
+        "the hook hands the code to the loop when this process owns it, and ends "
+        "the process itself when it does not",
+        (not inside_hard)
+        and outside_codes == [crashguard.EXIT_UNHANDLED]
+        and outside_codes != [0],
+        f"inside `event_loop()` the hard exit was "
+        f"{'reached' if inside_hard else 'not reached'}; outside it, the code "
+        f"handed over was {outside_codes}. Calling `QCoreApplication.exit()` "
+        f"while a check script pumps `processEvents()` is harmless here -- "
+        f"nothing in this file calls `exec()`, so there is no loop for the "
+        f"pending code to end -- and the alternative, trusting "
+        f"`QThread.loopLevel()`, is the silent pass: it is above zero for a "
+        f"`processEvents()` pump as well as for `exec()`",
+    )
 
     # ---------------------------------------------------------------- report
     section("summary")
@@ -3569,12 +5167,25 @@ def main() -> int:
         partly = [t for t, n in section_skips.items() if n]
         if partly:
             print(f"  sections with skipped checks: {partly}")
-            if not GL_OK:
+            if not PIXELS_OK:
                 print(
                     f"  reason: {GL_VERDICT}\n"
                     "  CI runs `xvfb-run` with LIBGL_ALWAYS_SOFTWARE=1, where a real\n"
                     "  framebuffer exists; that run, not this one, is the authority\n"
                     "  on the skipped checks."
+                )
+            elif not GL_OK:
+                # A state worth naming, because it looks like a bug in the
+                # summary until you know it is measured: the launcher's probe
+                # said no context, and the product rendered anyway.
+                print(
+                    "  the skipped checks above are not OpenGL skips: the\n"
+                    "  launcher's own probe could not get Qt a context, but this\n"
+                    "  workbench's QOpenGLWidget did render and its framebuffer was\n"
+                    "  read, so the pixel checks ran. The probe builds a bare\n"
+                    "  QOpenGLContext; the product is a QOpenGLWidget with a real FBO,\n"
+                    "  and the second is what a viewer sees. The two disagree, and\n"
+                    "  the pixel checks follow the product."
                 )
     print(f"\n  screenshots: {OUT}")
 
@@ -3604,6 +5215,113 @@ def main() -> int:
     if missing_sections or len(results) != EXPECTED_CHECKS:
         return 2
     return 1 if nfail else 0
+
+
+#: The four names section 11e records, in file order. A module-level list
+#: because the `else`-shaped branch that skips them needs the same names, and
+#: two literals that have to be kept in step by hand is how one of them ends up
+#: skipped under a name nothing looks for. `SITE_SELECTION_CHECKS` earns its
+#: keep for the same reason and is checked against what the block recorded.
+POSE_FRAMING_CHECKS = (
+    "selecting a pose ends the camera exactly on the framing it aimed at",
+    "and the camera moved to get there rather than snapping",
+    "and what it aimed at is the pose plus the atoms the pose is touching",
+    "and the site cloud steps aside for the pose it is framing",
+)
+
+#: Where the camera was on each frame of the last move, filled by
+#: `_run_camera_move`. Module level rather than a return value because the
+#: section that reads it is long and threading a list through it would be noise.
+plan_distances: list[float] = []
+move_ms = 0
+plan_row = -1
+
+
+def _pose_coords(win):
+    pose = next((m for m in win.viewport.molecules if m.role == "pose"), None)
+    return np.asarray(pose.coords, np.float32) if pose is not None else np.zeros((0, 3), np.float32)
+
+
+def _partner_coords(win):
+    pose = next((m for m in win.viewport.molecules if m.role == "pose"), None)
+    rec = next((m for m in win.viewport.molecules if m.role == "receptor"), None)
+    if pose is None or rec is None:
+        return np.zeros((0, 3), np.float32)
+    wanted = sorted({c.partner_index for c in win.viewport.contacts
+                     if 0 <= c.partner_index < len(rec.coords)})
+    return (np.asarray(rec.coords, np.float32)[wanted] if wanted
+            else np.zeros((0, 3), np.float32))
+
+
+def _settle_camera(win, app, budget_ms: int = 800) -> bool:
+    """Wait, on the clock, until no camera move is in flight.
+
+    The move is driven by a wall-clock `QTimer`, so a loop of
+    `processEvents()` returns with the camera still moving: that loop burns its
+    iteration budget in a few milliseconds and the timer has not ticked. Reading
+    `camera.distance` through it therefore samples *a moment of a move*, not a
+    camera position. Measured on this machine, the same pose read 23.6 A on one
+    run and 45.4 A on another with the poses byte-identical, which is the
+    symptom this exists to remove.
+
+    `QTest.qWait` is the only thing here that advances the clock, for the same
+    reason `settle()` in `framing_selection_screens.py` uses it. Returns whether
+    the camera came to rest inside the budget, so a caller can turn "never
+    settled" into a different claim from "settled somewhere".
+    """
+    from PyQt6.QtTest import QTest
+
+    waited = 0
+    while win.viewport.moving and waited < budget_ms:
+        QTest.qWait(10)
+        app.processEvents()
+        waited += 10
+    for _ in range(4):
+        app.processEvents()
+    return not win.viewport.moving
+
+
+def _run_camera_move(win, app) -> bool:
+    """Select a pose and sample the camera on every frame of the move.
+
+    Returns False -- rather than recording anything -- when the move does not
+    run to completion, so the caller decides between a measurement and a skip
+    and does not have to trust a partial one.
+
+    **The waiting is on the clock, and that is not incidental.** The move is
+    driven by a `QTimer`, so a loop of `processEvents()` burns its iteration
+    budget in a few milliseconds and returns with the camera still in flight.
+    Measured on this machine, the two frames either side of such a "settled"
+    read differ by 47% of the frame, because they are of two different camera
+    positions -- and a check that differences two frames to decide what a role
+    owns would then be measuring the camera.
+    """
+    global plan_distances, move_ms, plan_row
+    from PyQt6.QtTest import QTest
+
+    plan_distances = []
+    move_ms = 0
+    plan_row = -1
+
+    win.viewport.frame_all()
+    for _ in range(10):
+        app.processEvents()
+    rows = win.pose_table.rowCount()
+    if rows < 2:
+        return False
+    row = next((r for r in range(rows) if r != win.pose_table.currentRow()), 0)
+    plan_row = row
+    win.pose_table.selectRow(row)
+    # Sample every frame the move produces, then wait for it to finish. The
+    # samples are the point: they are what distinguishes a move from a snap.
+    for _ in range(4000 // 10):
+        app.processEvents()
+        if win.viewport.moving:
+            plan_distances.append(float(win.viewport.camera.distance))
+        QTest.qWait(5)
+    for _ in range(10):
+        app.processEvents()
+    return not win.viewport.moving
 
 
 if __name__ == "__main__":

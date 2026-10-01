@@ -543,6 +543,7 @@ pub fn write_pose<W: Write>(
         buf.push_str(&format!("REMARK RMSD_LB, RMSD_UB: {lb:.2}, {ub:.2}\n"));
     }
     buf.push_str(&format!("REMARK Run: {}\n", pose.run));
+    write_connectivity(&mut buf, pose, mol);
 
     if opts.write_branch_tree && !torsions.is_empty() {
         write_branch_tree(&mut buf, pose, mol, torsions, opts);
@@ -635,6 +636,77 @@ fn format_atom_name(atom: &Atom) -> String {
         format!(" {n}")
     } else {
         n.to_string()
+    }
+}
+
+/// Record name carrying the declared covalent connectivity of a pose.
+///
+/// It is a `REMARK` rather than a bare `CONECT` for three reasons, all of them
+/// about not breaking a reader that has never heard of it: every tool in this
+/// format already skips `REMARK` bodies it does not recognise, the bond count
+/// is stated on its own record so a truncated file is detectable rather than
+/// silently short, and the record carries no columns a fixed-width reader
+/// could mis-slice. The pairs are **atom serials**, never file positions.
+///
+/// The two record names are deliberately **not** prefixes of one another. An
+/// earlier draft called the count `OD_BONDCOUNT` and the bond `OD_BOND`, and
+/// `OD_BOND` is a prefix of `OD_BONDCOUNT`, so the obvious way to find the bond
+/// records -- filter the lines for the bond record name -- also matched the
+/// count line and then read one serial where two were expected. Caught by
+/// `a_written_pose_declares_its_bonds_keyed_by_serial` below, which is what a
+/// unit test is for. `OD_NBONDS` and `OD_BOND` share no prefix, and filtering
+/// for `REMARK OD_BOND ` now yields exactly the bond records.
+const CONNECTIVITY_COUNT_REMARK: &str = "REMARK OD_NBONDS";
+/// Continuation records; one bond per line, as two serials.
+const CONNECTIVITY_BOND_REMARK: &str = "REMARK OD_BOND";
+
+/// Write the pose's covalent bonds, keyed by atom serial.
+///
+/// **Why this exists.** `ROOT`/`BRANCH` already declare the torsion tree, but
+/// the tree is indexed in *file order* while a reader that builds its view in
+/// *serial order* has to re-index every bond, and `poses.pdbqt` is genuinely
+/// not in serial order -- measured on the shipped file, the serials run
+/// `5,6,7,8,9,10,4,11,12,1,2,3`. A reader using the tree without that
+/// re-indexing step mis-indexes every bond in the molecule. The tree also says
+/// nothing about the bonds *inside* the rigid root cluster, which is where a
+/// ring lives. The fix is to declare the connectivity outright and key it by
+/// serial, so file order stops mattering.
+///
+/// **Why `REMARK` and not `CONECT`.** A `CONECT` record is a real part of the
+/// PDB vocabulary and other tools will parse it, on their terms: Vina and meeko
+/// both ignore it, but a general viewer will honour it and draw bonds that may
+/// not be the ones the engine scored. A `REMARK` is inert to all of them, so
+/// the record is additive by construction: a file that carries it is still a
+/// valid pose file for a tool that knows nothing about it, which is the same
+/// property the existing `REMARK VINA RESULT` line relies on.
+///
+/// The bond list comes from [`Molecule::bonds`] -- the graph the engine scored
+/// -- and not from a distance test at write time, so the record cannot disagree
+/// with the energy in the same `MODEL` block.
+fn write_connectivity(buf: &mut String, pose: &PoseOutput<'_>, mol: &Molecule) {
+    // `pose.atoms` is a prefix-compatible view of `mol.atoms` in every caller,
+    // and the atom lines number it by `i + 1`, so serial = index + 1. A bond
+    // whose indices fall outside the pose is dropped rather than written with a
+    // serial that no `ATOM` record carries, which would be a bond to nothing.
+    let n = pose.atoms.len().min(mol.atoms.len());
+    let mut bonds: Vec<(usize, usize)> = Vec::new();
+    for b in &mol.bonds {
+        if b.i >= n || b.j >= n || b.i == b.j {
+            continue;
+        }
+        bonds.push((b.i, b.j));
+    }
+    // A deterministic order: a file written twice from the same molecule has to
+    // be byte-identical, or "diff two runs" stops being evidence of anything.
+    bonds.sort_unstable();
+    bonds.dedup();
+    buf.push_str(&format!("{CONNECTIVITY_COUNT_REMARK} {}\n", bonds.len()));
+    for (i, j) in bonds {
+        buf.push_str(&format!(
+            "{CONNECTIVITY_BOND_REMARK} {:>5} {:>5}\n",
+            i + 1,
+            j + 1
+        ));
     }
 }
 
@@ -1032,5 +1104,156 @@ mod tests {
         let s = parse_pdbqt(text).unwrap();
         assert!((s.molecule.atoms[0].coord[1] - 2.0).abs() < 1e-9);
         assert_eq!(s.molecule.atoms[0].atom_type, AtomType::CH);
+    }
+
+    /// A pose file must say which atoms are bonded, and it must say it in a way
+    /// that survives the file not being in serial order.
+    #[test]
+    fn a_written_pose_declares_its_bonds_keyed_by_serial() {
+        let s = parse_pdbqt(ETHANOL).unwrap();
+        let coords: Vec<Vec3> = s.molecule.atoms.iter().map(|a| a.coord).collect();
+        let pose = PoseOutput {
+            atoms: &s.molecule.atoms,
+            coords: &coords,
+            energy: -7.25,
+            intermolecular: -6.0,
+            intramolecular: -1.25,
+            rank: 1,
+            run: 1,
+            rmsd_lb: None,
+            rmsd_ub: None,
+        };
+        let opts = PdbqtWriteOptions {
+            multi_model: true,
+            write_branch_tree: false,
+            ..Default::default()
+        };
+        let mut buf: Vec<u8> = Vec::new();
+        write_pose(&mut buf, &pose, &s.molecule, &[], &opts).unwrap();
+        let text = String::from_utf8(buf).unwrap();
+
+        // C1-C2, C2-O1, O1-H1: three bonds over four atoms.
+        let declared: Vec<(usize, usize)> = text
+            .lines()
+            .filter(|l| l.starts_with(CONNECTIVITY_BOND_REMARK))
+            .map(|l| {
+                let mut it = l.split_whitespace().skip(2);
+                let a: usize = it.next().unwrap().parse().unwrap();
+                let b: usize = it.next().unwrap().parse().unwrap();
+                (a, b)
+            })
+            .collect();
+        assert_eq!(
+            declared,
+            vec![(1, 2), (2, 3), (3, 4)],
+            "the record must be the molecule's own bonds, as serials:\n{text}"
+        );
+        assert!(
+            text.contains("REMARK OD_NBONDS 3"),
+            "the bond count must be stated:\n{text}"
+        );
+
+        // Serials, not positions. The atoms are written in the same order here,
+        // so the two readings coincide -- which is exactly why the *file*
+        // round trip in `scripts/torsion_bond_record_check.py` is the one that
+        // can tell them apart, on a pose whose order is 5,6,7,8,9,10,4,...
+        let serials: Vec<usize> = text
+            .lines()
+            .filter(|l| l.starts_with("ATOM"))
+            .map(|l| l[6..11].trim().parse().unwrap())
+            .collect();
+        assert_eq!(serials, vec![1, 2, 3, 4]);
+        for (a, b) in &declared {
+            assert!(serials.contains(a) && serials.contains(b));
+        }
+
+        // And it must not disturb the reader: the file is still one molecule
+        // with the same atoms, because the record is a REMARK and carries no
+        // coordinates.
+        let back = parse_pdbqt(&text).unwrap();
+        assert_eq!(back.molecule.len(), 4);
+    }
+
+    /// The record has to be inside the `MODEL` block, for the same reason the
+    /// energy remark is: a per-model splitter collects only what lies between
+    /// `MODEL` and `ENDMDL`, so a bond record written outside belongs to no
+    /// pose and every pose reads back with no connectivity at all.
+    #[test]
+    fn the_bond_record_is_inside_the_model_block() {
+        let s = parse_pdbqt(ETHANOL).unwrap();
+        let coords: Vec<Vec3> = s.molecule.atoms.iter().map(|a| a.coord).collect();
+        let pose = PoseOutput {
+            atoms: &s.molecule.atoms,
+            coords: &coords,
+            energy: -7.25,
+            intermolecular: -6.0,
+            intramolecular: -1.25,
+            rank: 1,
+            run: 1,
+            rmsd_lb: None,
+            rmsd_ub: None,
+        };
+        let opts = PdbqtWriteOptions {
+            multi_model: true,
+            write_branch_tree: false,
+            ..Default::default()
+        };
+        let mut buf: Vec<u8> = Vec::new();
+        write_pose(&mut buf, &pose, &s.molecule, &[], &opts).unwrap();
+        let text = String::from_utf8(buf).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        let model = lines
+            .iter()
+            .position(|l| l.starts_with("MODEL"))
+            .expect("MODEL record");
+        let end = lines
+            .iter()
+            .position(|l| l.starts_with("ENDMDL"))
+            .expect("ENDMDL record");
+        let record = lines
+            .iter()
+            .position(|l| l.starts_with(CONNECTIVITY_COUNT_REMARK))
+            .unwrap_or_else(|| panic!("no connectivity record in:\n{text}"));
+        assert!(
+            model < record && record < end,
+            "the connectivity record must sit between MODEL and ENDMDL, got \
+             MODEL at {model}, record at {record}, ENDMDL at {end}:\n{text}"
+        );
+    }
+
+    /// A molecule with no bonds still says so, rather than writing nothing: a
+    /// reader has to be able to tell "this writer ran and there are no bonds"
+    /// from "this file predates the record", and only the count line does that.
+    #[test]
+    fn a_bondless_molecule_still_states_a_count() {
+        let text =
+            "ATOM      1  C1  UNL     1       0.000   0.000   0.000  1.00  0.00     0.000 C \n";
+        let s = parse_pdbqt(text).unwrap();
+        let coords: Vec<Vec3> = s.molecule.atoms.iter().map(|a| a.coord).collect();
+        let pose = PoseOutput {
+            atoms: &s.molecule.atoms,
+            coords: &coords,
+            energy: -1.0,
+            intermolecular: -1.0,
+            intramolecular: 0.0,
+            rank: 1,
+            run: 1,
+            rmsd_lb: None,
+            rmsd_ub: None,
+        };
+        let opts = PdbqtWriteOptions::default();
+        let mut buf: Vec<u8> = Vec::new();
+        write_pose(&mut buf, &pose, &s.molecule, &[], &opts).unwrap();
+        let text = String::from_utf8(buf).unwrap();
+        assert!(
+            text.contains("REMARK OD_NBONDS 0"),
+            "a bondless molecule must still carry a count:\n{text}"
+        );
+        assert!(
+            !text
+                .lines()
+                .any(|l| l.starts_with(CONNECTIVITY_BOND_REMARK)),
+            "and no bond records behind it:\n{text}"
+        );
     }
 }

@@ -470,15 +470,16 @@ class MoleculeView:
             return np.zeros(3, np.float32)
         return self.coords.mean(axis=0)
 
-    def backbone_ribbon(self, **kwargs):
-        """A swept ribbon along the backbone, or ``None`` if there is none.
+    def _backbone_guide_and_sides(self):
+        """``(guide points, side vectors, states)`` for a backbone sweep.
 
-        The guide points are the CA atoms and the ribbon's face is oriented with
-        the CA-to-CB direction, which is what stops a flat ribbon twisting about
-        its own axis as the chain runs. Glycine has no CB, so it falls back to
-        the N-to-C bisector, which points the same way for every residue.
+        The shared front half of `backbone_ribbon` and `cartoon`, because the
+        two draw the same trace and differ only in what they sweep along it. The
+        side vectors are the CA-to-CB direction, which is what stops a flat
+        ribbon twisting about its own axis as the chain runs; glycine has no CB,
+        so it falls back to the N-to-C bisector, which points the same way for
+        every residue.
         """
-        from .geometry import ribbon as build_ribbon
         from .structure import secondary_structure
 
         if self.structure is None or not self.has_backbone:
@@ -490,7 +491,7 @@ class MoleculeView:
         guide = np.asarray([atoms[ca].xyz for _, ca, _ in trace], dtype=np.float64)
 
         sides = []
-        for idx, (n, ca, c) in enumerate(trace):
+        for n, ca, c in trace:
             side = None
             for cand in self.structure.residues:
                 if ca in cand.atoms:
@@ -507,7 +508,40 @@ class MoleculeView:
                     break
             sides.append(side if side is not None else np.array([0.0, 0.0, 1.0]))
         states = secondary_structure(trace, atoms)
-        return build_ribbon(guide, np.asarray(sides), states, **kwargs)
+        return guide, np.asarray(sides), states
+
+    def backbone_ribbon(self, **kwargs):
+        """A swept ribbon along the backbone, or ``None`` if there is none.
+
+        The `ribbon` representation's own geometry: one swept quad strip whose
+        width follows the classified secondary structure but whose cross-section
+        does not turn about the path. The `cartoon` mode builds a different mesh
+        from the same classification -- see `cartoon`.
+        """
+        from .geometry import ribbon as build_ribbon
+
+        parts = self._backbone_guide_and_sides()
+        if parts is None:
+            return None
+        guide, sides, states = parts
+        return build_ribbon(guide, sides, states, **kwargs)
+
+    def cartoon(self, **kwargs):
+        """The cartoon mesh: a twisted ribbon for helices, arrows for strands.
+
+        The same trace, the same side vectors and the same per-residue states as
+        `backbone_ribbon`, swept into a different shape: the cross-section turns
+        about the path through a helix and stays flat through a strand, and a
+        strand's last residues flare into an arrowhead. `None` when there is no
+        backbone, so a ligand falls back the same way it does for a ribbon.
+        """
+        from .cartoon_geometry import cartoon as build_cartoon
+
+        parts = self._backbone_guide_and_sides()
+        if parts is None:
+            return None
+        guide, sides, states = parts
+        return build_cartoon(guide, sides, states, **kwargs)
 
 
 @dataclass

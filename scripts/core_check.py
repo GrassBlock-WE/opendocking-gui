@@ -161,6 +161,7 @@ IG = core.load_ligand(EX / "ibuprofen_prep.pdbqt")       # 16 atoms, 4 torsions
 BZ = core.load_ligand(EX / "benzene_prep.pdbqt")         # 6 atoms, 0 torsions
 BOX = core.GridBox.from_center_size((0.0, 0.0, 0.0), (14.0, 14.0, 14.0))
 MAPS = REC.precalculate(BOX, "vina", 0.5)
+REC_TERMS = REC.precalculate_terms(BOX, "vina", 0.5)
 RESULT = core.dock(IG, MAPS, exhaustiveness=4, num_modes=3, seed=42)
 NAN = float("nan")
 INF = float("inf")
@@ -169,17 +170,29 @@ INF = float("inf")
 # =========================================================== module surface
 def sec_surface():
     section("module surface: every exported name exists and is the right kind")
-    check("__all__ has 20 names", len(core.__all__) == 20, f"got {len(core.__all__)}")
+    # 22 = 13 functions + 6 classes + 3 constants. The two that were added since
+    # this file last said 20 are `TermMaps` and `score_conformation_terms`, and
+    # they came in as a pair: the decomposition is only usable if a caller can
+    # *build* the per-term maps and *read* the per-term breakdown, so a pin that
+    # counted one without the other would have passed on a module that could do
+    # half the job. The names are listed rather than only counted, so a swap of a
+    # class for a function is a visible edit and not a number that happens to
+    # match.
+    check("__all__ has 22 names", len(core.__all__) == 22, f"got {len(core.__all__)}")
     missing = [n for n in core.__all__ if not hasattr(core, n)]
     check("every __all__ name resolves", not missing, f"missing: {missing}")
     functions = [n for n in core.__all__ if callable(getattr(core, n)) and not isinstance(getattr(core, n), type)]
-    check("12 of them are functions", len(functions) == 12, f"got {len(functions)}")
+    check("13 of them are functions", len(functions) == 13, f"got {len(functions)}")
     classes = [n for n in core.__all__ if isinstance(getattr(core, n), type)]
-    check("5 of them are classes", len(classes) == 5, f"got {classes}")
+    check("6 of them are classes", len(classes) == 6, f"got {classes}")
     constants = [n for n in core.__all__ if n not in functions and n not in classes]
     check("the other 3 are constants", len(constants) == 3, f"got {constants}")
     check("every exported name is in __all__ exactly once",
           len(set(core.__all__)) == len(core.__all__))
+    check("the decomposition's two halves are both exported",
+          "TermMaps" in core.__all__ and "score_conformation_terms" in core.__all__,
+          f"__all__ has TermMaps={'TermMaps' in core.__all__}, "
+          f"score_conformation_terms={'score_conformation_terms' in core.__all__}")
 
     check("SCORING_FUNCTIONS is a tuple", isinstance(core.SCORING_FUNCTIONS, tuple))
     check("SCORING_FUNCTIONS == ('vina', 'vinardo')", core.SCORING_FUNCTIONS == ("vina", "vinardo"),
@@ -209,6 +222,30 @@ def sec_surface():
         for n in ("GridBox", "Receptor", "GridMaps", "Ligand", "DockingResult")
     ), "every wrapper declares __slots__")
 
+    # The same census question, asked of the surface Python publishes. `dock`'s
+    # keyword list is *derived* from the live signature, so a new keyword joins
+    # the census the moment it is written and cannot ship unforwarded. A keyword
+    # in the signature that appears in neither this module nor the binding is a
+    # promise with nothing behind it -- the shape of defect this has now found
+    # four times in four places, none of which had a check asking in general.
+    import inspect
+    sig_params = [p for p in inspect.signature(core.dock).parameters]
+    this_module = Path(__file__).read_text(encoding="utf-8")
+    binding = (ROOT / "dock-py" / "src" / "lib.rs").read_text(encoding="utf-8")
+    unforwarded = [p for p in sig_params
+                   if p not in this_module or p not in binding]
+    check("every keyword dock() publishes is forwarded somewhere",
+          not unforwarded,
+          f"core.dock publishes {sig_params}; not mentioned in both core.py and "
+          f"the binding: {unforwarded}. A keyword that stops being forwarded is a "
+          f"parameter the user can set that does nothing")
+    check("dock's published surface is the nine it is documented to have",
+          len(sig_params) == 9,
+          f"core.dock publishes {len(sig_params)} keywords {sig_params}. Not a "
+          f"number to protect so much as a tripwire: a tenth keyword is either a "
+          f"new promise or a new gap, and either way it should arrive with a "
+          f"decision rather than quietly")
+
 
 # ============================================== the seam pytest cannot see
 def sec_reachability():
@@ -224,6 +261,7 @@ def sec_reachability():
     lig = IG
     res = RESULT
     bz = BZ
+    rec_terms = REC_TERMS
 
     expected = {
         core.GridBox: [
@@ -243,6 +281,14 @@ def sec_reachability():
             ("bounds", lambda: rec.bounds),
             ("estimate_memory_mb", lambda: rec.estimate_memory_mb(BOX)),
             ("precalculate", lambda: rec.precalculate(BOX, "vina", 0.5)),
+            # The second way to tabulate a box, and the one the whole
+            # per-term decomposition rests on. It was missing from this table
+            # while being reachable, which is the state this table exists to
+            # prevent: an exposed entry point with no test is not an exposed
+            # entry point. Its semantics are pinned separately, in
+            # `sec_term_maps`, because "it returns something" and "its fields
+            # mean what their names say" are different claims.
+            ("precalculate_terms", lambda: rec.precalculate_terms(BOX, "vina", 0.5)),
             ("__repr__", lambda: repr(rec)),
             ("from_pdbqt", lambda: core.Receptor.from_pdbqt(EX / "rec_prep.pdbqt")),
             ("from_pdbqt_str", lambda: core.Receptor.from_pdbqt_str(
@@ -258,6 +304,28 @@ def sec_reachability():
             ("box", lambda: maps.box),
             ("write_map_files", lambda: _write_maps(maps)),
             ("__repr__", lambda: repr(maps)),
+        ],
+        # The class `precalculate_terms` hands back. It was missing from this
+        # table while being reachable, which is why `TermMaps.box` could raise
+        # `TypeError: ... object is not callable` on every single access for the
+        # whole life of the property without anything going red: the entry point
+        # that produces it was listed, the object it produces was not. The
+        # inverse check below cannot notice that either, because it only asks
+        # about classes the table already mentions.
+        core.TermMaps: [
+            ("dims", lambda: rec_terms.dims),
+            ("spacing", lambda: rec_terms.spacing),
+            ("num_points", lambda: rec_terms.num_points),
+            ("memory_mb", lambda: rec_terms.memory_mb),
+            ("box", lambda: rec_terms.box),
+            # The backend, which is the question a caller should be able to ask
+            # *before* paying 1.5x the memory for a per-term tabulation. It was
+            # absent while the engine had carried `TermMaps::BACKEND` for the
+            # life of the feature, so from Python the cheaper question had no
+            # answer and the only way to get one was to build the table and
+            # read a number off it.
+            ("backend", lambda: rec_terms.backend),
+            ("__repr__", lambda: repr(rec_terms)),
         ],
         core.Ligand: [
             ("num_atoms", lambda: lig.num_atoms),
@@ -286,6 +354,12 @@ def sec_reachability():
             ("scoring_function", lambda: res.scoring_function),
             ("pose_coords", lambda: res.pose_coords(0)),
             ("pose_conformation", lambda: res.pose_conformation(0)),
+            # The pose's own gradient, which the search computed at this
+            # conformation and used to discard. The two directions are pinned
+            # separately, in `sec_result`, because "it is there" and "a consumer
+            # can tell when it is not" are different claims and only the second
+            # one stops a reader assuming the field is populated.
+            ("pose_gradient", lambda: res.pose_gradient(0)),
             ("all_pose_coords", lambda: res.all_pose_coords()),
             ("write_pdbqt", lambda: _write(res, "write_pdbqt", "out.pdbqt")),
             ("write_xyz", lambda: _write(res, "write_xyz", "out.xyz")),
@@ -401,6 +475,251 @@ def sec_gridbox_engine():
     raises("a 4-tuple size is refused", ValueError,
            lambda: core.GridBox.from_center_size((0, 0, 0), (14, 14, 14, 14)), "length 3")
     check("a degenerate box never reaches precalculate", True)
+
+
+# ==================================================== precalculate_terms
+def sec_term_maps():
+    section("precalculate_terms: the per-term tabulation means what its keys say")
+    # `sec_reachability` only asks whether `precalculate_terms` *works*: it comes
+    # back, and the members of what it comes back can be read. These ask whether
+    # it is **right**, and the three questions are deliberately different from one
+    # another:
+    #
+    # 1. does the total agree with the production path, to within the one `f32`
+    #    rounding that separates them (the band is derived below, not picked);
+    # 2. does each *key* carry its own term, as opposed to the right set of
+    #    numbers under the wrong names;
+    # 3. is (2) pinned hard enough to survive a reorder.
+    #
+    # (2) is the one a numeric test with a loose tolerance misses, and (3) is the
+    # one a *sign* test misses. A transposition of two keys preserves the sum, so
+    # `terms_total == intermolecular` and `shape == g1 + g2 + rep` both still
+    # hold with two values exchanged, and it preserves the sign of both, so a
+    # test that asks "is the steric term the positive one" still passes. What it
+    # cannot preserve is the *ratio* the two Gaussians have as the probe moves
+    # away from the surface: `g1` is centred 0.5 A out, `g2` 0.0 A out, and they
+    # share a width, so `g1/g2` climbs steeply with surface distance -- 4.82,
+    # 12.82, 41.75 on the bare probe below. Exchanging the two keys reciprocates
+    # the ratio, so the same three numbers become 0.208, 0.078, 0.024 and a
+    # rising sequence becomes a falling one. The pin is therefore an ordering
+    # with a margin wide enough that interpolation cannot flip it, and the margin
+    # is stated so a reader can see it is not a decimal someone liked.
+    #
+    # The pose below is the one `docs/SCORING.md` section 5.4 publishes: a
+    # receptor carbon at the origin with an acceptor oxygen 3.8 A away, a
+    # one-carbon probe at the origin, a 12 A box at 0.375 A. The prose does not
+    # give that atom set in a form that reproduces the published table exactly,
+    # so the two figures it does state exactly are the two pinned as values --
+    # `hbond` and `hydrophobic`, which depend on the C...C pair alone -- and the
+    # rest are pinned as properties.
+    doc_box = core.GridBox.from_center_size((0.0, 0.0, 0.0), (12.0, 12.0, 12.0))
+    doc_rec = core.Receptor.from_pdbqt_str(
+        "ATOM      1  C   UNL     1       0.000   0.000   0.000  1.00  0.00     0.000 C \n"
+        "ATOM      2  O   UNL     1       3.800   0.000   0.000  1.00  0.00    -0.300 OA\n"
+    )
+    doc_lig = core.Ligand.from_pdbqt_str(
+        "ATOM      1 C   UNL     1       0.000   0.000   0.000  1.00  0.00     0.000 C \n"
+        "END\n"
+    )
+    doc_maps = doc_rec.precalculate(doc_box, "vina", 0.375)
+    doc_terms = doc_rec.precalculate_terms(doc_box, "vina", 0.375)
+    doc = core.score_conformation_terms(doc_lig, doc_maps, doc_terms,
+                                        np.zeros(doc_lig.num_dof), "vina")
+
+    eps32 = float(np.finfo(np.float32).eps)
+
+    def f32_band(value):
+        """The one-f32-rounding band around `value`, in kcal/mol.
+
+        The two paths being compared read the *same* sum from two storage
+        layouts: the production grid rounds `g1 + g2 + rep` into a single f32,
+        the term maps round each of the three separately. So they may disagree,
+        and the disagreement is bounded by the ulp of an f32 near the value --
+        `2^-23 * value`. Four of them is the band used below, and it is used
+        for every cross-path comparison in this section for the same reason.
+        """
+        return 4.0 * eps32 * max(1.0, abs(value))
+
+    # 1. the identity the documentation publishes, with a derived band
+    gap = abs(doc["terms_total"] - doc["intermolecular"])
+    # Narrow enough that any real transposition fails it: exchanging `g1` and
+    # `g2` moves this sum by `2 * (g1 - g2)`, which here is 5.3e-02 -- about
+    # 9000x the band.
+    band = f32_band(doc["terms_total"])
+    check("terms_total equals the production energy to within the f32 rounding "
+          "that separates them",
+          gap <= band,
+          f"terms_total {doc['terms_total']!r} against intermolecular "
+          f"{doc['intermolecular']!r}: a gap of {gap:.3e} against a derived band "
+          f"of {band:.3e} (4 f32 ulps of {doc['terms_total']:.4f}). "
+          f"docs/SCORING.md 5.4 publishes 4.01e-07 for its own pose, the same "
+          f"order, and the check pins the *band* rather than that figure because "
+          f"the published table's atom set is not stated in a reproducible form")
+    check("the production slot 0 is the three shape terms fused",
+          abs(doc["shape"] - (doc["g1"] + doc["g2"] + doc["rep"])) <= 1e-12,
+          f"shape {doc['shape']!r} against g1+g2+rep "
+          f"{doc['g1'] + doc['g2'] + doc['rep']!r}")
+    check("the five named terms account for the whole decomposition",
+          abs((doc["g1"] + doc["g2"] + doc["rep"] + doc["hb"] + doc["hyd"])
+              - doc["terms_total"]) <= 1e-12,
+          f"the five sum to "
+          f"{doc['g1'] + doc['g2'] + doc['rep'] + doc['hb'] + doc['hyd']!r} "
+          f"against terms_total {doc['terms_total']!r}")
+    check("the four slots are the fused shape plus the three that are already "
+          "separate, each to the f32 rounding of the grid it was read from",
+          list(doc["slot_names"]) == ["shape", "hb_from_donor",
+                                      "hb_from_acceptor", "hydrophobic"]
+          and abs(doc["slots"][0] - doc["shape"]) <= f32_band(doc["shape"])
+          and abs(doc["slots"][1] - doc["hb_from_donor"]) <= f32_band(doc["hb_from_donor"])
+          and abs(doc["slots"][2] - doc["hb_from_acceptor"]) <= f32_band(doc["hb_from_acceptor"])
+          and abs(doc["slots"][3] - doc["hyd"]) <= f32_band(doc["hyd"]),
+          f"slot_names {doc['slot_names']} against slots {doc['slots']!r}. The "
+          f"first slot differs from the f64 `shape` by "
+          f"{abs(doc['slots'][0] - doc['shape']):.3e} -- the same one-f32 "
+          f"rounding as the total, because the slots come out of the production "
+          f"f32 grid and the terms out of the f64 one. It is **not** exact and "
+          f"an exact assertion would have been wrong. This is a *four*-slot "
+          f"split and not a five-term one: the hydrogen bond is one term spread "
+          f"over two slots, so `hb` cannot be read off any single entry here")
+
+    # 2. the split of the hydrogen bond, on a pose where it is not zero. The
+    # published pose has a C...C pair and therefore no donor and no acceptor, so
+    # `hb` is 0 there and `0 == 0 + 0` would pass on a pair that had the halves
+    # exchanged, or on one that had no halves at all. The docked example has six
+    # polar hydrogens, so this is read where the split has something to split.
+    real = core.score_conformation_terms(IG, MAPS, REC_TERMS, RESULT.pose_conformation(0), "vina")
+    check("the hydrogen bond is the sum of its two halves, where it is not zero",
+          real["hb"] != 0.0
+          and abs(real["hb"] - (real["hb_from_donor"] + real["hb_from_acceptor"])) <= 1e-12,
+          f"hb {real['hb']!r} against donor {real['hb_from_donor']!r} plus "
+          f"acceptor {real['hb_from_acceptor']!r}. The published C...C pose gives "
+          f"hb {doc['hb']!r}, which this assertion deliberately does not use "
+          f"because a zero cannot tell the two halves apart")
+
+    # 3. the ratio that a transposition reciprocates
+    # A receptor that is one carbon and a probe that is one carbon, so the only
+    # pairs in the sum are C...C and the ratio is a property of the two
+    # Gaussians rather than of whichever atoms happened to be in the box.
+    bare = core.Receptor.from_pdbqt_str(
+        "ATOM      1  C   UNL     1       0.000   0.000   0.000  1.00  0.00     0.000 C \n")
+    bare_lig = core.Ligand.from_pdbqt_str(
+        "ATOM      1 C   UNL     1       0.000   0.000   0.000  1.00  0.00     0.000 C \nEND\n")
+    bare_maps = bare.precalculate(BOX, "vina", 0.5)
+    bare_terms = bare.precalculate_terms(BOX, "vina", 0.5)
+
+    def ratio_at(x):
+        """`g1 / g2` for the bare probe held at `x` along the x axis."""
+        conf = np.zeros(bare_lig.num_dof)
+        conf[0] = x
+        got = core.score_conformation_terms(bare_lig, bare_maps, bare_terms, conf, "vina")
+        return got["g1"] / got["g2"]
+
+    # Carbon-carbon surface distance is centre distance minus 3.8 A (two C
+    # interaction radii), so these are surface distances 0.1, 0.5 and 0.7 A.
+    r_near, r_mid, r_far = ratio_at(3.9), ratio_at(4.3), ratio_at(4.5)
+    # The margin is 1.5x, read off the physics rather than off the numbers: a
+    # shared-width Gaussian pair offset by half its own width cannot change its
+    # ratio by less than a large factor over 0.6 A. The measured steps are 2.66x
+    # and 3.26x, and the transposed sequence steps down by 4.0x and 4.9x, so
+    # the pin misses in both directions with room to spare.
+    check("g1 pulls harder on g2 as the probe leaves the surface -- the two "
+          "keys are not transposed",
+          r_mid >= 1.5 * r_near and r_far >= 1.5 * r_mid,
+          f"g1/g2 at surface distance 0.1 A is {r_near:.4f}, at 0.5 A is "
+          f"{r_mid:.4f}, at 0.7 A is {r_far:.4f}: steps of "
+          f"{r_mid / r_near:.2f}x and {r_far / r_mid:.2f}x against a required "
+          f"1.5x. g1 is centred 0.5 A out and g2 at 0.0 A with a shared width, "
+          f"so the ratio has to rise. Exchanging the two keys reciprocates it "
+          f"into {1 / r_near:.4f}, {1 / r_mid:.4f}, {1 / r_far:.4f}, which "
+          f"falls by {1 / r_far / (1 / r_near):.2f}x end to end and fails both "
+          f"inequalities")
+    check("both Gaussians are attractive, and only the steric term is not",
+          doc["rep"] > 0.0 and doc["g1"] < 0.0 and doc["g2"] < 0.0
+          and doc["hyd"] < 0.0 and doc["hb"] == 0.0,
+          f"rep {doc['rep']:+.6e}, g1 {doc['g1']:+.6e}, g2 {doc['g2']:+.6e}, "
+          f"hyd {doc['hyd']:+.6e}, hb {doc['hb']:+.6e}. The Gaussians are "
+          f"attractive and the steric term repulsive, so a key carrying the "
+          f"wrong one has the wrong sign. hb is 0 on this pose because a C...C "
+          f"pair has no donor and no acceptor, which is the same 0 "
+          f"docs/SCORING.md 5.4 publishes")
+
+    # 4. the two figures the documentation states exactly for this pose
+    check("the published C...C figures are reproduced: hbond 0 and hydrophobic "
+          "-0.035069",
+          doc["hb"] == 0.0 and abs(doc["hyd"] - -0.035069) <= 5e-10,
+          f"hbond {doc['hb']!r} against the published 0.000000, hydrophobic "
+          f"{doc['hyd']!r} against the published -0.035069 (a gap of "
+          f"{abs(doc['hyd'] - -0.035069):.2e}, i.e. it reproduces the printed "
+          f"6 digits). Both depend on the C...C pair alone, which is why they "
+          f"reproduce while the table's other five figures do not; those are not "
+          f"pinned, and the reason is recorded rather than worked around")
+
+    # 5. the two surfaces describe one box
+    check("the term maps and the production maps tabulate the same box",
+          tuple(doc_terms.dims) == tuple(doc_maps.dims)
+          and tuple(doc_terms.box.min_corner) == tuple(doc_maps.box.min_corner)
+          and tuple(doc_terms.box.max_corner) == tuple(doc_maps.box.max_corner)
+          and doc_terms.spacing == doc_maps.spacing
+          and doc_terms.num_points == doc_maps.num_points,
+          f"term maps {tuple(doc_terms.dims)} at {doc_terms.spacing} over "
+          f"{tuple(doc_terms.box.min_corner)}..{tuple(doc_terms.box.max_corner)} "
+          f"against production {tuple(doc_maps.dims)} at {doc_maps.spacing}. The "
+          f"two differ only in what each point stores -- 60 f32 against 40 -- so "
+          f"a geometry disagreement is a bug in one of them, not a consequence "
+          f"of the decomposition")
+    check("the term maps are the larger of the two, by the ratio the stride "
+          "says they are",
+          doc_terms.memory_mb / doc_maps.memory_mb > 1.4
+          and doc_terms.memory_mb / doc_maps.memory_mb < 1.6,
+          f"term maps {doc_terms.memory_mb:.3f} MB against production "
+          f"{doc_maps.memory_mb:.3f} MB, a ratio of "
+          f"{doc_terms.memory_mb / doc_maps.memory_mb:.4f}. docs/SCORING.md 5.4 "
+          f"publishes TERM_STRIDE 60 against STRIDE 40, which is 1.5; the check "
+          f"is loose enough for the per-point bookkeeping to sit either side of "
+          f"it and tight enough that a term map silently holding production data "
+          f"would fail")
+
+    # 6. the backend the decomposition says produced it
+    check("the decomposition names the backend that produced it",
+          doc["backend"] == "cpu" and real["backend"] == "cpu",
+          f"got {doc['backend']!r} and {real['backend']!r}. One variant exists "
+          f"today, so this is not yet a choice between two answers; it is here "
+          f"so that a caller reads a value rather than inferring one from which "
+          f"path it took, which is the promise docs/SCORING.md 5.4 makes in the "
+          f"half it says is delivered")
+
+    # 7. and the same question asked *before* the table is built, which is the
+    # whole point of putting it on `TermMaps`
+    check("a caller can ask the backend question before tabulating anything",
+          doc_terms.backend == "cpu",
+          f"got {doc_terms.backend!r} against the decomposition's own "
+          f"{doc['backend']!r}. The two must agree: they are the same fact read "
+          f"from two places, and a disagreement would mean one of them had been "
+          f"reconstructed per language binding rather than derived from the "
+          f"engine's constant")
+    # The second direction: the projection must *derive* the string rather than
+    # spell it. Spelled out in Python it would be a second copy of the answer
+    # that could not move when the engine's does, which is the failure this
+    # whole projection exists to prevent -- and unlike the pose_gradient case
+    # there is no unreachable branch to blame, so a source check is the only
+    # thing that sees it.
+    #
+    # Read from the compiled function's constants rather than its source text.
+    # The first version of this check searched the source for the string
+    # `"cpu"` and failed on a green implementation, because the property's own
+    # docstring explains the answer in prose and prose contains it. `co_consts`
+    # holds the literals the code actually uses, the docstring being the first
+    # of them, so "does this function contain a string constant equal to cpu" is
+    # answerable exactly.
+    names = core.TermMaps.backend.fget.__code__.co_names
+    consts = core.TermMaps.backend.fget.__code__.co_consts
+    check("the projection derives the backend from the engine, not a literal",
+          "_terms" in names and "backend" in names
+          and not any(c == "cpu" for c in consts),
+          f"co_names {names}, co_consts {consts!r}. `co_names` holds the name "
+          f"fragments the body loads -- '_terms' and 'backend' together are the "
+          f"derivation -- and a string constant 'cpu' in `co_consts` would be a "
+          f"second copy of the answer, which cannot move when the engine's does")
 
 
 # ================================================================ Receptor
@@ -841,6 +1160,52 @@ def sec_dock_guards():
     check("the engine does not expose the maps' scoring function, so no guard is possible here",
           not any("scoring" in n for n in dir(MAPS._maps)), f"raw attrs: {dir(MAPS._maps)}")
 
+    # The pose's own gradient. Two directions, because the second is the one
+    # that stops a reader assuming the field is populated: "a real result
+    # carries one" is a claim about the engine, and "a consumer can tell when it
+    # does not" is a claim about the *interface*, and only the first would still
+    # be true if the second were quietly dropped.
+    grads = [RESULT.pose_gradient(i) for i in range(RESULT.num_poses)]
+    check("every pose of a real result carries a gradient",
+          all(g is not None for g in grads),
+          f"{sum(g is None for g in grads)} of {len(grads)} poses report None")
+    check("a pose gradient has one entry per degree of freedom, float64",
+          grads[0] is not None
+          and grads[0].shape == (6 + IG.num_torsions,)
+          and grads[0].dtype == np.float64,
+          f"got {None if grads[0] is None else (grads[0].shape, grads[0].dtype)}, "
+          f"want ({6 + IG.num_torsions},) float64")
+    check("pose_gradient defaults to index 0, like pose_conformation",
+          np.array_equal(RESULT.pose_gradient(), RESULT.pose_gradient(0)))
+    check("a pose's gradient is finite", grads[0] is not None
+          and bool(np.isfinite(grads[0]).all()),
+          f"got {None if grads[0] is None else grads[0]}")
+    check("two poses' gradients are not the same vector, so the field is "
+          "per-pose rather than one shared answer",
+          RESULT.num_poses < 2
+          or not np.array_equal(RESULT.pose_gradient(0), RESULT.pose_gradient(1)),
+          f"{RESULT.num_poses} poses; a shared gradient would mean the value "
+          f"belongs to some other iterate than the pose it is reported on")
+    # The `None` direction has no real result to read it from -- every pose the
+    # search returns was measured -- so it cannot be pinned by calling it, and a
+    # check that tries goes green against a projection that zero-fills the gap.
+    # That mutation was made and survived exactly that way: `g is None` is
+    # unreachable on every fixture here, so substituting a zero vector changed
+    # no observable value. The only thing left to check is the projection
+    # itself, so this reads its source and names the two things that must be in
+    # it. This is a source check, and deliberately so: it is the only kind that
+    # can see a branch nothing calls.
+    import inspect
+    src = inspect.getsource(core.DockingResult.pose_gradient)
+    check("the projection has an explicit `return None` branch",
+          "return None" in src,
+          f"source is:\n{src}")
+    check("the projection never substitutes a zero vector for a missing one",
+          not any(c in src for c in ("np.zeros", "np.full", "np.zeros_like", "np.ones")),
+          f"a zero-filled fallback would assert stationarity for a pose nobody "
+          f"measured, which is the most damaging wrong answer available here. "
+          f"Source is:\n{src}")
+
 
 def sec_dock_boundary():
     section("engine boundary: the cases this audit was asked about")
@@ -1072,7 +1437,8 @@ def sec_scoring():
 
 
 def main() -> int:
-    for fn in (sec_surface, sec_reachability, sec_gridbox, sec_gridbox_engine, sec_receptor,
+    for fn in (sec_surface, sec_reachability, sec_gridbox, sec_gridbox_engine, sec_term_maps,
+               sec_receptor,
                sec_estimate, sec_maps, sec_ligand, sec_exhaustiveness, sec_ladder_agreement,
                sec_auto_box, sec_dock_guards, sec_dock_boundary, sec_result, sec_writers, sec_scoring):
         try:
