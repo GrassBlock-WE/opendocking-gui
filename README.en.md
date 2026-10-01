@@ -105,7 +105,7 @@ reported; a box you set yourself is left exactly as you gave it.
 Common options:
 
 ```
--e, --exhaustiveness N     independent search trajectories (default 8, use 32 to be thorough)
+-e, --exhaustiveness N     independent search walks (defaults to the box's volume — see below; use 32 to be thorough)
 -m, --num_modes N          how many de-duplicated conformations to output (default 9)
 --rmsd-cutoff R            RMSD below which two poses count as the same (default 1.0 Å)
 --scoring {vina,vinardo}   scoring function
@@ -231,14 +231,16 @@ A large receptor takes a while, but the window stays usable.
 - **The search box must be given** — either the six numbers, or `--auto-box N`.
   A box covering the whole protein costs tens of gigabytes and is equivalent to
   having no search region. An automatic box is far smaller: on crambin it is
-  3.8x smaller than the whole-protein box and still contains all 16 ligand atoms.
+  between 5.8x and 29.7x smaller than the whole-protein box, site by site — the
+  figure depends on how the whole-protein box is taken, so no single number is
+  quoted here.
 - **The pocket search finds enclosed space, not a binding site.** A ligand lying
   flat on the surface scores zero and is never listed, and the largest site is
   not necessarily the one your ligand wants. It is a shortlist to choose from,
   and choosing is the part it leaves to you.
 - **Exhaustiveness follows the search box.** It is a count of Monte Carlo walks,
   and walks are spread through the box they search, so a fixed 8 that covers a
-  20 Å box is four times too thin for a 40 Å one — and an under-sampled search
+  20 Å box is eight times too thin for a 40 Å one — and an under-sampled search
   returns a bad *pose*, which looks exactly like the box being wrong. Measured
   on a 39 × 26 × 41 Å box: **12.88 Å at 16, 1.26 Å at 64**, two seconds either
   way. `odcli` derives it when you do not pass `-e` and prints the value and the
@@ -247,7 +249,9 @@ A large receptor takes a while, but the window stays usable.
   by all three callers, and it scales **linearly in the box's volume** — one
   calibration point does not license a fitted power law.
 - **A snug binding site is found but ranked low.** On crambin with ibuprofen, the
-  site the ligand occupies is **12 Å³** and comes **ninth of sixteen**, behind
+  site the ligand occupies is **12.3 Å³** and comes **ninth of the twelve** the
+  default returns (ninth of sixteen with the pocket-count cap lifted; the rank
+  does not change), behind
   three larger lumps of surface. That is not a bug: the search measures the space
   a ligand *leaves*, not the space it occupies, and a tight fit leaves almost
   none. Where the pocket is roomier than the ligand — all four redocking
@@ -273,7 +277,8 @@ A large receptor takes a while, but the window stays usable.
   now a guard against a genuinely huge cavity and nothing else. It used to have a
   second, accidental job — deleting the merged surface lumps the pre-labelling
   dilation produced — and that job disappeared with the dilation, so the ceiling
-  is now inert on crambin (16 sites either way) and a check says so explicitly.
+  is now inert on crambin (16 sites either way with the cap lifted, 12 either
+  way at the default) and a check says so explicitly.
 - **A small sealed cavity will not be found at the default probe.** T4 lysozyme
   L99A has one built in on purpose, and this search reports zero sealed
   cavities there: the cavity is about 100 Å³ and a 1.4 Å probe inflates every
@@ -286,13 +291,16 @@ A large receptor takes a while, but the window stays usable.
   haemoglobin's 4779 atoms. It runs on a worker thread so the window stays
   usable, but it does take a while.
 - **Option names use underscores**: `--center_x`, not `--center-x`.
-- **`use_gpu` defaults to False.** The GPU accumulates in `f32` and differs from
-  the CPU by about 1e-6; a default that varies with the hardware would break
+- **`use_gpu` defaults to False.** The GPU accumulates in `f32`; `core.py`'s own
+  docstring puts the relative error at order 1e-7, which **was not re-measured
+  here** (this machine reports no usable GPU); a default that varies with the
+  hardware would break
   cross-machine reproducibility. Pass `use_gpu=True` explicitly, then read the
   fallback reason out of `report_backend`.
 - **Do not use `|grad|` to decide whether a pose converged.** The grid is a
-  trilinear interpolant and therefore only C⁰, and in practice every returned
-  pose has an atom sitting on a cell face, where `|grad|` is often 2–6 while the
+  trilinear interpolant and therefore only C⁰, and in practice a returned pose
+  nearly always has an atom close to a cell face, where `|grad|` can reach 2–6
+  while the
   energy will not move anywhere. Use a line search.
 - **If you edited anything under `dock-py/python/`, rebuild and reinstall the
   wheel**, or `pytest --pyargs` will still be testing the previous build.

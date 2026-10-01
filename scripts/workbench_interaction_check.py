@@ -40,10 +40,15 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 from PyQt6 import QtCore, QtGui, QtOpenGLWidgets, QtWidgets  # noqa: E402
 from PyQt6.QtTest import QTest  # noqa: E402
 
+from opendocking.workbench import COLOR_BEST_POSE, COLOR_RECEPTOR  # noqa: E402
 from opendocking.workbench.app import (  # noqa: E402
     POCKET_OPACITY_COMPARE,
     POCKET_OPACITY_PLAIN,
+    POSE_GHOST_COLOR,
+    REPRESENTATION_KEYS,
     MainWindow,
+    _draw_colours_for,
+    _walks_wanted,
 )
 
 OUT = ROOT / "dist" / "workbench_interaction"
@@ -66,11 +71,13 @@ results: list[tuple[str, str, str]] = []
 #: 199 measured from the last green run, plus 9 added with section 7c, plus 2
 #: added with sections 5b/6 being given their own headers, plus 2 completeness
 #: checks, plus 1 for the site cloud stepping aside, plus 3 for a pose file
-#: whose columns are wrong, plus 1 for this machine's OpenGL verdict.
-#: Calibrated from the first run to reach this summary. Skips count toward the
-#: total because `skip` records a result too, so this number does not move with
-#: the environment -- which is the property that makes it worth pinning.
-EXPECTED_CHECKS = 217
+#: whose columns are wrong, plus 1 for this machine's OpenGL verdict, plus 11
+#: for the overlay's visual hierarchy -- across every representation, not just
+#: the default -- and the engine's own ceiling. Calibrated from the first run
+#: to reach this summary. Skips count toward the total because `skip` records a
+#: result too, so this number does not move with the environment -- which is the
+#: property that makes it worth pinning.
+EXPECTED_CHECKS = 233
 
 #: Every section this file is supposed to reach, in file order. A section that
 #: is entered always prints a header, and every header is closed by the next
@@ -493,6 +500,201 @@ def differing_pixels(a, b) -> int:
     if a is None or b is None:
         return 0
     return int((a != b).any(axis=-1).sum())
+
+
+def _grab(win: MainWindow):
+    """Repaint and read the frame back, without writing a file.
+
+    `shot` is the one that saves, and a measurement probe has no business
+    leaving half a dozen `_footprint_before.png` files in the screenshot
+    directory for a human to wonder about. Returns ``None`` rather than raising
+    when the framebuffer cannot be read, the same as `shot`: the pixel guard
+    routes that case to a skip, and a probe that raised would take the rest of
+    the section with it.
+    """
+    win.viewport.repaint()
+    QTest.qWait(40)
+    img = win.viewport.grabFramebuffer()
+    if img.isNull():
+        return None
+    return img_array(img)
+
+
+def _own_pixels(win: MainWindow, hide):
+    """``(frame, mask)`` for the pixels `hide` is responsible for.
+
+    Same camera and same frame either side, so the mask is that one thing's own
+    footprint. `hide` is a callable returning a restorer -- `_hide_role` builds
+    one.
+    """
+    before = _grab(win)
+    restore = hide()
+    after = _grab(win)
+    restore()
+    _grab(win)
+    if before is None or after is None:
+        return None, None
+    mask = np.abs(before.astype(np.int16) - after.astype(np.int16)).max(axis=2) > 8
+    return before, mask
+
+
+def _channel_excess(frame, mask, hi: int, lo: int) -> float:
+    """Share of `mask`'s pixels where channel ``hi`` leads channel ``lo``.
+
+    **Channel order, because it is the whole answer here.** The framebuffer
+    arrives as `Format_RGB32`, whose bytes are B, G, R, A -- so channel 0 is
+    *blue*, 1 is green and 2 is *red*. Read it as RGB and this measures a
+    sign-flipped quantity, which reports the slate ghost as redder than the
+    protein and would send the next person looking for a lighting bug.
+
+    0.02 is about five 8-bit levels: enough to shrug off shading and rounding,
+    small enough that carbon grey (0.58 against 0.55, so 0.03 the other way) and
+    oxygen red (0.90 against 0.20) both fall on the correct side of it.
+    """
+    if frame is None or mask is None or not mask.any():
+        return 0.0
+    a = frame[:, :, hi].astype(np.float32) / 255.0
+    b = frame[:, :, lo].astype(np.float32) / 255.0
+    return float(((a - b)[mask] >= 0.02).mean())
+
+
+def _bluer_fraction(frame, mask) -> float:
+    """Share of `mask`'s pixels that are bluer than red."""
+    return _channel_excess(frame, mask, 0, 2)
+
+
+def _greener_fraction(frame, mask) -> float:
+    """Share of `mask`'s pixels that are greener than *both* red and blue.
+
+    `min` of the two excesses rather than either one alone: a pose that is
+    green beside a blue ghost has to beat both, and "green leads red" is
+    satisfied by a blue object as easily as by a green one.
+    """
+    if frame is None or mask is None or not mask.any():
+        return 0.0
+    return min(
+        _channel_excess(frame, mask, 1, 2),
+        _channel_excess(frame, mask, 1, 0),
+    )
+
+
+def _set(vp, **attrs):
+    """Set viewport attributes; returns a callable that puts them back."""
+    saved = {k: getattr(vp, k) for k in attrs}
+    for k, v in attrs.items():
+        setattr(vp, k, v)
+
+    def restore():
+        for k, v in saved.items():
+            setattr(vp, k, v)
+
+    return restore
+
+
+def _save_pose_crop(win: MainWindow, name: str, radius: float = 150.0) -> str:
+    """Save a crop of the live viewport around the pose cluster.
+
+    This is the image a person actually needs for the overlay, and the whole
+    viewport is the wrong size for it: nine poses inside a 300-atom protein
+    occupy a corner of a 1251 px frame.
+
+    **The crop is taken in the framebuffer's own pixels, and that is not the
+    widget's.** `grabFramebuffer` returns device pixels, so a 1001 px wide
+    viewport hands back a 1251 px image on a display whose `devicePixelRatio` is
+    1.25. The projection below is in widget coordinates -- it has to be, they
+    are what the camera matrices are defined against -- so it is scaled by the
+    ratio before it is used as an index. Computing the box in widget pixels and
+    slicing the image with it gives a crop of the wrong place at 0.8 scale,
+    which reads as a framing bug rather than an indexing one and sends the next
+    person looking for a camera problem that is not there.
+    """
+    vp = win.viewport
+    frame = _grab(win)
+    if frame is None:
+        return ""
+    chunks = [
+        np.asarray(m.coords, np.float64)
+        for m in vp.molecules
+        if m.role in ("pose", "pose_ghost") and len(m.coords)
+    ]
+    if not chunks:
+        return ""
+    points = np.concatenate(chunks, axis=0)
+    aspect = vp.width() / max(vp.height(), 1)
+    mvp = vp.camera.projection(aspect) @ vp.camera.view_matrix()
+    homo = np.concatenate([points, np.ones((len(points), 1))], axis=1)
+    clip = homo @ mvp.T
+    w = np.where(np.abs(clip[:, 3:4]) < 1e-9, 1e-9, clip[:, 3:4])
+    ndc = clip[:, :3] / w
+    dpr = vp.devicePixelRatioF()
+    # Widget pixels -> device pixels, once, here.
+    sx = (ndc[:, 0] * 0.5 + 0.5) * vp.width() * dpr
+    sy = (0.5 - ndc[:, 1] * 0.5) * vp.height() * dpr
+    cx, cy = float(sx.mean()), float(sy.mean())
+    r = radius * dpr
+    x0, y0 = int(max(0, cx - r)), int(max(0, cy - r))
+    x1, y1 = int(min(frame.shape[1], cx + r)), int(min(frame.shape[0], cy + r))
+    crop = np.ascontiguousarray(frame[y0:y1, x0:x1], np.uint8)
+    if crop.size == 0:
+        return ""
+    h, wid, _ = crop.shape
+    img = QtGui.QImage(
+        crop.tobytes(), wid, h, wid * 3, QtGui.QImage.Format.Format_RGB888
+    )
+    path = OUT / f"{name}.png"
+    img.save(str(path))
+    print(
+        f"  crop {name}: {wid}x{h} at ({x0},{y0}), dpr {dpr}, "
+        f"centre ({cx:.0f},{cy:.0f}) -> {path}"
+    )
+    return str(path)
+
+
+def _hide_role(win: MainWindow, role: str):
+    """Hide every view with this role; returns a callable that shows them again.
+
+    `visible` is written by `_apply_pose_visibility` from the checkboxes, so a
+    probe has to put back what it found rather than assume `True` -- and it has
+    to put it back through the same setter, or the next checkbox click would
+    read a flag the probe left behind.
+    """
+    was = [(m, m.visible) for m in win.viewport.molecules if m.role == role]
+    for m, _ in was:
+        m.visible = False
+
+    def restore():
+        for m, v in was:
+            m.visible = v
+
+    return restore
+
+
+def _footprint_of(win: MainWindow, mutate) -> int:
+    """How much of the frame a change accounts for, in pixels.
+
+    `mutate` is handed the viewport and must return a callable that undoes
+    whatever it did -- `_set` is the usual way to build one.
+
+    A *differential* measure, and that is the whole point. The obvious
+    alternative -- count the pixels that are not the background colour -- is
+    useless here: `paintGL` draws a gradient behind everything, so "not
+    background" is mostly a count of the background, and every contributor
+    measures in the hundreds of thousands. Changing one thing, re-rendering, and
+    differencing cancels the gradient and leaves only that thing's own share of
+    the picture, which is the quantity a visual-hierarchy claim is actually
+    about.
+
+    It restores what it changed. A probe that left the scene altered would make
+    every check after it meaningless, and a measurement helper is exactly the
+    kind of code that gets trusted to be harmless.
+    """
+    vp = win.viewport
+    before = _grab(win)
+    restore = mutate(vp)
+    after = _grab(win)
+    restore()
+    _grab(win)
+    return differing_pixels(before, after)
 
 
 def drag(widget, button, start, end, steps=6) -> None:
@@ -1058,6 +1260,54 @@ def main() -> int:
             f"{ex.lbl_effort.text()!r}",
         )
 
+        # The workbench's half of the rule, asked directly. `_walks_wanted`
+        # used to re-derive the density here in the panel, importing the
+        # engine's two calibration constants and calling that a guarantee
+        # against drift. It was a guarantee about the slope and the reference
+        # and nothing at all about the cap, the rung choice, or the refusal to
+        # answer a box the engine cannot build. The cap is what the note names
+        # when it says "the ladder stops here", so it is checked against the
+        # engine rather than against this file's own reading of the ladder.
+        pairs = [(s, _walks_wanted((s, s, s))) for s in (20.0, 26.0, 40.0, 60.0, 200.0)]
+        check(
+            "the ceiling the note compares against is the engine's own answer",
+            all(ceiling == float(exhaustiveness_for_box((s,) * 3)) for s, (_, ceiling) in pairs),
+            "; ".join(
+                f"{s:.0f} A -> {ceiling:.0f} (engine "
+                f"{exhaustiveness_for_box((s,) * 3)})"
+                for s, (_, ceiling) in pairs
+            ),
+        )
+        check(
+            "and the requirement is still the unsaturated one, above the cap for a big box",
+            all(
+                (want > ceiling) == (want > EXHAUSTIVENESS_LADDER[-1] + 1e-9)
+                for _, (want, ceiling) in pairs
+            )
+            and _walks_wanted((60.0,) * 3)[0] == 216.0
+            and _walks_wanted((26.0,) * 3)[0] < _walks_wanted((26.0,) * 3)[1],
+            "; ".join(
+                f"{s:.0f} A wants {want:.0f} against a ceiling of {ceiling:.0f}"
+                f"{'  <- past the top rung' if want > ceiling else ''}"
+                for s, (want, ceiling) in pairs
+            )
+            + ". The requirement is not the function's return value and cannot "
+            "be: the function rounds up to a rung, so it cannot hand back a "
+            "figure between two rungs, and 216 against 128 is the whole point.",
+        )
+        refused = []
+        for bad in ((20.0, float("nan"), 20.0), (20.0, 20.0)):
+            try:
+                _walks_wanted(bad)
+                refused.append(f"{bad} -> ANSWERED")
+            except ValueError as exc:
+                refused.append(f"{bad} -> refused ({str(exc)[:44]}...)")
+        check(
+            "a box the engine refuses is refused here too, not formatted into a note",
+            len(refused) == 2 and "ANSWERED" not in " ".join(refused),
+            "; ".join(refused),
+        )
+
         # The map number itself, against the engine and not against the panel.
         receptor = _Receptor.from_pdbqt(EXAMPLES / "1crn_prep.pdbqt")
         centre = tuple(float(s.value()) for s in ex.center_spins)
@@ -1618,20 +1868,183 @@ def main() -> int:
             f"ghost opacities {sorted({g.opacity for g in ghosts})}, pose "
             f"opacity {[m.opacity for m in pw2.viewport.molecules if m.role == 'pose']}",
         )
-        # The site cloud is bigger than the poses and sits in the same place.
-        # At its usual opacity it is *brighter* than a ghost, so a solid pose
-        # inside it cannot be told apart from a ghost inside it -- the picture
-        # then says nothing about which pose is the one, while the label beside
-        # the checkbox claims to. This is the claim that has to be true in the
-        # picture, not only in the object model.
+        # The site cloud is bigger than the poses and sits in the same place,
+        # so it has to step aside -- *all the way*, which is the part that is
+        # easy to get wrong. Opacity scales how bright the cloud is, not how
+        # much of the frame it occupies: measured on this very run, the cloud
+        # changed 76,398 pixels at 0.34 and 76,398 pixels at 0.10, the same
+        # number to the pixel, against 8,343 for the selected pose. So a faded
+        # cloud is still a cloud that owns nine times the picture, and the
+        # object-model assertion below would have passed for a picture that
+        # says nothing. The claim has to be measured in the rendered frame.
         check(
-            "the site cloud steps aside while poses are being compared",
-            abs(pw2.viewport.pocket_opacity - POCKET_OPACITY_COMPARE) < 1e-9
+            "the site cloud's opacity is zero while poses are being compared",
+            pw2.viewport.pocket_opacity == 0.0
+            and POCKET_OPACITY_COMPARE == 0.0
             and pw2.viewport.pocket_opacity < min(g.opacity for g in ghosts),
             f"pocket opacity {pw2.viewport.pocket_opacity} while comparing, "
             f"{POCKET_OPACITY_PLAIN} normally, ghosts at "
-            f"{sorted({g.opacity for g in ghosts})}: the cloud has to be dimmer "
-            f"than a ghost or it decides what the picture is about",
+            f"{sorted({g.opacity for g in ghosts})}: faded is not the same as "
+            f"out of the way, and only one of those changes the picture",
+        )
+        # Both directions, in the pixels. The first is the sanity half: a pose
+        # that drew nothing would satisfy a naive ratio, so the pose's own
+        # footprint is measured too. The second is the real claim, and it is
+        # deliberately not "the frame changed" -- it is that the frame while
+        # comparing is *identical* to the frame with the cloud's points removed
+        # altogether. A cloud drawn at any opacity, however faint, makes those
+        # two differ, which is exactly why 0.10 was not enough.
+        cloud_full = _footprint_of(
+            pw2, lambda vp: _set(vp, pocket_opacity=POCKET_OPACITY_PLAIN)
+        )
+        pose_own = _footprint_of(
+            pw2,
+            lambda vp: _hide_role(pw2, "pose"),
+        )
+        empty = np.zeros((0, 3), np.float32)
+        with_points = _grab(pw2)
+        restore_points = pw2.viewport.pocket_points
+        pw2.viewport.pocket_points = empty
+        without_points = _grab(pw2)
+        pw2.viewport.pocket_points = restore_points
+        _grab(pw2)
+        pixel_check(
+            "with the cloud at full strength it out-areas the solid pose",
+            pose_own > 0 and cloud_full > pose_own,
+            f"at {POCKET_OPACITY_PLAIN} the cloud owns {cloud_full} px against "
+            f"the pose's {pose_own} px ({cloud_full / max(1, pose_own):.1f}x) -- "
+            f"the ratio the overlay has to beat, and the reason fading to 0.10 "
+            f"was not a fix",
+        )
+        pixel_check(
+            "while the overlay is on the cloud is not drawn at all",
+            with_points is not None
+            and without_points is not None
+            and np.array_equal(with_points, without_points),
+            f"{differing_pixels(with_points, without_points)} pixels differ "
+            f"between the frame as shown and the same frame with all "
+            f"{len(restore_points)} cloud points deleted; any opacity at all "
+            f"would make them differ",
+        )
+        # The ghosts were slate within 0.07 per channel of the receptor and
+        # were drawn with the protein's own element colours, so eight of them
+        # rendered as eight dimmer grey carbons inside a grey protein. The
+        # claim now is that they differ in *kind*: one flat colour, and not the
+        # protein's.
+        #
+        # Asked of `_draw_colours_for`, not of `MoleculeView.atom_colors`: the
+        # renderer uses the former, so the latter would report the element
+        # table and say nothing about what reaches the framebuffer.
+        ghost_cols = {
+            c for g in ghosts for c in map(tuple, np.round(_draw_colours_for(g), 3))
+        }
+        # Both sides built the same way, as float32. The trap is not equality --
+        # `np.float32(0.38) == 0.38` is True, NumPy compares in float32 -- it is
+        # *hashing*. `hash(np.float32(0.38))` is the hash of 0.37999999523162842
+        # and `hash(0.38)` is the hash of a different float64, so the two tuples
+        # land in different buckets and the set comparison answers False without
+        # ever comparing a single element. A colour check that fails while
+        # printing the right colour in both halves of its own message is the
+        # most confusing failure available, and this is where it comes from.
+        ghost_want = {tuple(np.round(np.asarray(POSE_GHOST_COLOR, np.float32), 3).tolist())}
+        pose_want = {
+            tuple(np.round(np.asarray(COLOR_BEST_POSE, np.float32), 3).tolist())
+        }
+        pose_view = next(m for m in pw2.viewport.molecules if m.role == "pose")
+        pose_cols = {tuple(np.round(c, 3)) for c in _draw_colours_for(pose_view)}
+        check(
+            "every ghost is one flat colour, so it cannot pass for a second pose",
+            ghost_cols == ghost_want,
+            f"{len(ghost_cols)} distinct colour(s) across all "
+            f"{sum(len(g.coords) for g in ghosts)} ghost atoms: "
+            f"{sorted(ghost_cols)} (want exactly {sorted(ghost_want)})",
+        )
+        check(
+            "the selected pose wears its own colour while poses are being compared",
+            len({tuple(np.round(c, 3)) for c in _draw_colours_for(pose_view, True)}) == 1
+            and {tuple(np.round(c, 3)) for c in _draw_colours_for(pose_view, True)}
+            == pose_want,
+            f"while comparing the pose is drawn in "
+            f"{sorted({tuple(np.round(c, 3)) for c in _draw_colours_for(pose_view, True)})}"
+            f", which is its own identity colour {COLOR_BEST_POSE}",
+        )
+        check(
+            "and goes back to element colours with the overlay off, where the question is what it is",
+            len(pose_cols) > 1,
+            f"with the overlay off the pose is drawn in {len(pose_cols)} atom "
+            f"colours, so the flat colour is a comparison state and not a "
+            f"permanent repaint of the molecule",
+        )
+        check(
+            "and the two differ in kind, not only in strength",
+            len(pose_cols) > 1
+            and pose_cols.isdisjoint(ghost_cols)
+            and {tuple(np.round(c, 3)) for c in _draw_colours_for(pose_view, True)}.isdisjoint(
+                ghost_cols
+            ),
+            f"on its own the pose is in {len(pose_cols)} atom colours, the ghosts "
+            f"in {len(ghost_cols)}, and while comparing the pose is in "
+            f"{sorted(pose_want)} against the ghosts' {sorted(ghost_cols)}: a "
+            f"green molecule in a field of slate ones is a difference the eye "
+            f"makes before it reads a number",
+        )
+        check(
+            "the ghost colour is not the receptor's, which is what made it invisible",
+            all(
+                abs(a - b) >= 0.08
+                for a, b in zip(POSE_GHOST_COLOR, COLOR_RECEPTOR)
+            ),
+            f"ghost {POSE_GHOST_COLOR} vs receptor {COLOR_RECEPTOR}: per-channel "
+            f"gap "
+            f"{[round(abs(a - b), 3) for a, b in zip(POSE_GHOST_COLOR, COLOR_RECEPTOR)]}"
+            f", want >= 0.08 in every channel (it was 0.07/0.06/0.04)",
+        )
+        # The two checks above ask what the renderer *means* to draw. This asks
+        # what it *did*, and it is the one that has teeth: `draw_spheres` used
+        # to reach for `atom_colors()` itself, so a ghost was flat-coloured in
+        # the bond segments and still element-coloured in every sphere -- and
+        # "spheres" is the default representation, so the whole change would
+        # have been invisible in the view a user actually gets. Both directions,
+        # against the protein in the very same frame: the ghosts have to be
+        # bluer than what they sit in, and they were not.
+        g_frame, g_mask = _own_pixels(pw2, lambda: _hide_role(pw2, "pose_ghost"))
+        r_frame, r_mask = _own_pixels(pw2, lambda: _hide_role(pw2, "receptor"))
+        p_frame, p_mask = _own_pixels(pw2, lambda: _hide_role(pw2, "pose"))
+        g_blue = _bluer_fraction(g_frame, g_mask)
+        r_blue = _bluer_fraction(r_frame, r_mask)
+        g_green = _greener_fraction(g_frame, g_mask)
+        p_green = _greener_fraction(p_frame, p_mask)
+        r_green = _greener_fraction(r_frame, r_mask)
+        pixel_check(
+            "and the ghosts really are drawn in that one colour, spheres included",
+            g_blue >= 0.95 and g_blue > r_blue + 0.10,
+            f"{100 * g_blue:.1f}% of the "
+            f"{int(g_mask.sum()) if g_mask is not None else 0} pixels the ghosts "
+            f"own are bluer than red, against {100 * r_blue:.1f}% of the "
+            f"protein's {int(r_mask.sum()) if r_mask is not None else 0}. With "
+            f"the ghosts on element colours this reads within a point of the "
+            f"protein's, which is the whole reason they were invisible.",
+        )
+        # The question the overlay exists to answer, asked of the pixels: is the
+        # selected pose separable from the eight ghosts *and* from the protein
+        # it sits in? Three different signatures -- the pose green, the ghosts
+        # blue, the protein neither -- is what "a human can tell" means here,
+        # and each is measured against the other two rather than against a
+        # constant, so the thresholds cannot be met by a uniformly brighter
+        # frame.
+        pixel_check(
+            "so the selected pose is separable in the picture: green against slate, both against protein",
+            p_green >= 0.90
+            and p_green > g_green + 0.60
+            and p_green > r_green + 0.60,
+            f"greener than both red and blue: the selected pose "
+            f"{100 * p_green:.1f}% of its {int(p_mask.sum()) if p_mask is not None else 0} px, "
+            f"the ghosts {100 * g_green:.1f}%, the protein "
+            f"{100 * r_green:.1f}% -- one number, three populations, no overlap. "
+            f"(Blueness is deliberately *not* part of this claim: the pose's own "
+            f"green has B {COLOR_BEST_POSE[2]} above R {COLOR_BEST_POSE[0]}, so it "
+            f"is also {100 * _bluer_fraction(p_frame, p_mask):.1f}% 'bluer than "
+            f"red' and asking it not to be would be asking a false question.)",
         )
         check(
             "the state is stated in words, so a faint overlap is not read as a fault",
@@ -1639,6 +2052,7 @@ def main() -> int:
             f"{pw2.lbl_poses.text()!r}",
         )
         after_pixels, _ = shot(pw2, "07b_pose_all")
+        repr_before = pw2.viewport.representation
         cam_after = float(pw2.viewport.camera.distance)
         check(
             "turning it on moves the camera in to the poses, not the whole scene",
@@ -1652,6 +2066,57 @@ def main() -> int:
             not np.array_equal(before_pixels, after_pixels),
             f"{differing_pixels(before_pixels, after_pixels)} pixels differ",
         )
+        # The overlay's hierarchy has to survive every representation, and that
+        # is not automatic. `draw_spheres` used to reach for `atom_colors()`
+        # itself, so the flat ghost colour reached the bond segments and not
+        # the spheres -- and "spheres" is the default representation, so the
+        # whole change would have been invisible in the view a user actually
+        # gets while the object model said everything was fine. One check per
+        # representation, each measured off its own frame, is what catches that
+        # class; a single check on the default would not.
+        for key in REPRESENTATION_KEYS:
+            pw2.viewport.representation = key
+            pf, pm = _own_pixels(pw2, lambda: _hide_role(pw2, "pose"))
+            gf, gm = _own_pixels(pw2, lambda: _hide_role(pw2, "pose_ghost"))
+            name = f"in '{key}' the selected pose is still green and the ghosts still slate"
+            if pm is None or gm is None or not pm.any() or not gm.any():
+                # The representation draws no pose at all, so there is no colour
+                # to measure and the claim is unanswerable rather than false.
+                # This is a fact about the code and not about the machine, so it
+                # is named as one: pose views are built by `_view_from_text`,
+                # which passes no `bonds`, and a bond-only representation has
+                # nothing to draw. Pre-existing, and out of scope here -- see the
+                # report. Asserting a colour over an empty mask would be a
+                # green line with no claim behind it.
+                skip(
+                    name,
+                    f"'{key}' draws no pose to measure (0 px): a pose view has "
+                    f"{len(next(m for m in pw2.viewport.molecules if m.role == 'pose').bonds)} "
+                    f"bonds, because `_view_from_text` passes none, and "
+                    f"'{key}' draws bonds only. The hierarchy cannot be read in a "
+                    f"representation that draws nothing.",
+                )
+                continue
+            pg = _greener_fraction(pf, pm)
+            gb = _bluer_fraction(gf, gm)
+            pixel_check(
+                name,
+                pg >= 0.90 and gb >= 0.95,
+                f"pose greener {100 * pg:.1f}% of {int(pm.sum())} px, "
+                f"ghosts bluer {100 * gb:.1f}% of {int(gm.sum())} px",
+            )
+        pw2.viewport.representation = repr_before
+
+        # One crop per representation as well, because a threshold passing and
+        # a picture reading are different claims and only the second one is the
+        # one a user meets.
+        for key in REPRESENTATION_KEYS:
+            pw2.viewport.representation = key
+            _save_pose_crop(pw2, f"07b_pose_all_{key}")
+        pw2.viewport.representation = repr_before
+        _save_pose_crop(pw2, "07b_pose_all_poses")
+        _save_pose_crop(pw2, "07b_pose_all_poses_wide", radius=260.0)
+
         # Selecting another pose must move the solid one, not add a second.
         pw2.pose_table.setCurrentCell(pw2.pose_table.pose_row_of(3), 0)
         for _ in range(6):
@@ -2026,8 +2491,12 @@ def main() -> int:
 
     # ------------------------------------------------- display representations
     section("10. display representations")
-    from opendocking.workbench.app import REPRESENTATION_KEYS  # noqa: PLC0415
-
+    # `REPRESENTATION_KEYS` is imported at module scope, not here. A local
+    # import inside `main` makes the name a *function-local* for the whole of
+    # `main`, so section 7b's use of it -- 400 lines earlier, perfectly legal
+    # against a module-level import -- raised `UnboundLocalError` and took the
+    # run down with exit 3. One import, one name, and no forward reference to
+    # something bound later in the same function.
     check(
         "the display selector offers every representation",
         set(REPRESENTATION_KEYS) == {"spheres", "ball_and_stick", "stick",

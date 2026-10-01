@@ -13,10 +13,29 @@
 //! | `HbFromAcceptor` | hydrogen bond                     | can accept                     | can donate                |
 //! | `Hydrophobic`    | apolar contact                    | apolar                         | apolar                    |
 //!
+//! The element dimension is the **probe's** type, not a filter on the receptor.
+//! Each block is the field for a hypothetical ligand atom *of that element*,
+//! tabulated over every receptor atom with the two radii added, so a ligand
+//! nitrogen's block holds what an oxygen receptor does to a nitrogen. Every
+//! receptor atom writes into all ten blocks. That is what the "every atom"
+//! column above means, and it is the one thing this table cannot express on its
+//! own: a block is indexed by who is asking, not by who is answering.
+//!
+//! Getting it wrong is silent, which is why `a_receptor_atom_reaches_every_probe_type`
+//! exists. An earlier version wrote each receptor atom only into its own
+//! element's block, which made the element index a filter: cross-element pairs
+//! scored **exactly zero at every separation**, so a nitrogen donor formed no
+//! hydrogen bond with an oxygen acceptor, and — since `Shape` was partitioned
+//! the same way — a ligand atom felt **no steric repulsion at all** against any
+//! element missing from that partition.
+//!
 //! AutoDock Vina collapses the two hydrogen-bond maps into one, which lets a
 //! donor–donor pair pick up a spurious hydrogen bond. Splitting them costs one
 //! extra map per point and makes the decomposition exact — see
-//! [`crate::scoring`] for the full rationale.
+//! [`crate::scoring`] for the full rationale. It is exact for the *pair* formula;
+//! the intramolecular sum calls `pair_energy` on atom kinds rather than reading
+//! these maps, so the two halves of a total energy describe a hydrogen bond the
+//! same way only now that the blocks are not filtered by element.
 //!
 //! # Gradients
 //!
@@ -64,7 +83,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{DockError, Result};
 use crate::scoring::{ScoringFunction, SpatialKernels};
-use crate::types::{grid_type_index, Element, Molecule, Vec3, GRID_TYPE_COUNT};
+use crate::types::{
+    grid_type_radius, Element, Molecule, Vec3, GRID_TYPE_COUNT, MAX_GRID_TYPE_RADIUS,
+};
 
 /// Spatial resolution of the maps, in Ångström.
 pub const DEFAULT_SPACING: f64 = 0.375;
@@ -359,7 +380,6 @@ impl GridMaps {
         // Flatten the receptor into typed records so the inner loop stays tight.
         struct RecAtom {
             coord: Vec3,
-            type_index: usize,
             /// Interaction radius, Ångström.
             radius: f64,
             /// Which of the three conditional maps this atom contributes to.
@@ -372,7 +392,6 @@ impl GridMaps {
             .iter()
             .map(|a| RecAtom {
                 coord: a.coord,
-                type_index: grid_type_index(a.element),
                 radius: a.element.interaction_radius(),
                 donates: a.can_donate(),
                 accepts: a.can_accept(),
@@ -400,32 +419,59 @@ impl GridMaps {
                         let dy = y - a.coord[1];
                         let dz = z - a.coord[2];
                         let r2 = dx * dx + dy * dy + dz * dz;
-                        // `kernels.cutoff` is a limit on the *surface*
-                        // distance, but `r2` is a real distance, so the real
-                        // distance limit is the cutoff plus both radii. Testing
-                        // `r2` against the raw cutoff silently amputates the
-                        // tail of the Gaussians — by 0.8 Å when every radius was
-                        // 0.4 Å, and by ~3.8 Å now that the radii are the real
-                        // per-element values.
-                        let reach = kernels.cutoff + 2.0 * a.radius;
-                        if r2 > reach * reach {
+                        // `kernels.cutoff` is a limit on the *surface* distance,
+                        // so the real-distance limit is the cutoff plus both
+                        // radii. Testing `r2` against the raw cutoff silently
+                        // amputates the tail of the Gaussians — by 0.8 Å when
+                        // every radius was 0.4 Å, and by ~3.8 Å now that the
+                        // radii are the real per-element values. This is the
+                        // widest of the ten per-probe-type limits, used once so
+                        // the square root below is computed once too.
+                        let far = kernels.cutoff + MAX_GRID_TYPE_RADIUS + a.radius;
+                        // One block per *probe* element, and every block is summed
+                        // over **every** receptor atom. That is what the module
+                        // table above says — the shape map is "written by every
+                        // atom" — and it can only be true if an atom writes into
+                        // all ten blocks rather than into its own.
+                        //
+                        // It used to write only into `a.type_index` and evaluate
+                        // `d` as `r - 2 * a.radius`, which silently assumed the
+                        // probe was the same element as the receptor atom. A
+                        // ligand nitrogen therefore felt no oxygen at all: no
+                        // hydrogen bond, and — far worse — **no steric
+                        // repulsion either**, since `Shape` was partitioned the
+                        // same way. A ligand could be pushed straight through the
+                        // protein's oxygens and nitrogens and only feel carbon.
+                        //
+                        // The surface distance is therefore a function of both
+                        // radii, and the probe's radius comes from
+                        // `grid_type_radius` rather than from the receptor atom.
+                        // The cutoff test moved inside the loop with it, and the
+                        // single outer test below is the widest of the ten.
+                        if r2 > far * far {
                             continue;
                         }
-                        // Surface distance: both atoms inflated by the radius of
-                        // the receptor atom's element.
-                        let d = r2.sqrt() - 2.0 * a.radius;
-                        let c = kernels.eval(d);
-                        let t = a.type_index * MAPS_PER_TYPE;
-                        slab[local + t + MapSlot::Shape.index()] += c.shape.0 as f32;
-                        if a.donates {
-                            slab[local + t + MapSlot::HbFromDonor.index()] += c.hbond.0 as f32;
-                        }
-                        if a.accepts {
-                            slab[local + t + MapSlot::HbFromAcceptor.index()] += c.hbond.0 as f32;
-                        }
-                        if a.apolar {
-                            slab[local + t + MapSlot::Hydrophobic.index()] +=
-                                c.hydrophobic.0 as f32;
+                        let r = r2.sqrt();
+                        for p in 0..GRID_TYPE_COUNT {
+                            let rp = grid_type_radius(p);
+                            let d = r - (rp + a.radius);
+                            if d > kernels.cutoff {
+                                continue;
+                            }
+                            let c = kernels.eval(d);
+                            let t = p * MAPS_PER_TYPE;
+                            slab[local + t + MapSlot::Shape.index()] += c.shape.0 as f32;
+                            if a.donates {
+                                slab[local + t + MapSlot::HbFromDonor.index()] += c.hbond.0 as f32;
+                            }
+                            if a.accepts {
+                                slab[local + t + MapSlot::HbFromAcceptor.index()] +=
+                                    c.hbond.0 as f32;
+                            }
+                            if a.apolar {
+                                slab[local + t + MapSlot::Hydrophobic.index()] +=
+                                    c.hydrophobic.0 as f32;
+                            }
                         }
                     }
                 }
@@ -667,7 +713,7 @@ fn slot_tag(slot: MapSlot) -> &'static str {
 mod tests {
     use super::*;
     use crate::scoring::VinaScoring;
-    use crate::types::{Atom, AtomKind, AtomType, Element};
+    use crate::types::{grid_type_index, grid_type_name, Atom, AtomKind, AtomType, Element};
 
     fn scoring() -> VinaScoring {
         VinaScoring::default()
@@ -677,6 +723,38 @@ mod tests {
         let mut a = Atom::new(1, [cx, cy, cz], Element::C, AtomType::CH);
         a.kind = AtomKind::Hydrophobic;
         a
+    }
+
+    /// A receptor oxygen that accepts and nothing else. A lone acceptor, so
+    /// anything a test sees in a block came from this atom and not from a
+    /// neighbour's classification.
+    fn oxygen(cx: f64, cy: f64, cz: f64) -> Atom {
+        let mut a = Atom::new(1, [cx, cy, cz], Element::O, AtomType::OA);
+        a.kind = AtomKind::Acceptor;
+        a
+    }
+
+    /// Indices of the stored grid point nearest a world position, clamped into
+    /// the grid so a query outside the box returns an edge rather than an index
+    /// that would read past the array.
+    fn nearest(maps: &GridMaps, p: [f64; 3]) -> (usize, usize, usize) {
+        let at = |lo: f64, h: f64, want: f64, n: usize| {
+            (((want - lo) / h).round().max(0.0) as usize).min(n.saturating_sub(1))
+        };
+        (
+            at(maps.min[0], maps.spacing[0], p[0], maps.dims[0]),
+            at(maps.min[1], maps.spacing[1], p[1], maps.dims[1]),
+            at(maps.min[2], maps.spacing[2], p[2], maps.dims[2]),
+        )
+    }
+
+    /// World position of a stored grid point, for recomputing what belongs there.
+    fn point_of(maps: &GridMaps, i: (usize, usize, usize)) -> [f64; 3] {
+        [
+            maps.min[0] + i.0 as f64 * maps.spacing[0],
+            maps.min[1] + i.1 as f64 * maps.spacing[1],
+            maps.min[2] + i.2 as f64 * maps.spacing[2],
+        ]
     }
 
     fn test_box() -> GridBox {
@@ -701,6 +779,109 @@ mod tests {
         assert_eq!(maps.dims, [25, 25, 25]);
         assert!(maps.contains([0.0, 0.0, 0.0]));
         assert!(!maps.contains([100.0, 0.0, 0.0]));
+    }
+
+    /// Every receptor atom must reach **every** probe type's block.
+    ///
+    /// This is the assertion that says the element dimension of the grid is the
+    /// *probe* type and not a filter on the receptor, which is what the module
+    /// documentation's own table claims: the shape map is "written by every
+    /// atom". It did not hold. An atom wrote only into its own element's block
+    /// and the surface distance was `r − 2·R_self`, silently assuming the probe
+    /// was the same element as the receptor atom. A ligand nitrogen therefore
+    /// felt no oxygen at all — no hydrogen bond, and, because `Shape` was
+    /// partitioned the same way, **no steric repulsion either**.
+    ///
+    /// The expected value is recomputed from the kernels rather than written as
+    /// a literal, so this pins the *semantics* (which two radii, which slot) and
+    /// not one number that could be re-derived and pasted.
+    #[test]
+    fn a_receptor_atom_reaches_every_probe_type() {
+        let rec = Molecule::from_atoms(vec![oxygen(0.0, 0.0, 0.0)]).unwrap();
+        let maps = GridMaps::precalculate(&rec, &test_box(), &scoring(), 0.375, 1).unwrap();
+        let kernels = scoring().spatial_kernels();
+
+        // A separation inside the hydrogen-bond window for the published radii
+        // (R_N + R_O = 3.35 Å), so the term is unambiguously non-zero.
+        let i = nearest(&maps, [3.0, 0.0, 0.0]);
+        let p = point_of(&maps, i);
+        let r = p[0].abs().max(p[1].abs()).max(p[2].abs());
+
+        // Every block, including the ones whose probe element has no business
+        // being anywhere near an oxygen, must carry this atom's shape term.
+        for probe_type in 0..GRID_TYPE_COUNT {
+            let shape = maps.raw(probe_type, MapSlot::Shape, i.0, i.1, i.2) as f64;
+            assert!(
+                (shape
+                    - kernels
+                        .eval(r - (grid_type_radius(probe_type) + 1.60))
+                        .shape
+                        .0)
+                    .abs()
+                    < 1e-5,
+                "block {probe_type} ({} Å) holds {shape}, so a receptor oxygen is \
+                 invisible to that probe type",
+                grid_type_name(probe_type)
+            );
+        }
+
+        // And the hydrogen-bond block must hold the value for *that probe's*
+        // radius — so the blocks differ from one another, which is the whole
+        // point: a nitrogen probe and a carbon probe 3 Å from the same oxygen
+        // are at different surface distances and must not read the same number.
+        //
+        // What is stored is the *weighted* kernel output, `w_hb · hbond(d)`, so
+        // a real bond is **negative** — which is why a lone oxygen's acceptor
+        // slot bottoms out at exactly the `hb` weight rather than at 1.0.
+        let hb_n = maps.raw(
+            grid_type_index(Element::N),
+            MapSlot::HbFromAcceptor,
+            i.0,
+            i.1,
+            i.2,
+        );
+        let hb_c = maps.raw(
+            grid_type_index(Element::C),
+            MapSlot::HbFromAcceptor,
+            i.0,
+            i.1,
+            i.2,
+        );
+        assert!(
+            hb_n < 0.0,
+            "an oxygen acceptor must attract a nitrogen donor through the grid, \
+             but the nitrogen block holds {hb_n}"
+        );
+        assert!(
+            (hb_n as f64 - kernels.eval(r - (1.75 + 1.60)).hbond.0).abs() < 1e-5,
+            "nitrogen block holds {hb_n}, not the value for R_N + R_O"
+        );
+        assert!(
+            (hb_c as f64 - kernels.eval(r - (1.90 + 1.60)).hbond.0).abs() < 1e-5,
+            "carbon block holds {hb_c}, not the value for R_C + R_O"
+        );
+        assert_ne!(
+            hb_n, hb_c,
+            "two probe elements at the same point read the same hydrogen-bond \
+             value, so the block is not per-probe-type at all"
+        );
+
+        // Reverse direction: an oxygen is not apolar, so no block may claim a
+        // hydrophobic contact. A guard that only checked "non-zero" would pass
+        // this even if every slot were filled with everything.
+        for probe_type in 0..GRID_TYPE_COUNT {
+            assert_eq!(
+                maps.raw(probe_type, MapSlot::Hydrophobic, i.0, i.1, i.2),
+                0.0,
+                "block {probe_type} claims a hydrophobic contact with an oxygen"
+            );
+            assert_eq!(
+                maps.raw(probe_type, MapSlot::HbFromDonor, i.0, i.1, i.2),
+                0.0,
+                "block {probe_type} claims a hydrogen bond *from* a receptor \
+                 acceptor, which cannot donate"
+            );
+        }
     }
 
     #[test]

@@ -183,24 +183,91 @@ def _mat4(m: np.ndarray) -> np.ndarray:
     return np.asarray(m, dtype=np.float32).flatten(order="F")
 
 
-def _walks_wanted(size) -> float:
-    """The walk count the density rule wants for a box of this size, unrounded.
+def _draw_colours_for(mol, comparing: bool = False) -> np.ndarray:
+    """The per-atom RGB a view is actually drawn in, as an ``(n, 3)`` array.
 
-    `core.exhaustiveness_for_box` answers "which rung of the ladder", and above
-    the top rung that answer is a ceiling rather than a measurement. Reporting
-    the rung as though it were the requirement is the one thing this workbench
-    must not do: at 60 A on a side the density wants 216 walks and the ladder can
-    only say 128, which is 59% of what the rule itself asks for, and a box that
-    size is exactly where a missed pose is most likely.
+    One function, because "what colour is this view" has two answers in this
+    file -- the element table, and the flat overrides that a pose comparison
+    asks for -- and they have to be asked in the same place. A check that asked
+    `MoleculeView.atom_colors` while the renderer used its own copy would be
+    asking about a colour nothing draws, and it would pass or fail for reasons
+    that have nothing to do with the picture.
 
-    Computed from `core`'s own ladder and reference box rather than from a second
-    copy of the density, so the two cannot drift apart. If the ladder or the
-    reference ever changes, both numbers change together.
+    While poses are being compared, both ends of the comparison go flat: the
+    ghosts in `POSE_GHOST_COLOR` and the selected one in its own identity
+    colour, the green the pose table's `*` and the status bar already use. The
+    element table is what makes a molecule readable *as a molecule*, and it is
+    also what made a comparison unreadable: a small ligand is mostly grey carbon,
+    so grey carbon at 1.0 is not a thing the eye picks out of grey carbon at
+    0.30 sitting in grey protein at 1.0, and the one object the overlay exists
+    to identify had no colour of its own at all. Two poses differing in kind --
+    one flat green, eight flat slate -- is a difference the eye makes before it
+    reads a single number.
+
+    With the overlay off, `comparing` is False and the pose is drawn in element
+    colours like any other molecule, because then the question is what the
+    molecule is rather than which of nine it is.
     """
-    from ..core import EXHAUSTIVENESS_LADDER, REFERENCE_BOX_SIDE
+    if mol.role == "pose_ghost" or (comparing and mol.role == "pose"):
+        return np.tile(np.asarray(mol.color, np.float32), (len(mol.coords), 1))
+    return mol.atom_colors()
 
-    volume = float(np.prod(np.asarray(tuple(size), np.float64)))
-    return float(EXHAUSTIVENESS_LADDER[0]) * (volume / float(REFERENCE_BOX_SIDE) ** 3)
+
+def _walks_wanted(size) -> tuple[float, float]:
+    """The ``(requirement, ceiling)`` of the density rule for a box of this size.
+
+    Two numbers, because the rule has two answers and only one of them is what
+    a spin box may hold.
+
+    ``core.exhaustiveness_for_box`` answers "which rung of the ladder", and
+    above the top rung that answer is a ceiling rather than a measurement.
+    Reporting the rung as though it were the requirement is the one thing this
+    workbench must not do: at 60 A on a side the density wants 216 walks and the
+    ladder can only say 128, which is 59% of what the rule itself asks for, and
+    a box that size is exactly where a missed pose is most likely. So the first
+    number is the **unsaturated** requirement and the second is the engine's
+    own answer, and the effort note compares them.
+
+    The ceiling is the engine's function, called -- not a second reading of the
+    ladder's last rung, and not a second reading of the reference box. An
+    earlier version of this file imported the two calibration constants and
+    re-derived the density itself, on the claim that "the numbers cannot drift
+    apart" because the constants were shared. That claim was false in exactly
+    one place and true everywhere else, which is the worst shape for a claim to
+    be in: the shared constants did pin the *slope* and the *reference*, and
+    nothing at all pinned the cap, the rung selection, or the refusal to answer
+    a box the engine cannot build. Delegating the ceiling means that if the
+    ladder grows, or the capping stops being "return the last rung", this note
+    says so without being edited.
+
+    The function raises `ValueError` on a two-element or non-finite size rather
+    than answering, and that refusal now propagates -- which is the right
+    default and is *not* caught here. The one caller reads three
+    `QDoubleSpinBox`es, and Qt clamps a NaN or an infinity to the box's range
+    rather than storing it, so a box this note is about cannot be one the engine
+    refuses; adding a handler for a case the widget cannot produce would be an
+    untested branch dressed as a safety net. A caller that can be handed an
+    arbitrary size gets the engine's refusal, which is the answer it deserves.
+
+    The requirement itself cannot come from the function, and it is worth being
+    blunt about why rather than quietly re-deriving it: the function rounds up
+    to a rung, so it cannot return a figure between two rungs, and the figure
+    between them is the whole point. Asking it for 216 walks on a 60 A cube gets
+    128 -- the ceiling, not the requirement. So the requirement is computed from
+    the same two constants the function reads, and the function is called for
+    everything it alone knows.
+    """
+    from ..core import EXHAUSTIVENESS_LADDER, REFERENCE_BOX_SIDE, exhaustiveness_for_box
+
+    sides = tuple(float(v) for v in size)
+    # Ask the engine first, and use its answer. It refuses a two-element size
+    # and a non-finite edge outright, so a box it cannot build is refused here
+    # too rather than formatted into a percentage of NaN further down, and the
+    # cap the note names is whatever the ladder's top rung is today.
+    ceiling = float(exhaustiveness_for_box(sides))
+    volume = float(np.prod(np.asarray(sides, np.float64)))
+    want = float(EXHAUSTIVENESS_LADDER[0]) * (volume / float(REFERENCE_BOX_SIDE) ** 3)
+    return want, ceiling
 
 
 #: Per-atom RMSD below which the engine treats two poses as the same mode, in
@@ -216,9 +283,40 @@ POSE_CLUSTER_CUTOFF = 1.0
 #: strength it outranks them: a solid pose at 1.0 next to a pink cloud at 0.34
 #: cannot be told apart from a ghost inside it, and the picture then says
 #: nothing about which pose is the one. Comparing poses is a closer question
-#: than "where is the pocket", so the cloud drops out of the way for it.
+#: than "where is the pocket", so the cloud steps aside for it.
+#:
+#: **Zero, and that is a measured number rather than a taste.** Fading the cloud
+#: was tried first, at 0.10, on the reasoning that a dim cloud would still be
+#: there. It does not work, and the way it fails is worth writing down: opacity
+#: scales how *bright* the cloud is, not how much of the frame it *occupies*.
+#: Measured on a real run (1crn + biotin, 26 A box, 9 poses, same camera, each
+#: contributor toggled against an otherwise identical frame), the cloud changed
+#: **76,398 pixels** whether its opacity was 0.34 or 0.10 -- the same number to
+#: the pixel. The selected pose changed 8,343. So the cloud owned 9.2x the
+#: picture the one thing the user turned the overlay on to look at, and dimming
+#: it by 3x left the ratio untouched. Fading is the wrong lever; only leaving
+#: changes the ratio, and 0.0 drops the cloud's 76,398 to 0.
 POCKET_OPACITY_PLAIN = 0.34
-POCKET_OPACITY_COMPARE = 0.10
+POCKET_OPACITY_COMPARE = 0.0
+
+#: What a ghosted pose is drawn in: one flat, cool slate, deliberately *not* the
+#: receptor's `(0.62, 0.66, 0.72)` and deliberately not an element colour.
+#:
+#: The original ghost colour was within 0.07 per channel of the receptor's, and
+#: that was invisible rather than subtle: a ghost is a pose like any other, so
+#: `_draw_molecule` gave it per-element colours from the same table the protein
+#: uses, and this constant only reached the few atoms whose element is not in
+#: that table. Eight ghosts therefore rendered as eight dimmer grey carbons,
+#: inside a space-filling grey protein, at 0.30 -- and "which one is solid" had
+#: no answer in the picture.
+#:
+#: Two poses now differ in *kind*, not only in strength: the selected pose keeps
+#: its element colours (red oxygens, blue nitrogens) and the ghosts are a single
+#: flat tone, so a multicoloured molecule in a field of one-colour ones is a
+#: difference the eye makes before it reads a single number. It is cooler and a
+#: good deal darker than the receptor so that neither of them can pass for the
+#: other's protein.
+POSE_GHOST_COLOR = (0.38, 0.47, 0.62)
 
 
 def _pose_distance(a_text: str, b_text: str) -> float | None:
@@ -387,7 +485,7 @@ def draw_background(ctx, prog, vao, width: int, height: int) -> None:
     ctx.enable(moderngl.DEPTH_TEST)
 
 
-def draw_spheres(ctx, prog, mesh: SphereMesh, mol, mvp) -> None:
+def draw_spheres(ctx, prog, mesh: SphereMesh, mol, mvp, colors=None) -> None:
     """Draw every atom of `mol` as a shaded sphere.
 
     The mesh is expanded on the CPU rather than drawn with hardware
@@ -395,6 +493,14 @@ def draw_spheres(ctx, prog, mesh: SphereMesh, mol, mvp) -> None:
     ``divisor=1`` and then filled them with ``np.repeat``, which are two
     mutually exclusive choices; with a few hundred atoms the expansion is well
     under a millisecond and it is the version that is obviously correct.
+
+    `colors` is the per-atom RGB to draw, and the caller passes the answer from
+    :func:`_draw_colours_for` rather than this reaching for `atom_colors()`
+    itself. It used to, and that made the argument pointless: a pose ghost is
+    only flat-coloured if the *spheres* are flat-coloured, and "spheres" is the
+    default representation, so an override applied anywhere but here would have
+    coloured the bonds and left every atom its element colour. Two places
+    asking the same question is how that happens.
     """
     import moderngl
 
@@ -410,7 +516,8 @@ def draw_spheres(ctx, prog, mesh: SphereMesh, mol, mvp) -> None:
     positions = (centers + radii * mesh.verts[None, :, :]).reshape(-1, 3)
     # On a unit sphere the position is the normal, so the mesh supplies both.
     normals = np.tile(mesh.verts, (n_atoms, 1))
-    colors = np.repeat(mol.atom_colors().astype(np.float32), v, axis=0)
+    per_atom = mol.atom_colors() if colors is None else colors
+    colors = np.repeat(np.asarray(per_atom, np.float32), v, axis=0)
     # Re-index the shared mesh once per atom.
     shifts = (np.arange(n_atoms, dtype=np.uint32) * np.uint32(v))[:, None, None]
     indices = np.ascontiguousarray((mesh.faces[None, :, :] + shifts).reshape(-1))
@@ -550,9 +657,15 @@ class Viewport(QOpenGLWidget):
         self.pocket_point_radius = 0.42
         #: Low on purpose. The cloud sits inside protein, so an opaque one hides
         #: the atoms whose proximity is the reason the site was reported. It is
-        #: dropped further while poses are being compared -- see
+        #: taken out of the frame entirely while poses are being compared -- see
         #: `POCKET_OPACITY_COMPARE`.
         self.pocket_opacity = POCKET_OPACITY_PLAIN
+        #: True while "all poses ghosted together" is on. A rendering state, not
+        #: a data one, so it lives here beside the other things the picture
+        #: changes: the cloud's opacity and this. Read by `_draw_molecule` and
+        #: passed to `_draw_colours_for`, which is the only place that decides
+        #: what colour a pose is drawn in.
+        self.pose_compare = False
         #: Pose/receptor interactions, as returned by `contacts.find_contacts`.
         #: Empty means "not computed", which the status bar says out loud
         #: rather than leaving an empty list to be read as "no interactions".
@@ -658,10 +771,10 @@ class Viewport(QOpenGLWidget):
             mode = "ball_and_stick"
 
         pairs = mol.bond_pairs()
-        colors = mol.atom_colors()
+        colors = _draw_colours_for(mol, self.pose_compare)
 
         if mode == "spheres":
-            draw_spheres(self._ctx, self._sphere_prog, self._mesh, mol, mvp)
+            draw_spheres(self._ctx, self._sphere_prog, self._mesh, mol, mvp, colors)
             segs = mol.bond_segments()
             if len(segs):
                 draw_lines(
@@ -808,6 +921,15 @@ class Viewport(QOpenGLWidget):
 
         pts = np.asarray(self.pocket_points, np.float32).reshape(-1, 3)
         if len(pts) == 0:
+            return
+        if float(self.pocket_opacity) <= 0.0:
+            # A zero opacity still uploads every point and runs a draw call to
+            # produce nothing. The comparison mode sets exactly this value, so
+            # the early-out is the difference between "the cloud steps aside"
+            # and "the cloud is still there, only invisible" -- and an
+            # assertion that reads the framebuffer cannot tell those apart from
+            # the pixels alone, because both leave the cloud's footprint at
+            # zero. Skipping the work is also simply correct.
             return
         from . import COLOR_POCKET
 
@@ -1225,7 +1347,10 @@ class MainWindow(QtWidgets.QMainWindow):
         # themselves, and the tooltip says why the number is not a constant.
         # `exhaustiveness_for_box` is the engine's, shared with `odcli` and the
         # redocking benchmark, so there is one rule in three places rather than
-        # three rules that drift apart.
+        # three rules that drift apart. It supplies the number this spin box
+        # holds, and it also supplies the ceiling the note below compares that
+        # number against -- see `_walks_wanted`, which asks it rather than
+        # reading the ladder's last rung for itself.
         self.sp_exhaust = QtWidgets.QSpinBox()
         self.sp_exhaust.setRange(1, 256)
         self.sp_exhaust.setValue(8)
@@ -1912,16 +2037,18 @@ class MainWindow(QtWidgets.QMainWindow):
     def _build_pose_ghosts(self, name: str) -> list:
         """One faint view per reported pose, built once and shown on demand.
 
-        Muted slate rather than the pose's own green, and thin, so a ghost can
-        never be mistaken for the selected pose where they overlap. The ghosts
-        are not parsed again on every selection: only their `visible` flag moves.
-        The list position *is* the pose index -- `MoleculeView` is not this
-        file's to extend, so nothing is stashed on the view.
+        `POSE_GHOST_COLOR` and not the pose's own green, and thinner than it, so
+        a ghost can never be mistaken for the selected pose where they overlap.
+        The flat colour only reaches the framebuffer because `_draw_molecule`
+        overrides the element colours for this role -- see the note there. The
+        ghosts are not parsed again on every selection: only their `visible` flag
+        moves. The list position *is* the pose index -- `MoleculeView` is not
+        this file's to extend, so nothing is stashed on the view.
         """
         self._pose_ghosts = []
         for i, (body, _) in enumerate(self._pose_models):
             view = self._view_from_text(
-                body, f"{name} pose {i + 1}", (0.55, 0.60, 0.68), 0.26
+                body, f"{name} pose {i + 1}", POSE_GHOST_COLOR, 0.26
             )
             view.role = "pose_ghost"
             view.opacity = 0.30
@@ -1997,17 +2124,25 @@ class MainWindow(QtWidgets.QMainWindow):
         """
         self._pose_ghosts_on = bool(checked)
         self._sync_ghosts_in_scene()
-        # The site cloud steps aside. It is bigger than the poses, it sits in
-        # the same place, and at its usual opacity it is *brighter* than a ghost
-        # -- so with the cloud at full strength the only thing the picture can
-        # say is "there is a cloud here", and a solid pose at opacity 1.0 next
-        # to a pink cloud at 0.34 is not distinguishable from a ghost inside
-        # it. Dropping the cloud puts the poses against the dark background,
-        # where 1.0 against 0.30 is the whole story. The user asked to compare
-        # poses; the pocket is still there, just no longer answering first.
+        # The site cloud steps aside -- all the way, not part way. It is bigger
+        # than the poses, it sits in the same place, and its footprint measured
+        # on a real run is nine times the selected pose's, so the one thing the
+        # user turned the overlay on to look at was the smallest thing in the
+        # picture. See `POCKET_OPACITY_COMPARE` for the measurement, and for why
+        # fading it was tried first and did not work. The user asked to compare
+        # poses; the pocket is still in the scene, it is just no longer answering
+        # first, and it comes back at its own strength with the overlay off.
         self.viewport.pocket_opacity = (
             POCKET_OPACITY_COMPARE if checked else POCKET_OPACITY_PLAIN
         )
+        # And the selected pose takes off its element colours while the
+        # comparison is up, for the same reason the ghosts put on theirs: in
+        # space-filling a ligand is mostly grey carbon, and grey carbon at 1.0
+        # is not a thing the eye picks out of grey carbon at 0.30 sitting in
+        # grey protein at 1.0. One flat green against eight flat slate is a
+        # difference of *kind*; the green is the same one the pose table marks
+        # its best row with, so the picture and the words agree.
+        self.viewport.pose_compare = bool(checked)
         if checked:
             # And go and look at them. The overlay answers "are these nine
             # answers or one answer nine times", and in the default framing the
@@ -2458,8 +2593,6 @@ class MainWindow(QtWidgets.QMainWindow):
         likely to miss a pose in the first place. So the shortfall is printed
         rather than rounded away.
         """
-        from ..core import EXHAUSTIVENESS_LADDER
-
         size = tuple(float(s.value()) for s in self.size_spins)
         mb = self._map_memory_mb(size)
         if mb is None:
@@ -2473,17 +2606,18 @@ class MainWindow(QtWidgets.QMainWindow):
             else "set by you"
         )
         text = f"maps {mb:.0f} MB | {walks} walks, {owner}"
-        want = _walks_wanted(size)
+        want, ceiling = _walks_wanted(size)
         if want > walks * 1.02:
             volume = float(np.prod(np.asarray(size, np.float64)))
             tail = (
                 f"{100.0 * walks / want:.0f}% of the {want:.0f} walks a "
                 f"{volume:.0f} A^3 box wants"
             )
-            if walks >= EXHAUSTIVENESS_LADDER[-1]:
+            if walks >= ceiling:
                 # A cap is a property of the ladder and has to be named as one,
                 # or 128 reads as "enough" in the exact size range where it is
-                # not.
+                # not. The cap is the engine's own ceiling for this box, not a
+                # second reading of the ladder here.
                 text += f"\nthe ladder stops here: {tail}"
             else:
                 text += f"\nbelow what the box wants: {tail}"

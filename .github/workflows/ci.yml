@@ -100,12 +100,36 @@ jobs:
           python -m pip install pytest
           python -m pytest --pyargs opendocking.tests -q
 
+      # The step is called "entry points resolve", so that is the only thing it
+      # asserts. `odgui --check` used to be a bare fourth line here, which made
+      # the step unfalsifiable: this job deliberately installs no GUI extras, so
+      # the check correctly answered 3 ("PyQt6 could not be imported"), and
+      # `set -e` read that documented answer as a packaging failure.
+      #
+      # It now pins the answer this job is *supposed* to give, which is a
+      # stronger claim than "did not crash": if the GUI extras ever become hard
+      # dependencies, or 3 ever stops meaning "no PyQt6", this step goes red
+      # and says which of the two moved.
       - name: Entry points resolve
         run: |
           odcli --version
           odcli info
           odgui --help
-          odgui --check
+          set +e
+          verdict=$(odgui --check --json)
+          rc=$?
+          set -e
+          echo "$verdict"
+          if [ "$rc" -ne 3 ]; then
+            echo "::error::odgui --check --json exited ${rc}; this job installs no PyQt6, so 3 (no GUI stack) is the only correct answer here"
+            exit 1
+          fi
+          # The payload and the process have to agree, not merely both exist. A
+          # report that says one thing and exits with another is precisely the
+          # failure this command was rewritten to stop making, so the agreement
+          # is asserted here rather than assumed.
+          echo "$verdict" | python -c "import json,sys; d=json.load(sys.stdin); assert d['verdict']=='no-gui-stack', d; assert d['exit']==3, d"
+          echo "odgui --check answered 3, as it must on a job with no GUI extras"
 
       # The package ships exactly two commands: one for the viewer, one for the
       # CLI. A third entry would be a packaging mistake worth catching here.
@@ -213,10 +237,51 @@ jobs:
           # silent reduction in what is checked.
           python -m pip install meeko
 
-      - name: GUI stack check (no display needed)
-        run: odgui --check
+      # A static audit, so it needs no display and runs first: it is the check
+      # that keeps the *other* GUI scripts honest. Five of them used to carry
+      # their own copy of the same `odgui --check` wrapper, all parsing the first
+      # line of prose as the reason -- which on a successful check is the banner,
+      # not a reason. They now share one implementation that reads
+      # `odgui --check --json`, and this step is what notices if a sixth copy
+      # appears. Without it the convergence is a convention rather than a fact,
+      # and conventions are what drift.
+      - name: GUI scripts share one odgui --check wrapper
+        run: python scripts/_gui_check.py
 
-      - name: OpenGL context probe
+      # The name used to say "(no display needed)". It was untrue, and untrue in
+      # the most instructive way: this step could only ever pass while the check
+      # was *lying*. `odgui --check` asks Qt for a real OpenGL context, a
+      # headless runner has none, so the honest check answered 4 -- which
+      # `set -e` turned into a red job. The only reason this step had ever been
+      # green was the older code path, which reported "GUI stack OK" on a
+      # machine with no context at all. Giving the step a display is the fix;
+      # softening the check would have put the lie back.
+      #
+      # 0 and 4 both pass, and the branch taken is echoed, because 4 is a fact
+      # about this runner's driver rather than a defect in the package. 3 does
+      # not pass: PyQt6 and moderngl were installed two steps above, so 3 would
+      # mean the extras or the wheel are broken, which is ours.
+      - name: GUI stack check (virtual display, software GL)
+        env:
+          LIBGL_ALWAYS_SOFTWARE: "1"
+          QT_QPA_PLATFORM: xcb
+        run: |
+          set +e
+          xvfb-run -a -s "-screen 0 1280x1024x24" odgui --check
+          rc=$?
+          set -e
+          case "$rc" in
+            0) echo "odgui --check: the viewer obtained a context on this runner";;
+            4) echo "::warning::odgui --check got no OpenGL context on this runner (exit 4). That is a fact about the runner's driver, not a packaging defect; the windowed step below is the gate that has to pass.";;
+            *) echo "::error::odgui --check exited ${rc}; expected 0 (context available) or 4 (no context on this runner)"; exit 1;;
+          esac
+
+      # This one prints which routes obtain a context and *always* exits 0, on
+      # purpose: it is here to attribute a future failure, not to be one. It is
+      # named accordingly so that a green tick here is never read as "OpenGL
+      # was verified". The step that genuinely requires a working context is
+      # the windowed check below it.
+      - name: OpenGL route probe (informer -- never fails)
         run: xvfb-run -a -s "-screen 0 1280x1024x24" python scripts/qt_gl_probe.py
 
       - name: Layout, interaction and behaviour

@@ -148,17 +148,28 @@ impl Element {
 
     /// Interaction radius used by the Vina-family scoring function.
     ///
-    /// Surface distances are `d = ‖rᵢ − rⱼ‖ − (Rᵢ + Rⱼ)`, so this constant
-    /// decides *where on the separation axis every term in
+    /// Surface distances are `d = ‖rᵢ − rⱼ‖ − (Rᵢ + Rⱼ)`, so these radii
+    /// decide *where on the separation axis every term in
     /// [`crate::scoring`] sits*. It is therefore not a cosmetic parameter: get
     /// it wrong by 1.5 Å and the whole energy landscape moves into the steric
     /// exclusion zone.
     ///
     /// These are the per-element "XS" radii, i.e. half the reference
     /// non-bonded contact distance: carbon 1.9 Å puts a C···C pair at the
-    /// 3.8 Å van der Waals contact, and oxygen 1.6 Å puts an O···O donor–
-    /// acceptor pair at 3.2 Å, which is where the hydrogen-bond term is
-    /// maximal (`d ≤ −0.7`, so `d = −0.5` at 2.7 Å).
+    /// 3.8 Å van der Waals contact, and oxygen 1.6 Å puts an O···O pair at
+    /// 3.2 Å of separation.
+    ///
+    /// Those two numbers are not the same event, and an earlier revision of
+    /// this comment ran them together. 3.2 Å is where the *hydrophobic* term
+    /// starts; the *hydrogen-bond* term is maximal half an ångström closer, at
+    /// 2.70 Å, because its window is `d ≤ −0.5` and `−0.5 + 1.6 + 1.6 =
+    /// 2.70`. The old text put the hydrogen-bond maximum at 3.2 Å and quoted
+    /// `d ≤ −0.7` as its window. Both claims were false: `d ≤ −0.7` is a
+    /// window the code stopped using, and at `d = 0` — the 3.2 Å contact — the
+    /// term is exactly **zero**, being spent precisely there. Those numbers are
+    /// now asserted by
+    /// `scoring::tests::the_hbond_window_lands_on_the_documented_separations`
+    /// rather than left to be remembered.
     ///
     /// # This was a flat 0.4 Å, and that was a bug
     ///
@@ -174,6 +185,11 @@ impl Element {
     /// | `g2`  | `d = 0`                | 0.8 Å (C–C)           |
     /// | `hyd` | `d ≤ 0.5`              | 1.3 Å (C–C)           |
     ///
+    /// (That table is history, kept in the past tense deliberately: it
+    /// describes the `R = 0.4` regime and is *not* where the terms sit today.
+    /// Note that it is the same `d ≤ −0.7` window that the paragraph above used
+    /// to quote as current.)
+    ///
     /// Two oxygens 0.1 Å apart are not a hydrogen bond, they are one atom and
     /// its own image, so the `−0.587` hydrogen-bond weight — the single largest
     /// term in the Vina function — was **mathematically dead**: exactly zero at
@@ -183,9 +199,9 @@ impl Element {
     /// burying the ligand inside the protein, which is how the flaw was first
     /// found.
     ///
-    /// Hydrogens keep `R = 0`: the only hydrogens a PDBQT retains are polar
-    /// ones, and they sit *on* their own heavy-atom donor, so giving them a
-    /// radius would make every ordinary hydrogen bond register as an overlap.
+    /// Hydrogens keep a radius of 0: the only hydrogens a PDBQT retains are
+    /// polar ones, and they sit *on* their own heavy-atom donor, so giving them
+    /// a radius would make every ordinary hydrogen bond register as an overlap.
     pub fn interaction_radius(self) -> f64 {
         match self {
             Element::C => 1.90,
@@ -797,6 +813,33 @@ pub fn grid_type_name(idx: usize) -> &'static str {
     NAMES.get(idx).copied().unwrap_or("?")
 }
 
+/// Interaction radius of a grid type index, in Ångström.
+///
+/// Each block of a precalculated map is the field for a *hypothetical probe atom
+/// of that element*, so the radius it was tabulated with is part of what the
+/// block means — not a detail of how one receptor atom happened to be written. A
+/// receptor oxygen contributes to a ligand nitrogen's block using **their two**
+/// radii, and this function is the ligand's half of that sum.
+///
+/// An out-of-range index returns `NAN` rather than a plausible number: every call
+/// site either loops `0..GRID_TYPE_COUNT` or passes [`grid_type_index`], so
+/// reaching the fallback is a programming error, and a silent zero would turn
+/// that error into a quietly wrong energy instead of an obviously broken one.
+/// `the_radius_table_backs_the_grid_types` keeps this table and
+/// [`Element::interaction_radius`] from drifting apart.
+pub fn grid_type_radius(idx: usize) -> f64 {
+    const RADII: [f64; GRID_TYPE_COUNT] = [
+        1.90, 1.75, 1.60, 2.10, 2.00, 1.545, 1.948, 2.220, 2.350, 1.20,
+    ];
+    RADII.get(idx).copied().unwrap_or(f64::NAN)
+}
+
+/// Largest interaction radius among the grid types, in Ångström.
+///
+/// Lets the precalculation widen a single early-out once, instead of repeating
+/// the same square root for every probe type.
+pub const MAX_GRID_TYPE_RADIUS: f64 = 2.350;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -949,6 +992,70 @@ mod tests {
     #[test]
     fn interaction_radius_is_zero_for_hydrogen() {
         assert_eq!(Element::H.interaction_radius(), 0.0);
+    }
+
+    /// `grid_type_radius` exists because each map block is the field for a
+    /// *hypothetical probe* of that element, so it must not become a second,
+    /// silently drifting copy of [`Element::interaction_radius`]. These are two
+    /// tables of the same numbers on purpose — the grid needs the index form —
+    /// and a test is what stops them becoming two different tables.
+    #[test]
+    fn the_radius_table_backs_the_grid_types() {
+        const ELEMENTS: [Element; 10] = [
+            Element::C,
+            Element::N,
+            Element::O,
+            Element::F,
+            Element::P,
+            Element::S,
+            Element::Cl,
+            Element::Br,
+            Element::I,
+            Element::Met,
+        ];
+        for e in ELEMENTS {
+            let idx = grid_type_index(e);
+            assert!(
+                (grid_type_radius(idx) - e.interaction_radius()).abs() < 1e-12,
+                "{} is grid type {idx}, but that block's radius is {} while the \
+                 element's own is {}",
+                grid_type_name(idx),
+                grid_type_radius(idx),
+                e.interaction_radius()
+            );
+        }
+
+        // Hydrogen and an unrecognised token both fold into the carbon block, so
+        // that block is tabulated with carbon's radius. This is the documented
+        // AutoDock behaviour for apolar hydrogens, and it is also why a zero
+        // crossing measured on a C...H pair reports the radius the *map* was
+        // built with rather than the probe's own. Pinned here so the reason is
+        // not rediscovered by measurement later.
+        assert_eq!(
+            grid_type_radius(grid_type_index(Element::H)),
+            Element::C.interaction_radius()
+        );
+        assert_eq!(
+            grid_type_radius(grid_type_index(Element::Placeholder)),
+            Element::C.interaction_radius()
+        );
+
+        // The constant the precalculation widens its early-out with must be the
+        // widest of them, or the outer cutoff silently amputates the tail of the
+        // largest probe's map.
+        let widest = ELEMENTS
+            .iter()
+            .map(|e| e.interaction_radius())
+            .fold(0.0f64, f64::max);
+        assert_eq!(
+            MAX_GRID_TYPE_RADIUS, widest,
+            "the early-out constant is {} but the widest grid radius is {widest}",
+            MAX_GRID_TYPE_RADIUS
+        );
+
+        // An index past the end is a programming error, and has to look like
+        // one: a plausible number here would corrupt an energy silently.
+        assert!(grid_type_radius(GRID_TYPE_COUNT).is_nan());
     }
 
     /// The separation axis is only meaningful if each term in the scoring

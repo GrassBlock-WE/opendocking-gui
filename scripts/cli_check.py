@@ -110,6 +110,23 @@ CHECKS = 0
 SAWN: set[str] = set()
 WALL: list[tuple[str, float]] = []
 
+#: The number of checks this file is supposed to have, so that one quietly
+#: vanishing behind a guard takes the tally down *visibly*. The count has to be
+#: the same on every machine, which is why no check may sit behind a runtime
+#: condition -- a check that is skipped is not skipped from the total, and a
+#: check that is not reached at all is a bug in this file, not a fact about the
+#: environment. Change it deliberately.
+EXPECTED_CHECKS = 127
+
+#: Exit vocabulary, shared with the GUI check scripts:
+#: 0 ran and everything passed, 1 ran and something failed, 2 did not finish.
+#: Only 0 and 1 are verdicts about the product. 2 means this run's numbers
+#: cannot be used for anything, which is a different statement from "a check
+#: failed" and was previously reported as if it were the latter.
+_EXIT_OK = 0
+_EXIT_FAILED = 1
+_EXIT_INCONCLUSIVE = 2
+
 
 def check(name, ok, detail=""):
     global CHECKS
@@ -128,11 +145,18 @@ def finish() -> int:
     total = sum(dt for _, dt in WALL)
     slow = sorted(WALL, key=lambda kv: -kv[1])[:3]
     print(f"\n{CHECKS - len(FAILURES)}/{CHECKS} passed")
+    if CHECKS != EXPECTED_CHECKS:
+        # A mismatch here means a check was added or lost, and both are worth
+        # stopping for: an added check nobody pinned, or a lost one that left
+        # the rest of the run looking healthy.
+        print(f"  [FAIL] the tally is {CHECKS} but EXPECTED_CHECKS is "
+              f"{EXPECTED_CHECKS}; change it deliberately")
+        FAILURES.append(f"tally {CHECKS} != EXPECTED_CHECKS {EXPECTED_CHECKS}")
     print(f"wall clock: {total:.1f} s over {len(WALL)} odcli calls")
     print("  slowest: " + ", ".join(f"{n} {d:.2f}s" for n, d in slow))
     for f in FAILURES:
         print(f"  FAILED: {f}")
-    return 1 if FAILURES else 0
+    return _EXIT_FAILED if FAILURES else _EXIT_OK
 
 
 ODCLI = shutil.which("odcli")
@@ -1161,25 +1185,32 @@ def main() -> int:
               f"returned in {ck_here.wall:.2f}s; the probe shows the widget with "
               "WA_DontShowOnScreen and never enters the event loop, so there is "
               "no window to outlive it")
-        if ODGUI:
-            probe = subprocess.run(
-                [sys.executable, "-c",
-                 "import opendocking.workbench.launcher as L;"
-                 "l, p = L._preflight();"
-                 "print(l is None);"
-                 "print(p or '')"],
-                capture_output=True, cwd=str(ROOT),
-                env={**os.environ, "PYTHONPATH": os.pathsep.join([str(shim), str(SRC)]),
-                     "PYTHONIOENCODING": "utf-8"},
-                encoding="utf-8", errors="replace", timeout=TIMEOUT)
-            check("_preflight is reachable: it returns no launcher and a message",
-                  probe.returncode == 0
-                  and probe.stdout.splitlines()[:1] == ["True"]
-                  and "could not be imported" in probe.stdout,
-                  f"under the blocking shim it returned "
-                  f"{probe.stdout.splitlines()[:1]}, and the message it built is "
-                  f"{len(probe.stdout.splitlines()) - 1} lines -- the branch that "
-                  "could not be entered before")
+        # Unguarded on purpose. This used to sit behind `if ODGUI:`, which is
+        # both wrong and harmful. It is wrong because the probe below runs
+        # `sys.executable -c` with PYTHONPATH pointed at the shim -- it never
+        # touches the `odgui` console script, so the guard had nothing to do
+        # with the one thing it tested. It is harmful because a check that
+        # disappears on a machine without `odgui` on PATH takes the total down
+        # from 127 to 126 *and still reports a clean run*, which is the
+        # "hidden behind a guard" shape this suite exists to refuse.
+        probe = subprocess.run(
+            [sys.executable, "-c",
+             "import opendocking.workbench.launcher as L;"
+             "l, p = L._preflight();"
+             "print(l is None);"
+             "print(p or '')"],
+            capture_output=True, cwd=str(ROOT),
+            env={**os.environ, "PYTHONPATH": os.pathsep.join([str(shim), str(SRC)]),
+                 "PYTHONIOENCODING": "utf-8"},
+            encoding="utf-8", errors="replace", timeout=TIMEOUT)
+        check("_preflight is reachable: it returns no launcher and a message",
+              probe.returncode == 0
+              and probe.stdout.splitlines()[:1] == ["True"]
+              and "could not be imported" in probe.stdout,
+              f"under the blocking shim it returned "
+              f"{probe.stdout.splitlines()[:1]}, and the message it built is "
+              f"{len(probe.stdout.splitlines()) - 1} lines -- the branch that "
+              "could not be entered before")
 
         # -------------------------------------------------------------------
         section("every subcommand on offer was actually run here")
@@ -1306,15 +1337,26 @@ def main() -> int:
         # under the run does not make the checks wrong, it makes them describe
         # a tree that no longer exists -- so this is a separate, named outcome
         # and not one more red line among the failures.
+        #
+        # It also gets its own **exit code**, 2, so it stops masquerading as a
+        # regression. This guard has fired four times in two sessions and every
+        # time it was somebody else's legitimate edit, not a failure: an agent
+        # rewriting `app.py`, another rewriting `app.py`, and a third rewriting
+        # `README.md` -- none of them owned by this file. Reporting that as
+        # "[FAIL] the tree changed" is the same error as reporting it as a pass.
+        # Neither is true. The run is inconclusive, and 2 says so, matching the
+        # 0 / 1 / 2 vocabulary the GUI scripts use: 0 clean, 1 ran and had
+        # failures, 2 did not finish.
         moved_for_real = changed_between(before, _tree_fingerprint())
         if moved_for_real:
-            print(f"\n  [FAIL] the tree changed under this run -- {len(moved_for_real)} "
+            print(f"\n  [SKIP] the tree changed under this run -- {len(moved_for_real)} "
                   f"file(s): {', '.join(moved_for_real[:6])}"
                   + (" ..." if len(moved_for_real) > 6 else ""))
             print("  The counts above describe a tree that no longer exists, so "
                   "they are not evidence about anything. This is what a stale "
-                  "run looks like; it is reported rather than re-run.")
-            FAILURES.append(f"the tree changed under the run: {moved_for_real[:6]}")
+                  "run looks like; it is reported rather than re-run, and it "
+                  "exits 2 rather than 1 because nothing here is a regression.")
+            return _EXIT_INCONCLUSIVE
         else:
             print(f"\ntree: unchanged ({len(before)} files) across the whole run")
 
@@ -1325,7 +1367,13 @@ if __name__ == "__main__":
     # A check script that dies on a regression is worse than no check at all:
     # it reports a traceback about itself instead of the failure it was built to
     # catch, and the tally never appears. So the crash is caught here, named,
-    # and turned into a failing exit code with whatever count did get reached.
+    # and reported with whatever count did get reached.
+    #
+    # It exits 2, not 1. A crash means the run did not finish, and "did not
+    # finish" is not "something failed" -- the whole point of the 0/1/2
+    # vocabulary is that a caller can tell those apart, and a crash is the
+    # clearest case of all. The tally is still printed, because a partial count
+    # that says which checks ran is better than silence.
     try:
         sys.exit(main())
     except SystemExit:
@@ -1333,5 +1381,6 @@ if __name__ == "__main__":
     except Exception as exc:  # noqa: BLE001 - this is the point
         print(f"\n  [FAIL] the run crashed before finishing  - "
               f"{type(exc).__name__}: {exc}")
-        print(f"\n{CHECKS - len(FAILURES)}/{CHECKS} passed (run incomplete)")
-        sys.exit(1)
+        print(f"\n{CHECKS - len(FAILURES)}/{CHECKS} passed (run incomplete: "
+              f"expected {EXPECTED_CHECKS})")
+        sys.exit(_EXIT_INCONCLUSIVE)

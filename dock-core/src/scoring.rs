@@ -480,9 +480,17 @@ mod tests {
     /// The smoothsteps must have matching one-sided slopes at every knot.
     /// Otherwise the assembled energy would have a gradient discontinuity and
     /// quasi-Newton search would stall whenever a ligand atom crossed a knot.
+    ///
+    /// The windows below are the ones the terms actually use. That used to say
+    /// `(-0.7, -0.5)` for `hb`, which the term stopped using when the window
+    /// moved to `(-0.5, 0.0)`, so for a while this test checked a shape nobody
+    /// was drawing. A C¹ property is a property of `smoothstep` and not of any
+    /// one window, so the test could not notice -- and it still cannot, which is
+    /// why the window itself is pinned by
+    /// `the_hbond_window_lands_on_the_documented_separations` instead.
     #[test]
     fn smoothstep_is_c1() {
-        for &(a, b) in &[(-0.7, -0.5), (0.5, 1.5)] {
+        for &(a, b) in &[(-0.5, 0.0), (0.5, 1.5)] {
             let h = 1e-7;
             let left = smoothstep(a, b, a + h).1;
             let right = smoothstep(a, b, b - h).1;
@@ -509,6 +517,65 @@ mod tests {
         assert!((v - 1.0).abs() < 1e-9);
         let (v, _) = hydrophobic_term(2.0);
         assert!(v.abs() < 1e-12);
+    }
+
+    /// The hydrogen-bond window, restated in ångström of real interatomic
+    /// distance, is part of the scoring function's contract -- and this is the
+    /// assertion that keeps the docstrings that quote it honest.
+    ///
+    /// `d = ‖rᵢ − rⱼ‖ − (Rᵢ + Rⱼ)`, so a real separation `s` is sampled at
+    /// `d = s − (Rᵢ + Rⱼ)`. Reading the window back into ångström needs the
+    /// radius table too, which is why `hbond_term` and
+    /// `Element::interaction_radius` cannot honestly be checked one at a time:
+    /// this test moves all three claims at once, or none.
+    ///
+    /// The discriminating sample is `d = −0.5`. The retired window
+    /// `(−0.7, −0.5)` reads **0.0** there and the current `(−0.5, 0.0)` reads
+    /// **1.0**, so a revert turns this red.
+    ///
+    /// A revert is *not* invisible to the suite — reverting the window was
+    /// measured to fail `types::tests::the_interaction_radii_place_the_terms_at_real_contact_distances`
+    /// as well, which samples 2.8 Å and demands more than half the term. What
+    /// the suite never checked was a *number*, and that is the gap this closes:
+    /// the range test above samples `−2.0, −1.0, −0.7` and `0.0`, where both
+    /// windows answer identically, and `smoothstep_is_c1` cannot see windows at
+    /// all because C¹ holds for every one of them. So 2.70 Å and 2.85 Å were
+    /// quoted in two docstrings and asserted by nothing — which is how
+    /// `types.rs` came to say the hydrogen-bond term peaks at the 3.2 Å contact
+    /// where it is in fact exactly zero.
+    #[test]
+    fn the_hbond_window_lands_on_the_documented_separations() {
+        let d_at = |s: f64, ri: f64, rj: f64| s - (ri + rj);
+        let ro = crate::types::Element::O.interaction_radius();
+        let rn = crate::types::Element::N.interaction_radius();
+
+        // Saturated: a 2.70 Å O···O or 2.85 Å N···O contact -- the
+        // crystallographic range for a strong hydrogen bond -- is worth the
+        // full term.
+        assert_eq!(
+            hbond_term(d_at(2.70, ro, ro)).0,
+            1.0,
+            "O...O at 2.70 A must still be fully hydrogen bonded"
+        );
+        assert_eq!(
+            hbond_term(d_at(2.85, rn, ro)).0,
+            1.0,
+            "N...O at 2.85 A must still be fully hydrogen bonded"
+        );
+
+        // Strictly inside the window, which is what separates `a = −0.5` from
+        // the retired `a = −0.7`: 2.80 Å is `d = −0.40`, mid-decay at 0.896
+        // under the current window and hard 0.0 under the old one.
+        let (v, _) = hbond_term(d_at(2.80, ro, ro));
+        assert!(
+            v > 0.0 && v < 1.0,
+            "O...O at 2.80 A should be mid-window, got {v}"
+        );
+
+        // Spent: at `d = 0` the surfaces are merely touching, and past it there
+        // is no contact at all.
+        assert_eq!(hbond_term(0.0).0, 0.0, "the term is spent at contact");
+        assert_eq!(hbond_term(0.5).0, 0.0, "and stays spent past it");
     }
 
     #[test]

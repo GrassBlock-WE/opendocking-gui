@@ -148,6 +148,14 @@ def format_atom_line(
         grouping atoms into residues, a tool inferring which atoms are bonded)
         needs it, so it is a parameter now.
     """
+    # The writer refuses a three-character type and the validator accepts one.
+    # That is not an inconsistency, it is the two jobs. This writer's field is
+    # two columns wide and fixed, so a third character could only be lost --
+    # and losing it is the same defect :func:`_number` exists to prevent, in a
+    # field where it would be silent. The validator reads files other tools
+    # wrote, and meeko's writer emits 80-character lines with three-letter
+    # types, so refusing one there would refuse a real file. See
+    # :data:`_ATOM_TYPE` for the measurement.
     if len(atom_type) > 2:
         raise ValueError(f"PDBQT atom type {atom_type!r} is longer than two characters")
     p = precision
@@ -353,14 +361,60 @@ _COORDINATE = re.compile(r"^ *-?\d+\.\d+$")
 #: The serial field, which is an integer and is never signed in practice.
 _INTEGER = re.compile(r"^ *\d+$")
 
-#: An atom type: one or two letters, which is every AutoDock type. This
-#: replaced a check for "longer than two characters" that **could never fire**,
-#: because the type field is ``line[77:79]`` and so is at most two characters
-#: long by slicing alone -- a dead branch that looked like coverage. Caught by
-#: mutation rather than by reading, which is the argument for mutation testing
-#: in one sentence. Measured over the ten shipped files: the types actually
-#: used are NA, C, OA, N, S, HD and A, and 786 of 786 lines match.
-_ATOM_TYPE = re.compile(r"^[A-Za-z]{1,2}$")
+#: An atom type: a letter, then up to two more letters or digits. The shape
+#: rule, deliberately kept separate from the vocabulary question below.
+#:
+#: The base PDB atom record gives the type columns 78-79, and this writer does
+#: too. But **PDBQT is a dialect, and meeko's writer does not truncate there.**
+#: Measured on meeko 0.7.1, its atom-line template ends `"{:6.3f} {:<2s}"`
+#: (``meeko/writer.py:396``), and a ``:<2s`` field is a *minimum* width, not a
+#: cap: ``"{:<2s}".format("CG0")`` is ``'CG0'`` and the line comes out 80
+#: characters. meeko reads the type back with ``line[77:].strip()``
+#: (``meeko/cli/mk_prepare_receptor.py:1049``) -- column 78 to end of line,
+#: not a fixed two characters -- and its AutoDock 4 type table
+#: (``meeko/utils/autodock4_atom_types_elements.py``) holds 40 names of which
+#: **eight end in a digit**: ``G0``, ``G1``, ``G2``, ``G3`` at two characters
+#: and ``CG0``, ``CG1``, ``CG2``, ``CG3`` at three. So a digit is a legal
+#: character in a type, and three characters is a legal *width*.
+#:
+#: The previous rule was ``^[A-Za-z]{1,2}$`` on ``line[77:79]``, and it was
+#: wrong twice, in opposite directions, both measured:
+#:
+#: * It **refused a type meeko writes.** ``G0`` is in meeko's AutoDock 4
+#:   table and comes back as ``'G0'`` from meeko's own reader, and the old
+#:   rule rejected it because a digit is not a letter.
+#: * It **could not examine a third character at all.** The slice is two
+#:   characters wide, so ``NDA`` at columns 78-80 was never seen; the check
+#:   passed on the first two characters and said nothing about the third.
+#:
+#: Both are fixed by the same change, and the fix is **a wider read** rather
+#: than a looser pattern: the type is taken from column 78 to end of line, as
+#: meeko takes it, and the pattern admits what that span can legitimately
+#: contain.
+#:
+#: What this deliberately does **not** do is second-guess the *vocabulary*,
+#: and the price is stated rather than buried. The rule is a shape, so
+#: ``C1`` and ``ND1`` are now **accepted**: they have exactly the shape of
+#: meeko's ``G0``, and no shape rule can refuse one while admitting the other.
+#: Separating them would mean holding a whitelist, and this project has
+#: already decided not to: ``Receptor.unknown_atom_types`` reports an unknown
+#: type rather than erroring, because "another tool may emit type names
+#: AutoDock never defined". A validator that refused unknown types would
+#: invent a policy the engine it feeds does not have, and would refuse files
+#: the format's own writer emits -- which is exactly the ``G0`` defect above,
+#: in the other direction. An earlier draft of this rule tried a seam at two
+#: characters (letters only below three, letters-or-digits above) and was
+#: **measured wrong by the same argument**: it accepted ``CG0`` while
+#: refusing ``G0``, which is the contradiction in its most visible form.
+#:
+#: The two-character types the engine reads but meeko's table omits -- ``O``,
+#: ``OD``, ``NDA``, ``ODA`` -- are the subject of a reported engine
+#: limitation, not of a rule here; see ``docs/VERIFICATION.md``.
+#:
+#: Measured over the ten shipped files: the types actually used are NA, C, OA,
+#: N, S, HD and A -- all one or two letters -- and 786 of 786 lines match, so
+#: widening the read costs no real file.
+_ATOM_TYPE = re.compile(r"^[A-Za-z][A-Za-z0-9]{0,2}$")
 
 
 def validate_pdbqt_columns(
@@ -377,9 +431,14 @@ def validate_pdbqt_columns(
 
     * An ``ATOM``/``HETATM`` line whose serial, coordinates or charge does not
       match the shape PDBQT says that field has **at the documented columns**,
-      or whose atom type is not one or two letters. This is the case that
+      or whose atom type is not one to three letters. This is the case that
       matters and the one the engine cannot see: the line can be exactly 79
       characters long and still have the wrong thing in the wrong place.
+    * An ``ATOM``/``HETATM`` line whose atom type is not a letter followed by
+      at most two letters or digits. Measured: the old rule **refused ``G0``**,
+      which is in meeko's AutoDock 4 type table and which meeko's own reader
+      returns as ``'G0'``, and it could not examine a third character at all,
+      so ``NDA`` at columns 78-80 was never seen. See :data:`_ATOM_TYPE`.
     * An ``ATOM``/``HETATM`` line shorter than 76 characters, which cannot hold
       the charge field at all.
     * Any non-blank line that does not begin with a record name from
@@ -450,11 +509,12 @@ def validate_pdbqt_columns(
                 f"line {number}: charge at columns 71-76 is {charge!r}, "
                 f"which is not a right-justified PDBQT charge field"
             )
-        atom_type = line[77:79].strip()
+        atom_type = line[_COL_TYPE[0]:].strip()
         if atom_type and not _ATOM_TYPE.match(atom_type):
             problems.append(
-                f"line {number}: atom type at columns 78-79 is {atom_type!r}, "
-                f"which is not one or two letters"
+                f"line {number}: atom type at columns 78 onwards is "
+                f"{atom_type!r}, which is not a letter followed by at most "
+                f"two letters or digits"
             )
     return problems
 

@@ -88,6 +88,17 @@ def build_parser() -> argparse.ArgumentParser:
             "fixed by installing anything"
         ),
     )
+    parser.add_argument(
+        "--json",
+        dest="as_json",
+        action="store_true",
+        help=(
+            "with --check, print the verdict as one JSON object on stdout "
+            "instead of prose. The exit code is unchanged, so this is a way to "
+            "read the *facts* (which GL version, whether the function table is "
+            "usable) rather than a fourth answer"
+        ),
+    )
     return parser
 
 
@@ -376,7 +387,16 @@ def main(argv: list[str] | None = None) -> int:
 
     launch, problem = _preflight()
     if launch is None:
-        print(problem, file=sys.stderr)
+        if args.as_json:
+            # `--json` promises a parseable answer, and the promise has to hold
+            # on the failure that a shell script is most likely to hit -- the
+            # one where PyQt6 is absent, which is also the one where a bare
+            # `import` would have succeeded.
+            _print_verdict(
+                {"verdict": "no-gui-stack", "exit": _EXIT_NO_GUI_STACK, "problem": problem}
+            )
+        else:
+            print(problem, file=sys.stderr)
         return _EXIT_NO_GUI_STACK
 
     # `--check` answers a question about the *product*, not about the arguments,
@@ -384,7 +404,13 @@ def main(argv: list[str] | None = None) -> int:
     # typo.pdbqt` used to exit 2 complaining about the typo and never mention
     # the viewer, which is the opposite of what was asked for.
     if args.check:
-        return _report_check()
+        return _report_check(as_json=args.as_json)
+
+    if args.as_json:
+        # Silently ignoring it would leave a script parsing prose it cannot
+        # read, with a 0 that looks like a successful check.
+        print("error: --json is only meaningful together with --check", file=sys.stderr)
+        return 2
 
     for label, path in (
         ("receptor", args.receptor),
@@ -408,7 +434,19 @@ def main(argv: list[str] | None = None) -> int:
     return launch(args.receptor, args.ligand, args.poses)
 
 
-def _report_check() -> int:
+def _print_verdict(payload: dict) -> None:
+    """Emit a ``--check`` verdict as one JSON object on stdout.
+
+    Keys are sorted and values that json cannot represent are stringified
+    rather than dropped, so a script can assert on the object and a probe field
+    added later shows up in the output instead of silently vanishing.
+    """
+    import json
+
+    print(json.dumps(payload, sort_keys=True, default=str))
+
+
+def _report_check(as_json: bool = False) -> int:
     """The two stages behind ``--check``, and the code each one earns.
 
     Stage 1 has already run by the time this is called: `_preflight` imported
@@ -419,13 +457,35 @@ def _report_check() -> int:
     The success report goes to stdout because it *is* the result, and the two
     failures go to stderr because they are diagnostics. That split is the same
     one every other failure in this project now obeys.
+
+    ``as_json`` replaces the prose with a single object **built from the same
+    `found` dictionary the prose is formatted from**, so the two cannot drift
+    apart -- a report that says "functions usable" in words and `"functions":
+    false` in the object would be worse than having neither. The exit code is
+    identical either way; this is a way to read the facts, not a fourth answer.
     """
     found, trouble = _probe_opengl()
     if trouble is not None:
-        print(_describe_no_context(found), file=sys.stderr)
+        if as_json:
+            payload = dict(found)
+            payload["verdict"] = "no-context"
+            payload["exit"] = _EXIT_NO_CONTEXT
+            payload["problem"] = trouble
+            _print_verdict(payload)
+        else:
+            print(_describe_no_context(found), file=sys.stderr)
         return _EXIT_NO_CONTEXT
 
     import opendocking
+
+    if as_json:
+        payload = dict(found)
+        payload["verdict"] = "ok"
+        payload["exit"] = _EXIT_OK
+        payload["engine"] = opendocking.engine_version()
+        payload["gpu"] = opendocking.gpu_status()
+        _print_verdict(payload)
+        return _EXIT_OK
 
     print(f"{_BANNER}: GUI stack OK")
     print(f"  engine  {opendocking.engine_version()}")

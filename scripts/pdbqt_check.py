@@ -53,6 +53,7 @@ Run:  python scripts/pdbqt_check.py
 from __future__ import annotations
 
 import math
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -79,7 +80,7 @@ EXAMPLES = ROOT / "examples"
 #: check itself, at the end of `main`: a check that stops running takes the
 #: count down with it silently, which is how a suite goes from 91 to 87 with a
 #: clean report.
-EXPECTED_CHECKS = 55  # measured; see the report for the mutation counts
+EXPECTED_CHECKS = 57  # measured; see the report for the mutation counts
 
 FAILURES: list[str] = []
 CHECKS = 0
@@ -777,16 +778,145 @@ def main() -> int:
           f"blank-charge "
           f"tolerance: blank is allowed on purpose, garbage is not")
 
-    bad_type = good_line[:77] + "C1"
-    type_problems = W.validate_pdbqt_columns([bad_type], source="t")
-    check("an atom type that is not one or two letters is refused",
-          len(bad_type) == 79 and len(type_problems) == 1
-          and any("78-79" in p for p in type_problems),
-          f"a type of {bad_type[77:79]!r} is refused: {_head(type_problems)}. "
-          f"This check replaced one for 'longer than two characters' that "
-          f"**could never fire** -- the type field is line[77:79], at most two "
-          f"characters by slicing alone, so that branch was dead code wearing "
-          f"the costume of coverage. Mutation testing is what found it")
+    # The type field, refused. The fixture used to be `C1`, and `C1` is now
+    # **accepted** -- a measured loosening, not a slip. `C1` has exactly the
+    # shape of meeko's `G0`, `G0` is in meeko's own AutoDock 4 type table, and
+    # the old rule refused it. No shape rule can refuse one and admit the
+    # other, so the fixture moves to tokens the shape really does exclude.
+    # The price is recorded in `pdbqt_writer._ATOM_TYPE` rather than hidden.
+    bad_types = {}
+    for token in ("12", "1CG", "NDAX", "CG!", "-C"):
+        bad = good_line[:77] + token
+        bad_types[token] = (len(bad), W.validate_pdbqt_columns([bad],
+                                                               source="t"))
+    check("an atom type that is not a letter followed by at most two letters "
+          "or digits is refused",
+          bad_types["12"][0] == 79
+          and all(len(p) == 1 and "78 onwards" in p[0]
+                  for _, p in bad_types.values()),
+          "; ".join(f"{t!r} ({n} chars) -> {(_head(p) or 'ACCEPTED')}"
+                    for t, (n, p) in bad_types.items())
+          + ". `C1` was the fixture here until this check was rewritten, and it "
+            "is now accepted: it has the same shape as meeko's `G0`, which is a "
+            "real AutoDock 4 type, so a shape rule that refused `C1` would "
+            "refuse a file the format's reference writer emits")
+
+    # The accept side of the same field, which is the half that needs an oracle
+    # rather than a fixture invented here. meeko's own AutoDock 4 table is the
+    # definition of what a type may be, and **every** name in it has to pass.
+    from meeko.utils.autodock4_atom_types_elements import (
+        autodock4_atom_types_elements as AD4,
+    )
+    ad4_refused = {
+        name: W.validate_pdbqt_columns([good_line[:77] + name], source="t")
+        for name in sorted(AD4)
+    }
+    rejected_by_ad4 = sorted(n for n, p in ad4_refused.items() if p)
+    # The one three-character type that is *this project's* vocabulary rather
+    # than AutoDock's, measured through the same door. Meeko with typing on
+    # refuses it; the engine truncates it. Both are reported, neither is
+    # encoded as a rule -- see the reasoning at `pdbqt_writer._ATOM_TYPE`.
+    three = {}
+    for tok in ("NDA", "ODA", "CG0", "G0", "C1", "ND1"):
+        line3 = good_line[:77] + tok
+        three[tok] = (len(line3),
+                      bool(W.validate_pdbqt_columns([line3], source="t")),
+                      meeko_positions(line3 + "\n").reshape(-1, 3).shape[0]
+                      if not meeko_refuses(line3 + "\n") else 0)
+    engine_kinds = {}
+    for tok in ("NDA", "ODA"):
+        lig = Ligand.from_pdbqt_str(good_line[:77] + tok + "\nEND\n")
+        engine_kinds[tok] = (lig.atom_kinds[0],
+                             Ligand.from_pdbqt_str(
+                                 good_line[:77] + tok[:2] + "\nEND\n"
+                             ).atom_kinds[0])
+    check("every atom type in meeko's own AutoDock 4 table is accepted, and a "
+          "three-character one is a file meeko reads",
+          not rejected_by_ad4
+          and three["CG0"] == (80, False, 1)
+          and three["G0"][1] is False
+          and three["NDA"] == (80, False, 1)
+          and engine_kinds["NDA"] == ("donor", "donor")
+          and engine_kinds["ODA"] == ("donor", "donor"),
+          f"meeko 0.7.1 defines {len(AD4)} AutoDock 4 type names, longest "
+          f"{max(len(n) for n in AD4)} characters, "
+          f"{sum(1 for n in AD4 if len(n) > 2)} of them three characters "
+          f"({', '.join(sorted(n for n in AD4 if len(n) > 2))}) and "
+          f"{sum(1 for n in AD4 if n[-1].isdigit())} ending in a digit. "
+          f"Rejected by this validator: {rejected_by_ad4 or 'none'}. "
+          f"Fixtures: "
+          + ", ".join(f"{t!r} len {n} {'refused' if r else 'accepted'}"
+                      f"/meeko {k} atom" for t, (n, r, k) in three.items())
+          + f". The engine, asked for {engine_kinds['NDA'][0]!r} in columns "
+            f"78-80, reads the first two and reports {engine_kinds['NDA'][0]!r}"
+            f" -- identical to the file that says {engine_kinds['NDA'][1]!r}, so "
+            f"the third character is lost in the engine's reader, not here. "
+            f"Meeko with typing enabled refuses all four of NDA, ODA, ND and "
+            f"OD, so no third-party tool can honour these two either: that is a "
+            f"change request against Rust, not a rule for this validator")
+
+    # Mutation proof for the rule above, in both directions. Two of these
+    # mutations were wrong when first written and are recorded because the
+    # corrections are the interesting part:
+    #
+    # * A mutation of the *end* column, `_COL_TYPE = (77, 80)`, changed
+    #   **nothing at all**. The read is `line[_COL_TYPE[0]:]` -- to end of
+    #   line, as meeko takes it -- so `_COL_TYPE[1]` is not used by this
+    #   check and that mutant is an equivalent one. A mutation that cannot
+    #   fail is not evidence, so the width is pinned directly instead: the
+    #   refusal message below has to quote the *whole* token, which is only
+    #   possible if the read reached past column 79.
+    # * A mutation that only refuses, or only accepts, is caught by one
+    #   direction of this table and passes the other. That is the reason both
+    #   directions are here rather than one convenient fixture.
+    saved_cols, saved_re = W._COL_TYPE, W._ATOM_TYPE
+    mutations = {}
+
+    def _refuses_all() -> bool:
+        return all(W.validate_pdbqt_columns([good_line[:77] + t], source="m")
+                   for t in ("12", "1CG", "NDAX", "CG!", "-C"))
+
+    def _accepts_ad4() -> bool:
+        return not any(W.validate_pdbqt_columns([good_line[:77] + n], source="m")
+                       for n in AD4)
+
+    try:
+        mutations["unmutated"] = (_refuses_all(), _accepts_ad4())
+        W._COL_TYPE = (78, 79)          # read window starts one column late
+        mutations["read starts at column 78"] = (_refuses_all(), _accepts_ad4())
+        W._COL_TYPE = saved_cols
+        W._ATOM_TYPE = re.compile(r"^[A-Za-z][A-Za-z0-9]{0,1}$")   # 2-char cap
+        mutations["old two-character cap"] = (_refuses_all(), _accepts_ad4())
+        W._ATOM_TYPE = re.compile(r"^[A-Za-z]+$")                 # letters only
+        mutations["old letters-only rule"] = (_refuses_all(), _accepts_ad4())
+    finally:
+        W._COL_TYPE, W._ATOM_TYPE = saved_cols, saved_re
+    mutations["restored"] = (_refuses_all(), _accepts_ad4())
+    # The width, pinned without a mutation: a two- or three-character read
+    # cannot quote 'NDAX' in its complaint, because it never sees the 'X'.
+    nda_x = W.validate_pdbqt_columns([good_line[:77] + "NDAX"], source="m")
+    check("each half of the type rule is load-bearing: three mutations, each "
+          "caught, and restoring turns it green again",
+          mutations["unmutated"] == (True, True)
+          and mutations["restored"] == (True, True)
+          and mutations["read starts at column 78"] == (False, False)
+          and mutations["old two-character cap"] == (True, False)
+          and mutations["old letters-only rule"] == (False, False)
+          and len(nda_x) == 1 and "'NDAX'" in nda_x[0],
+          "; ".join(f"{k}: refuses-the-bad={v[0]}, accepts-all-AD4={v[1]}"
+                    for k, v in mutations.items())
+          + f". Moving the read window one column late is caught by both "
+            f"directions at once -- it drops the leading character, so 'G0' "
+            f"becomes '0' and '12' becomes '2'. The two pattern mutations are "
+            f"each caught by the accept direction against meeko's table: the "
+            f"old two-character cap rejects CG0-CG3, the old letters-only rule "
+            f"rejects those and G0-G3, and all of those are types meeko "
+            f"writes. The letters-only rule is also caught by the *refusal* "
+            f"direction, for a reason worth stating: 'NDAX' is all letters, so "
+            f"that rule accepts it. The width of the read is pinned by the "
+            f"complaint rather than by a mutation, because `_COL_TYPE[1]` is "
+            f"not read by it: {nda_x[0]!r} quotes all four characters, which a "
+            f"two- or three-character read could not do")
 
     short_line = good_line[:70]
     short_problems = W.validate_pdbqt_columns([short_line], source="s")

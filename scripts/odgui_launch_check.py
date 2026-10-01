@@ -40,6 +40,25 @@ shutdown.
 If nothing can ask the window to close, the script says so and falls back to
 proving only that the process stayed alive. That is a weaker claim and it is
 reported as one.
+
+**A run that stopped is not a run that passed.**
+
+This file always ended with a `RESULT:` line, which is more than most, but the
+line before it used to be the only thing standing between a crash and a silent
+green: the whole body was module-level code, so a `FileNotFoundError` from a
+missing `odgui`, or anything else raised, ended the process with a traceback
+and no verdict at all. And three of the ways the run can end -- no window
+appeared, the window ignored the close request, `odgui` exited on its own --
+all printed the same bare `RESULT: FAIL`, so a reader could not tell a product
+regression from a window that was never going to appear on this machine.
+
+So every terminal state now carries its own verdict and its own reason, and a
+window that never appears is separated from a product that is broken by asking
+`odgui --check` whether this machine can produce a context at all.
+
+Exit codes: ``0`` the window came up and closed cleanly, or it came up and the
+report says which weaker claim was verified instead; ``1`` finished, the claim
+did not hold; ``2`` did not finish.
 """
 
 from __future__ import annotations
@@ -53,6 +72,12 @@ from pathlib import Path
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
+#: The one place in the tree that knows how to ask `odgui --check` what this
+#: machine can do. It was a private copy in each of four check scripts, which
+#: meant a fix to it had to be made four times and three of them would have been
+#: missed. `python scripts/_gui_check.py` audits that these four still use it.
+from _gui_check import odgui_check
+
 ROOT = Path(__file__).resolve().parent.parent
 EX = ROOT / "examples"
 OUT = ROOT / "dist" / "odgui_launch"
@@ -60,6 +85,31 @@ OUT.mkdir(parents=True, exist_ok=True)
 
 WINDOW_TITLE = "Open Docking Workbench"
 IS_WINDOWS = sys.platform == "win32"
+
+#: How long to wait for the window to appear. Named so the reason quoted in a
+#: verdict is the same number the loop actually used, rather than a second
+#: literal that can drift from it.
+WINDOW_DEADLINE = 60
+
+EXIT_OK = 0
+EXIT_FAILED = 1
+EXIT_INCOMPLETE = 2
+
+# --- state, before the helpers on purpose ----------------------------------
+#
+# `x11_window_parse_check.py` execs the source between the `_run` helper and the
+# watch loop below, so everything in that window has to be self-contained: it
+# gets `re`, `shutil`, `subprocess`, `sys` and `WINDOW_TITLE`, and nothing else.
+# Anything else in the slice fails at exec time with a `NameError` -- which is
+# what happened when this block was left below the helpers, because `EX` is not
+# in that namespace. So the launch arguments and the watch state live up here,
+# outside the slice, exactly where they were before.
+#
+# The two anchors are matched as literal text, so this comment must not spell
+# either of them out: a first attempt at documenting the coupling wrote the
+# helper's name inline, and the guard then sliced the *comment* and died with a
+# `SyntaxError`. That is the cost of a text-level dependency, and the way to
+# live with it is not to quote the anchors.
 
 args = [
     "odgui",
@@ -69,9 +119,19 @@ args = [
 ]
 print("running:", " ".join(args), flush=True)
 
+if shutil.which("odgui") is None:
+    # Used to be a FileNotFoundError out of Popen: a traceback and no verdict,
+    # for a machine that is simply missing the console script.
+    print(
+        "\nRESULT: DID NOT FINISH — `odgui` is not on PATH, so there was nothing "
+        "to launch",
+        file=sys.stderr,
+    )
+    raise SystemExit(EXIT_INCOMPLETE)
+
 proc = subprocess.Popen(args, cwd=str(ROOT))
 shot = OUT / "window.png"
-deadline = time.time() + 60
+deadline = time.time() + WINDOW_DEADLINE
 seen = False
 rc = None
 close_mechanism = "none"
@@ -80,6 +140,18 @@ close_mechanism = "none"
 # something when no close mechanism exists: an exit code produced by our own
 # terminate() below is evidence about us, not about odgui.
 exited_early = False
+#: Why the run ended the way it did, in a form the verdict can quote. Every way
+#: out of the loop sets this; a verdict with no reason is what made the three
+#: failure modes indistinguishable from one another.
+outcome = ""
+forced = False
+#: Set when the machine, rather than the viewer, is why the window never came
+#: up. The run then gets a skip verdict and its own exit code, because nothing
+#: was verified either way and FAIL would be a claim it cannot make.
+env_blocked = False
+#: Set when the watch itself broke. Distinct from `outcome`, which describes a
+#: verdict the run reached; this says there was no verdict to reach.
+incomplete = ""
 
 
 def find_window_windows():
@@ -183,88 +255,165 @@ def abandon_window_x11(wid: str) -> None:
         )
 
 
+# --- the watch, at module level on purpose ---------------------------------
+#
+# `x11_window_parse_check.py` lifts the X11 helpers above out of this file by
+# slicing its source between the `_run` helper and the watch loop below,
+# because it cannot import this module -- importing it launches `odgui`. That
+# is a real dependency rather than an accident, and it is a guard worth
+# keeping, so the shape here is load-bearing: the `try:` at column 0 with the
+# `while` indented under it. Refactoring this block into a `main()` function
+# broke that check with a bare `ValueError: substring not found`, and the honest
+# response to a guard that fires is to satisfy the guard, not to relax it.
+#
+# What the guard costs is the ability to wrap this block in a function-level
+# `try`. The did-not-finish guarantee therefore comes from the `except` around
+# the loop *body* below, which is enough: every way this loop can die is inside
+# that body, and each one now records a reason and still reaches a verdict.
+
 try:
     while time.time() < deadline:
-        if proc.poll() is not None:
-            rc = proc.returncode
-            exited_early = True
-            print(f"process exited early with {rc}")
-            break
-
-        if IS_WINDOWS:
-            hwnd = find_window_windows()
-            if hwnd:
-                # Give the GL context and the first paint a moment.
-                time.sleep(3.0)
-                import win32con
-                import win32gui
-                from PIL import ImageGrab
-
-                left, top, right, bottom = win32gui.GetWindowRect(hwnd)
-                w, h = right - left, bottom - top
-                print(f"window found: {w}x{h} at ({left},{top})")
-                img = ImageGrab.grab(bbox=(left, top, right, bottom))
-                img.save(shot)
-                print(f"screenshot: {shot}  ({img.size[0]}x{img.size[1]})")
-                colours = img.getcolors(maxcolors=1 << 22)
-                print(
-                    "distinct colours in the captured window: "
-                    f"{len(colours) if colours else '>16M'}"
+        try:
+            if proc.poll() is not None:
+                rc = proc.returncode
+                exited_early = True
+                outcome = (
+                    f"odgui exited on its own with {rc} before a window appeared"
                 )
-                seen = True
-                close_mechanism = "PostMessage(WM_CLOSE)"
-                print(
-                    "posting WM_CLOSE (the closeEvent path a person would use)…",
-                    flush=True,
-                )
-                win32gui.PostMessage(hwnd, win32con.WM_CLOSE, 0, 0)
-                try:
-                    rc = proc.wait(timeout=20)
-                except subprocess.TimeoutExpired:
-                    print("the window ignored WM_CLOSE; forcing termination")
-                    break
+                print(f"process exited early with {rc}")
                 break
-        else:
-            wid, found_by = find_window_x11()
-            if wid:
-                seen = True
-                print(f"window {wid} found by {found_by}")
-                if shutil.which("import") is not None:
-                    # ImageMagick's `import` is the one capture tool that is
-                    # usually already there. Best effort: no screenshot is not a
-                    # failure, and the report says which case this was.
+
+            if IS_WINDOWS:
+                hwnd = find_window_windows()
+                if hwnd:
+                    import win32con
+                    import win32gui
+                    from PIL import ImageGrab
+
+                    # Give the GL context and the first paint a moment.
+                    time.sleep(3.0)
                     try:
-                        subprocess.run(
-                            ["import", "-window", wid, str(shot)],
-                            check=True,
-                            timeout=20,
-                            capture_output=True,
+                        left, top, right, bottom = win32gui.GetWindowRect(hwnd)
+                    except Exception as exc:
+                        # The handle went stale between finding it and using it,
+                        # because odgui exited during the sleep above. Measured
+                        # here, not reasoned about: `GetWindowRect` raised
+                        # `pywintypes.error(1400, invalid window handle)` on a run
+                        # where odgui had already exited 1, and the whole check died
+                        # on that line -- a traceback and no verdict, for what was
+                        # really the fact that the viewer exited before it opened
+                        # a window. The next pass sees `proc.poll()` and reports
+                        # exactly that, or the loop runs out its deadline and
+                        # reports that no window appeared; neither path can
+                        # produce a PASS, so dropping the handle is not a retry
+                        # that could turn a failure into a pass.
+                        print(
+                            f"the window handle went stale before it could be "
+                            f"measured ({type(exc).__name__}); still watching"
                         )
-                        print(f"screenshot: {shot}")
-                    except (OSError, subprocess.SubprocessError) as exc:
-                        print(f"screenshot unavailable ({exc}); continuing")
-                else:
-                    print("no screenshot tool (imagemagick) installed; skipping capture")
-                # Let startup finish before closing. A close request delivered
-                # while the GL context is still coming up is not a fair test of
-                # the close path.
-                time.sleep(3.0)
-                close_mechanism = close_window_x11(wid)
-                if close_mechanism == "none":
-                    print(
-                        "wmctrl is unavailable or failed, so nothing can ask the "
-                        "window to close through its window manager",
-                        file=sys.stderr,
-                    )
-                    abandon_window_x11(wid)
-                else:
-                    print(f"asking the window to close via {close_mechanism}…", flush=True)
-                try:
-                    rc = proc.wait(timeout=20)
-                except subprocess.TimeoutExpired:
-                    print("the window ignored the close request; forcing termination")
+                        hwnd = None
+                    if hwnd:
+                        w, h = right - left, bottom - top
+                        print(f"window found: {w}x{h} at ({left},{top})")
+                        img = ImageGrab.grab(bbox=(left, top, right, bottom))
+                        img.save(shot)
+                        print(f"screenshot: {shot}  ({img.size[0]}x{img.size[1]})")
+                        colours = img.getcolors(maxcolors=1 << 22)
+                        print(
+                            "distinct colours in the captured window: "
+                            f"{len(colours) if colours else '>16M'}"
+                        )
+                        seen = True
+                        close_mechanism = "PostMessage(WM_CLOSE)"
+                        print(
+                            "posting WM_CLOSE (the closeEvent path a person would "
+                            "use)…",
+                            flush=True,
+                        )
+                        win32gui.PostMessage(hwnd, win32con.WM_CLOSE, 0, 0)
+                        try:
+                            rc = proc.wait(timeout=20)
+                        except subprocess.TimeoutExpired:
+                            outcome = (
+                                "the window ignored WM_CLOSE and had to be killed, "
+                                "so the close path a person would use was not "
+                                "exercised"
+                            )
+                            print(
+                                "the window ignored WM_CLOSE; forcing termination"
+                            )
+                            forced = True
+                            break
+                        break
+            else:
+                wid, found_by = find_window_x11()
+                if wid:
+                    seen = True
+                    print(f"window {wid} found by {found_by}")
+                    if shutil.which("import") is not None:
+                        # ImageMagick's `import` is the one capture tool that is
+                        # usually already there. Best effort: no screenshot is not a
+                        # failure, and the report says which case this was.
+                        try:
+                            subprocess.run(
+                                ["import", "-window", wid, str(shot)],
+                                check=True,
+                                timeout=20,
+                                capture_output=True,
+                            )
+                            print(f"screenshot: {shot}")
+                        except (OSError, subprocess.SubprocessError) as exc:
+                            print(f"screenshot unavailable ({exc}); continuing")
+                    else:
+                        print(
+                            "no screenshot tool (imagemagick) installed; skipping "
+                            "capture"
+                        )
+                    # Let startup finish before closing. A close request delivered
+                    # while the GL context is still coming up is not a fair test of
+                    # the close path.
+                    time.sleep(3.0)
+                    close_mechanism = close_window_x11(wid)
+                    if close_mechanism == "none":
+                        print(
+                            "wmctrl is unavailable or failed, so nothing can ask "
+                            "the window to close through its window manager",
+                            file=sys.stderr,
+                        )
+                        abandon_window_x11(wid)
+                    else:
+                        print(
+                            f"asking the window to close via {close_mechanism}…",
+                            flush=True,
+                        )
+                    try:
+                        rc = proc.wait(timeout=20)
+                    except subprocess.TimeoutExpired:
+                        outcome = (
+                            "the window ignored the close request and had to be "
+                            "killed, so the close path was not exercised"
+                        )
+                        print(
+                            "the window ignored the close request; forcing "
+                            "termination"
+                        )
+                        forced = True
+                        break
                     break
-                break
+        except BaseException as exc:  # noqa: BLE001 - the point is to never be silent
+            # The one guarantee this file owes its reader: a watch that breaks is
+            # reported as a watch that broke, with the reason, and never as a
+            # window that was or was not found.
+            import traceback
+
+            traceback.print_exc()
+            incomplete = f"{type(exc).__name__}: {exc}"
+            print(
+                f"\nRESULT: DID NOT FINISH — the watch broke before it could "
+                f"reach a verdict: {incomplete}",
+                file=sys.stderr,
+            )
+            break
         time.sleep(0.5)
 finally:
     if proc.poll() is None:
@@ -275,6 +424,42 @@ finally:
             proc.kill()
             rc = proc.wait()
     print(f"exit code: {rc}")
+
+if incomplete:
+    # The watch already printed its verdict; nothing below may overwrite it.
+    raise SystemExit(EXIT_INCOMPLETE)
+
+if not seen and not exited_early and not forced:
+    # The window never turned up and odgui was still running when the deadline
+    # passed. That is the one outcome where the machine, rather than the viewer,
+    # is the likely cause, so the machine is asked -- and if the machine cannot
+    # answer, the run gets its own verdict below instead of being folded into
+    # FAIL, which is what used to happen and which made "the viewer is broken"
+    # indistinguishable from "this machine has no OpenGL".
+    #
+    # This does not weaken the check: on CI `odgui --check` is already a gate of
+    # its own (see `.github/workflows/ci.yml`), so a run that skips here is a run
+    # whose machine has already failed a different step, and a run that fails
+    # here on a machine whose `--check` passes is a real failure.
+    answer = odgui_check()
+    if answer.can_make_context:
+        env_blocked = False
+        outcome = (
+            f"no window appeared within {WINDOW_DEADLINE:.0f} s, on a machine "
+            f"where `odgui --check` says it can create a context "
+            f"({answer.describe()}) — so the viewer is not starting its window"
+        )
+    else:
+        env_blocked = True
+        outcome = (
+            f"no window appeared within {WINDOW_DEADLINE:.0f} s, and this machine "
+            f"cannot give Qt an OpenGL context ({answer.describe()}), so whether "
+            f"the viewer would have opened a window here is unknown"
+        )
+
+if env_blocked:
+    print(f"\nRESULT: SKIP — {outcome}")
+    raise SystemExit(EXIT_INCOMPLETE)
 
 if seen and close_mechanism == "none":
     # The window is up but nothing could ask it to close. Say so instead of
@@ -293,11 +478,16 @@ if seen and close_mechanism == "none":
         "PARTIAL — odgui opened a window and stayed up; its clean shutdown was "
         "not verified"
         if ok
-        else f"FAIL — odgui exited on its own with {rc} before a window was found",
+        else f"FAIL — {outcome or 'odgui exited on its own before a window was found'}",
     )
-    sys.exit(0 if ok else 1)
+    raise SystemExit(EXIT_OK if ok else EXIT_FAILED)
 
 ok = seen and rc == 0
 print(f"\nclosed via: {close_mechanism}")
-print("\nRESULT:", "PASS — odgui opens a real window and closes cleanly" if ok else "FAIL")
-sys.exit(0 if ok else 1)
+if ok:
+    print("\nRESULT: PASS — odgui opens a real window and closes cleanly")
+    raise SystemExit(EXIT_OK)
+print(
+    f"\nRESULT: FAIL — {outcome or 'the window came up but odgui did not exit cleanly'}"
+)
+raise SystemExit(EXIT_FAILED)
