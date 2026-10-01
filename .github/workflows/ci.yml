@@ -24,7 +24,7 @@
 # `continue-on-error: true`, which is the one setting that turns "nothing was
 # checked" into "everything is fine".
 #
-# Hence three changes, each of which removes a way for a suite to be dark:
+# Hence four changes, each of which removes a way for a suite to be dark:
 #
 #   1. The audit scripts live in a job that needs no display and no widget, so
 #      no GUI capability can take them down with it.
@@ -35,6 +35,17 @@
 #      that measurement. A step is now skipped because a measured fact says it
 #      cannot run here, never because an earlier step happened to fail, and the
 #      report step runs either way and says so out loud.
+#   4. Every audit step carries `if: !cancelled() && <the build succeeded>`.
+#      Change 1 moved the audits out of a job that could cancel them; it did
+#      not stop one failing audit from cancelling the next ten, and run
+#      36841406330 showed exactly that -- `core_check.py` died on its own
+#      import line and the ten steps behind it never ran. The default
+#      `success()` is what makes a step conditional on *all* its predecessors,
+#      which for a suite of independent checks is the wrong condition. These
+#      steps do not depend on each other, so they are conditioned only on the
+#      one thing they genuinely need (a built wheel) and on the run not having
+#      been cancelled. A failing step still fails the job -- `if` decides
+#      whether a step runs, never whether its failure counts.
 #
 # The header used to claim the runner "does have a working OpenGL context under
 # xvfb-run". It does not, and the claim was load-bearing: it is why the audit
@@ -188,6 +199,19 @@ jobs:
     # runner without a Qt OpenGL widget took all of them down with it. This job
     # has no `continue-on-error` and no display, so "the GUI is unhappy here" is
     # not something it can express.
+    #
+    # The `if:` on every audit step below is the same line, and it is load
+    # bearing. These checks are independent of one another, so conditioning them
+    # on all of their predecessors succeeding -- which is what an unadorned step
+    # does -- means one failure hides every check behind it. That is not a
+    # hypothetical: on run 36841406330 `core_check.py` died on its own import
+    # line and the ten steps behind it never executed, which is the same shape
+    # of failure as the one this job was created to end, one level down.
+    #
+    # `!cancelled() && steps.wheel.outcome == 'success'` says exactly two
+    # things: the run was not cancelled, and there is a wheel to audit. It does
+    # not say "nothing before me failed", and it does not suppress a failure --
+    # a step that runs and fails still fails the job.
     steps:
       - uses: actions/checkout@v4
 
@@ -202,6 +226,7 @@ jobs:
           key: ${{ runner.os }}-pip-${{ hashFiles('dock-py/pyproject.toml') }}
 
       - name: Build and install the wheel
+        id: wheel
         run: |
           python -m pip install --upgrade pip maturin
           python -m maturin build --release --locked -m dock-py/Cargo.toml --out dist
@@ -220,6 +245,7 @@ jobs:
       # column, so it refuses a line this project's own whitespace-based reader
       # would accept. A check only the maintainer can run is a note, not a gate.
       - name: Install the extras the oracles need
+        if: ${{ !cancelled() && steps.wheel.outcome == 'success' }}
         run: |
           python -m pip install "PyQt6>=6.4" "moderngl>=5.8" rdkit meeko
 
@@ -229,6 +255,7 @@ jobs:
       # failure in a suite is reported without knowing whether the suite's own
       # bookkeeping is the thing that broke.
       - name: The audit scripts' own bookkeeping and the documents
+        if: ${{ !cancelled() && steps.wheel.outcome == 'success' }}
         run: |
           python scripts/check_scripts_declare.py
           python scripts/docs_claims_check.py
@@ -244,6 +271,7 @@ jobs:
         # between two Python classes, where neither can see.
         # This one walks every public member of every wrapper on a real
         # instance and reverse-asserts that none was left unchecked.
+        if: ${{ !cancelled() && steps.wheel.outcome == 'success' }}
         run: python scripts/core_check.py
 
       - name: Pose/receptor interaction criteria
@@ -251,6 +279,7 @@ jobs:
         # hydrogen-bond thresholds were once accepted as arguments and then
         # ignored, and nothing noticed until a check loosened one criterion at a
         # time and the answers did not change.
+        if: ${{ !cancelled() && steps.wheel.outcome == 'success' }}
         run: |
           python scripts/contacts_check.py
           python scripts/contacts_check2.py
@@ -259,6 +288,7 @@ jobs:
         # The same pose, scored through the Python wrapper and through the Rust
         # binding, must give the same number. It is the only check that can
         # notice one of the two quietly changing units.
+        if: ${{ !cancelled() && steps.wheel.outcome == 'success' }}
         run: python scripts/scoring_cross_check.py
 
       - name: Pocket search geometry and thresholds
@@ -269,9 +299,11 @@ jobs:
         #
         # This one docks as well as searches, so it needs the engine rather
         # than just numpy.
+        if: ${{ !cancelled() && steps.wheel.outcome == 'success' }}
         run: python scripts/pockets_check.py
 
       - name: Bond perception and representation geometry
+        if: ${{ !cancelled() && steps.wheel.outcome == 'success' }}
         run: |
           python scripts/structure_bond_check.py
           python scripts/representation_geometry_check.py
@@ -293,6 +325,7 @@ jobs:
         # called RemoveAtom on a Chem.Mol (which has no such method, so it had
         # never removed anything), and a PathToSubmol call that takes a
         # traversal path rather than a set of atoms.
+        if: ${{ !cancelled() && steps.wheel.outcome == 'success' }}
         run: |
           python scripts/prep_check.py
           python scripts/ligand_check.py
@@ -313,6 +346,7 @@ jobs:
         # installed wheel having drifted apart.
         # ~21 s over 36 subprocesses; the engine time is 0.26-0.40 s per
         # docking run and the rest is interpreter cold start.
+        if: ${{ !cancelled() && steps.wheel.outcome == 'success' }}
         run: |
           python scripts/cli_check.py
           python scripts/cli_prep_check.py
@@ -325,6 +359,7 @@ jobs:
         # to investigate a scoring function that no longer exists.
         # Judged on what each one *printed*, not on its exit code: a script
         # whose checks quietly stopped running still exits zero.
+        if: ${{ !cancelled() && steps.wheel.outcome == 'success' }}
         run: python scripts/examples_check.py
 
       - name: PDBQT file format
@@ -335,12 +370,14 @@ jobs:
         # space deleted at column 31. Meeko parses by column and refuses that.
         # The three claims -- third-party parser, shipped third-party files,
         # own readers -- are asserted separately on purpose.
+        if: ${{ !cancelled() && steps.wheel.outcome == 'success' }}
         run: python scripts/pdbqt_check.py
 
       - name: X11 window lookup parses each tool's real output
         # No display needed: this stubs the helpers with the formats they
         # really print. It guards the workbench job's launch step, which needs
         # a window and is therefore conditional on a measured capability.
+        if: ${{ !cancelled() && steps.wheel.outcome == 'success' }}
         run: python scripts/x11_window_parse_check.py
 
       - name: What the benchmarks report
@@ -353,6 +390,7 @@ jobs:
         # "4HHB 4 ms".
         # Offline in about a second: `urlopen` is stubbed, so no case may touch
         # the network. Deliberately gates no corpus number, and says so.
+        if: ${{ !cancelled() && steps.wheel.outcome == 'success' }}
         run: python scripts/benchmark_check.py
 
   docs:
@@ -388,6 +426,12 @@ jobs:
     # at the top of the job, so the steps that cannot run on a headless runner
     # are skipped for a stated, measured reason instead of a collateral one, and
     # everything else fails loudly.
+    #
+    # The `if:` on the suites below has the same purpose as the ones in the
+    # `checks` job: they are independent, so none of them should be able to
+    # cancel another. `workbench_interaction_check.py` failing must not hide the
+    # framing measurement or the renderer smoke test, which is exactly what
+    # happened to ten audit scripts one job over.
     steps:
       - uses: actions/checkout@v4
 
@@ -432,6 +476,7 @@ jobs:
             echo "::warning::Qt xcb extras unavailable; the windowed checks will be skipped"
 
       - name: Build and install the wheel with GUI extras
+        id: wheelgui
         run: |
           python -m pip install --upgrade pip maturin
           python -m maturin build --release --locked -m dock-py/Cargo.toml --out dist
@@ -447,6 +492,7 @@ jobs:
       # appears. Without it the convergence is a convention rather than a fact,
       # and conventions are what drift.
       - name: GUI scripts share one odgui --check wrapper
+        if: ${{ !cancelled() && steps.wheelgui.outcome == 'success' }}
         run: python scripts/_gui_check.py
 
       # The capability report. It walks a ladder of Qt/OpenGL routes until one
@@ -468,6 +514,7 @@ jobs:
       #     steps below are conditioned on it instead of being collateral.
       - name: What this runner can do with OpenGL
         id: capability
+        if: ${{ !cancelled() && steps.wheelgui.outcome == 'success' }}
         env:
           LIBGL_ALWAYS_SOFTWARE: "1"
         run: |
@@ -555,6 +602,7 @@ jobs:
       # decides. It is named accordingly so that a green tick here is never read
       # as "OpenGL was verified".
       - name: OpenGL route attribution (informer -- never fails)
+        if: ${{ !cancelled() && steps.capability.outcome == 'success' }}
         run: xvfb-run -a -s "-screen 0 1280x1024x24" python scripts/qt_gl_probe.py
 
       # Deliberately NOT conditioned on the widget capability. This suite
@@ -564,12 +612,14 @@ jobs:
       # exact bug this job just had, where the one suite that could still say
       # something useful was the one that got cancelled.
       - name: Layout, interaction and behaviour
+        if: ${{ !cancelled() && steps.capability.outcome == 'success' }}
         env:
           LIBGL_ALWAYS_SOFTWARE: "1"
           QT_QPA_PLATFORM: xcb
         run: xvfb-run -a -s "-screen 0 1280x1024x24" python scripts/workbench_interaction_check.py
 
       - name: Is the structure actually centred in the viewport
+        if: ${{ !cancelled() && steps.capability.outcome == 'success' }}
         env:
           LIBGL_ALWAYS_SOFTWARE: "1"
           QT_QPA_PLATFORM: xcb
@@ -580,20 +630,21 @@ jobs:
       # read back. A GLSL typo, a mismatched attribute name or a wrong index
       # buffer raises here instead of silently producing a black window.
       - name: Renderer smoke, both levels
+        if: ${{ !cancelled() && steps.capability.outcome == 'success' }}
         env:
           LIBGL_ALWAYS_SOFTWARE: "1"
           QT_QPA_PLATFORM: xcb
         run: xvfb-run -a -s "-screen 0 1280x1024x24" python scripts/workbench_smoke.py
 
       - name: "Screenshot: contact geometry"
-        if: steps.capability.outputs.widget == '1'
+        if: ${{ !cancelled() && steps.capability.outcome == 'success' && steps.capability.outputs.widget == '1' }}
         env:
           LIBGL_ALWAYS_SOFTWARE: "1"
           QT_QPA_PLATFORM: xcb
         run: xvfb-run -a -s "-screen 0 1280x1024x24" python scripts/contacts_screenshot.py
 
       - name: "Screenshot: pocket detection"
-        if: steps.capability.outputs.widget == '1'
+        if: ${{ !cancelled() && steps.capability.outcome == 'success' && steps.capability.outputs.widget == '1' }}
         env:
           LIBGL_ALWAYS_SOFTWARE: "1"
           QT_QPA_PLATFORM: xcb
@@ -612,7 +663,7 @@ jobs:
           if-no-files-found: ignore
 
       - name: Real launch, then close
-        if: steps.capability.outputs.widget == '1'
+        if: ${{ !cancelled() && steps.capability.outcome == 'success' && steps.capability.outputs.widget == '1' }}
         run: |
           # A window manager is started by hand because xvfb-run does not start
           # one, and the check closes the window the way a person does. If

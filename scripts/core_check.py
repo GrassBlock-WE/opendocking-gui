@@ -62,7 +62,57 @@ EX = ROOT / "examples"
 if hasattr(sys.stdout, "reconfigure"):  # pragma: no branch
     sys.stdout.reconfigure(encoding="utf-8", errors="backslashreplace")
 
-sys.path.insert(0, str(SRC))
+# Which copy of `opendocking` this run measures is a claim, so it is made the
+# same way the other fifteen scripts make it: prefer the **installed wheel** and
+# fall back to the source tree only when there is nothing to import. This block
+# used to be an unconditional `sys.path.insert(0, str(SRC))`, which is the same
+# policy written backwards -- and on a fresh CI checkout it could not work at
+# all. The source tree in a checkout has no compiled `_dockpy` (the extension is
+# only ever built into the wheel, never committed), so the import raised
+# ImportError and the step died before a single check ran. That is how
+# `core_check.py` came to have never executed on CI: the step sat behind a GUI
+# probe that failed first, and when it was finally given a job of its own, the
+# thing that surfaced was its own import line rather than anything about the
+# engine.
+#
+# The branch below only decides whether to extend `sys.path`. It does **not**
+# decide what this run measured, and the first version of this comment claimed
+# otherwise: with `PYTHONPATH` already pointing at the source tree, the import
+# succeeds, so the "installed" branch runs, and a label derived from the branch
+# reported the installed wheel while the run measured the tree -- a report
+# disagreeing with the process, which is the exact failure the
+# `odgui --check --json` contract exists to prevent. So the label is measured
+# from where the package actually resolved, and printed in the summary.
+try:  # noqa: SIM105
+    import opendocking as _od
+except ImportError:  # pragma: no cover - only on an uninstalled checkout
+    sys.path.insert(0, str(SRC))
+    import opendocking as _od
+
+_RESOLVED = Path(_od.__file__).resolve().parent
+# Three copies of this package can be reachable at once, and a two-way label is
+# not enough to describe them. This file computes `SRC` as *this checkout's*
+# `dock-py/python`, which is the release copy that `_sync_release.py` keeps
+# byte-identical to a development tree one directory up. A developer running
+# with `PYTHONPATH` pointed at that outer tree therefore gets something that is
+# neither the wheel nor `SRC`, and an earlier version of this label called it
+# "the installed wheel" while printing the source tree's path -- a report
+# disagreeing with the process, which is the failure the `odgui --check --json`
+# contract exists to prevent.
+#
+# So all three are named, and the third one says plainly that this run measured
+# something neither branch chose. On CI that case is the one that killed the
+# step on run 36841406330: the import fell through to a checkout with no
+# compiled extension and raised before a single check ran.
+if _RESOLVED == (SRC.resolve() / "opendocking"):
+    _IMPORT_SOURCE = f"the source tree at {_RESOLVED}"
+elif "site-packages" in _RESOLVED.parts:
+    _IMPORT_SOURCE = f"the installed wheel at {_RESOLVED}"
+else:
+    _IMPORT_SOURCE = (
+        f"a source tree that is neither this checkout's dock-py/python nor the "
+        f"installed wheel, at {_RESOLVED}"
+    )
 
 from opendocking import core  # noqa: E402
 
@@ -1031,6 +1081,7 @@ def main() -> int:
             check(f"section {fn.__name__} completed", False, "crashed")
             traceback.print_exc()
     print(f"\n{CHECKS - len(FAILURES)}/{CHECKS} passed")
+    print(f"  measured: {_IMPORT_SOURCE}")
     for f in FAILURES:
         print(f"  FAILED: {f}")
     return 1 if FAILURES else 0
