@@ -244,10 +244,56 @@ jobs:
       # is the tool that produced the shipped `examples/*.pdbqt` and parses by
       # column, so it refuses a line this project's own whitespace-based reader
       # would accept. A check only the maintainer can run is a note, not a gate.
+      #
+      # Two facts, both measured on a runner, make the pinning load bearing
+      # rather than tidy:
+      #
+      #   * The runner image ships its own `rdkit` 2026.3.6, `numpy` 2.4.6 and
+      #     `Pillow`, and pip reports them as "already satisfied". So without a
+      #     pin, the oracle this gate compares against is whatever the image
+      #     happened to contain on the day. This project already holds that an
+      #     oracle's *absence* must fail the build rather than silently reduce
+      #     what is checked; an oracle *present by accident*, at an unpinned
+      #     version, is the same hole from the other side.
+      #   * meeko's wheel metadata declares **no** requirements at all, while
+      #     `meeko/__init__.py` imports `prody` at module level (and `gemmi`,
+      #     `scipy` and `pandas` from its submodules). pip therefore installed
+      #     nothing on its behalf, and `import meeko` died on the runner with a
+      #     bare ModuleNotFoundError while the step that "installed the oracles"
+      #     was green. The maintainer's machine has all seven of those packages,
+      #     which is exactly how a check passes locally and cannot run in CI.
+      #
+      # meeko is pinned to the version this project has actually validated
+      # against -- 0.7.1, the one the maintainer's checks compare against. An
+      # earlier draft pinned 0.8.0 on the reasoning that it is what the runner
+      # resolved to, which is the wrong reason: a pin is a claim that a known
+      # version works, and pinning the version that happened to appear first
+      # would make the oracle's identity a function of the day. The rest are
+      # named because meeko imports them at module level whether or not its
+      # metadata says so.
       - name: Install the extras the oracles need
         if: ${{ !cancelled() && steps.wheel.outcome == 'success' }}
         run: |
-          python -m pip install "PyQt6>=6.4" "moderngl>=5.8" rdkit meeko
+          python -m pip install "PyQt6>=6.4" "moderngl>=5.8" "meeko==0.7.1" \
+            "rdkit>=2024.3.1" prody gemmi scipy pandas
+
+      # Prints what was actually resolved, and fails if any oracle is missing.
+      # The failure has to be here rather than inside a check script: a script
+      # that discovers its own oracle is absent can only report it, and a report
+      # is not a gate. This step makes "the oracles ran" a fact about the run
+      # rather than a claim in a log nobody reads.
+      - name: The third-party oracles are importable, and here are their versions
+        if: ${{ !cancelled() && steps.wheel.outcome == 'success' }}
+        run: |
+          python -c "
+          import importlib
+          import importlib.metadata as m
+          for mod, dist in (('rdkit','rdkit'), ('meeko','meeko'), ('prody','prody'),
+                            ('gemmi','gemmi'), ('scipy','scipy')):
+              importlib.import_module(mod)
+              print('  {0:<8} {1}'.format(mod, m.version(dist)))
+          print('every declared oracle is importable, at the versions above')
+          "
 
       # The meta-checks go first, and on purpose: `check_scripts_declare.py`
       # audits every other script's declared count, and `docs_claims_check.py`
@@ -475,13 +521,21 @@ jobs:
             libxcb-cursor0 libxcb-xinerama0 wmctrl xdotool x11-utils openbox || \
             echo "::warning::Qt xcb extras unavailable; the windowed checks will be skipped"
 
+      # Only the two GUI extras, deliberately. This job's steps are the
+      # workbench layout, interaction, framing, renderer smoke, screenshots and
+      # the real launch -- none of which parses a PDBQT with a third-party
+      # library, so rdkit and meeko are not installed here. They were, once,
+      # because the audit scripts used to live in this job; leaving them would
+      # mean two jobs disagree about which oracles exist, and an oracle that is
+      # installed in one job and absent in the other makes a check's behaviour
+      # depend on where it runs. The `checks` job owns the oracles and pins them.
       - name: Build and install the wheel with GUI extras
         id: wheelgui
         run: |
           python -m pip install --upgrade pip maturin
           python -m maturin build --release --locked -m dock-py/Cargo.toml --out dist
           python -m pip install --force-reinstall dist/opendocking-*.whl
-          python -m pip install "PyQt6>=6.4" "moderngl>=5.8" rdkit meeko
+          python -m pip install "PyQt6>=6.4" "moderngl>=5.8"
 
       # A static audit, so it needs no display and runs first: it is the check
       # that keeps the *other* GUI scripts honest. Five of them used to carry
