@@ -82,26 +82,34 @@ docstring gives the layout as `type·4 + slot`: **ten type groups of four slots
 each**, not four terms. Which group an atom lands in is decided by the atom,
 and a single-atom receptor is enough to measure it:
 
-| lone receptor atom | group | populated slots |
+| lone receptor atom | groups populated | slots populated |
 |---|---|---|
-| `C`, `A`, `HD`   | 0 | 0, 3 |
-| `N`              | 1 | 0 |
-| `NA`             | 1 | 0, 2 |
-| `OA`, `OS`       | 2 | 0, 2 |
-| `P`              | 3 | 0 |
-| `S`, `SA`        | 4 | 0 |
-| `F`              | 5 | 0, 3 |
-| `Cl`             | 6 | 0, 3 |
+| every one of `C A H HD N NA ND NDA O OA OS OD ODA P S SA F Cl CG0` | **all ten** | see the table in `main` |
 
-So the four slots do name four terms -- slot 0 is the steric/shape field, which
-every atom populates; slot 3 is hydrophobic, which the apolar atoms populate;
-slot 2 is populated by the acceptors (`NA`, `OA`); slot 1 is populated by the
-donors (`ND`, `OD`) and by an explicit polar hydrogen. What the draft got
-wrong was the word "withholds": the split is **not** a per-term filter applied
-to one shared field. Each type group is a separate table, and **a probe atom
-sums only the group that matches its own element** -- measured below, in a
-cross-tab, and it is the reason a polar donor-acceptor pair scores exactly
-zero.
+So the four slots still name four terms -- slot 0 is the steric/shape field,
+which every atom populates; slot 3 is hydrophobic, which the apolar atoms
+populate; slot 2 is populated by the acceptors (`NA`, `OA`); slot 1 is
+populated by the donors (`ND`, `OD`) and by an explicit polar hydrogen. What
+this file used to describe as a **per-element partition** is gone: a lone atom
+used to be written into one group of ten and read only out of the group
+matching the probe's own element, which is why a polar donor-acceptor pair
+scored exactly `0.000000`. Every atom is now written into all ten groups and
+every probe reads all ten, so the element partition no longer exists and a
+nitrogen can see an oxygen's acceptor field.
+
+# What the fix did *not* do, and the measurement that says so
+
+The ten groups are not copies of one another, so replicating a field into ten
+of them could have rescaled every term. It did not, and the reason is
+measurable rather than asserted: relabelling every `OA` in the shipped pose's
+receptor to `OS` -- same element, same steric field, and the *only* map
+component that changes is the acceptor slot -- moves the pose by
+**1.068 kcal/mol**, the same magnitude the pre-fix build produced, even though
+pre-fix that field was written once and now it is written ten times. The
+check below also attributes that number to a **single atom**: of the pose's 16
+atoms, only the one `donoracceptor` oxygen reads the acceptor slot, and
+deleting exactly that atom takes the delta to `0.000000` while the other 15
+leave it untouched.
 
 # A finding this file withdrew, and why the withdrawal is the interesting part
 
@@ -118,11 +126,16 @@ nothing else. Rebuilt through the file reader, where the same atom really is an
 `acceptor`, the same five receptors give **two** different answers:
 `O`/`OA`/`OS` at `+0.15853941490252765` and `OD` at `-0.2512580310304957`.
 
-So the donor slot **is** read, by a probe of the same element group, and the
-chemistry inside a group is right: a donor reads the receptor's *acceptor*
-field, an acceptor reads the receptor's *donor* field, and like-with-like is
-withheld. The single defect that remains is the element partition, and the two
-findings collapsed into one.
+So the donor slot **is** read: a donor reads the receptor's *acceptor* field,
+an acceptor reads the receptor's *donor* field, and like-with-like is
+withheld. At the time this collapsed the two findings into one -- the element
+partition -- and the element partition has since been removed, so the
+like-with-like withholding is now the whole of it: it is a property of the
+**slot**, and nothing about the elements is involved. The rule this file
+finally holds the engine to, measured in 28 probe/receptor-pair cases with no
+element condition anywhere in it, is one line: *a probe's score changes for a
+receptor pair if and only if one of the differing slots is a slot that probe's
+class reads.*
 
 The general lesson, recorded because it will recur: **a probe fixture's class
 is a claim, not a fact, and `atom_kinds` is the only way to check it.** Two
@@ -133,6 +146,8 @@ comparison.
 
 from __future__ import annotations
 
+import collections
+import re
 import sys
 from pathlib import Path
 
@@ -152,7 +167,7 @@ from opendocking.core import (  # noqa: E402
 )
 
 #: How many checks this file is supposed to run, counted by running it.
-EXPECTED_CHECKS = 19  # measured; the reference is a spec check, not Vina
+EXPECTED_CHECKS = 21  # measured; the reference is a spec check, not Vina
 
 FAILURES: list[str] = []
 CHECKS = 0
@@ -190,13 +205,16 @@ WEIGHTS = {
 XS_RADIUS = {"C": 1.9, "N": 1.75, "O": 1.6, "S": 2.0, "H": 0.0}
 
 
-def smoothstep(x: float, a: float, b: float) -> float:
-    """S(a, b, x) from SCORING.md section 2.3: 0 below a, 1 above b, C1 between."""
-    if x <= a:
-        return 0.0
-    if x >= b:
-        return 1.0
-    t = (x - a) / (b - a)
+def smoothstep(x, a, b):
+    """S(a, b, x) from SCORING.md section 2.3: 0 below a, 1 above b, C1 between.
+
+    Written with `clip` rather than three branches so the same function serves
+    the scalar callers and the vectorised group-radius fit below. For a scalar
+    the result is identical to the branch form: below `a` the clipped `t` is 0
+    and `0*(3-0)` is 0.0 exactly, above `b` it is 1 and `1*(3-2)` is 1.0
+    exactly, and in between it is the same polynomial.
+    """
+    t = np.clip((np.asarray(x, dtype=float) - a) / (b - a), 0.0, 1.0)
     return t * t * (3.0 - 2.0 * t)
 
 
@@ -214,9 +232,10 @@ def reference_pair(d: float, *, donor=False, acceptor=False,
     check below can perturb one constant without reaching for a global.
     """
     w = WEIGHTS if weights is None else weights
-    g1 = w["g1"] * float(np.exp(-(((d - 0.5) / 0.5) ** 2)))
-    g2 = w["g2"] * float(np.exp(-(((d - 0.0) / 0.5) ** 2)))
-    rep = w["rep"] * (d * d if d < 0.0 else 0.0)
+    d = np.asarray(d, dtype=float)
+    g1 = w["g1"] * np.exp(-(((d - 0.5) / 0.5) ** 2))
+    g2 = w["g2"] * np.exp(-(((d - 0.0) / 0.5) ** 2))
+    rep = w["rep"] * np.where(d < 0.0, d * d, 0.0)
     hb = w["hb"] * (1.0 - smoothstep(d, -0.5, 0.0)) if (donor or acceptor) else 0.0
     hyd = w["hyd"] * (1.0 - smoothstep(d, 0.5, 1.5)) if apolar else 0.0
     return {"g1": g1, "g2": g2, "rep": rep, "hb": hb, "hyd": hyd,
@@ -292,6 +311,53 @@ def at(lig, rec, distance=PROBE_AT, box=PROBE_BOX):
     return float(score_conformation(lig, maps, conf)[0])
 
 
+#: The map box the group radii are recovered in. Larger than `PROBE_BOX` so the
+#: annulus holds enough points at every radius to fit against.
+FIT_HALF = 7.0
+FIT_BOX = GridBox((-FIT_HALF, -FIT_HALF, -FIT_HALF), (FIT_HALF, FIT_HALF,
+                                                     FIT_HALF))
+
+
+def group_radii(atom_type: str = "C") -> list[float]:
+    """Recover the XS radius each of the ten map groups is built with.
+
+    A group's field is the spec's pair function evaluated at
+    ``d = r - (R_group + R_atom)``, so the radius is a *shift* of a known
+    curve and comes out of a least-squares fit against that curve. The carbon
+    receptor is used because it is `hydrophobic`, which makes the spec's
+    ``apolar`` decomposition the right one to fit against, and because the
+    probe that reads a group does not depend on the receptor: every group is
+    read by every probe now, so the same ten radii serve all of them.
+
+    This is the mechanism behind most of what follows, and it is measured
+    rather than read out of the implementation for the reason the rest of this
+    file is written the way it is: the spec is the reference, and a constant
+    the spec states is a prediction to be falsified, not a value to be copied.
+    """
+    maps = rec_of(atom_type).precalculate(FIT_BOX, "vina")
+    nx, ny, nz = maps.dims
+    step = maps.spacing
+    axes = [(np.arange(n) - (n - 1) / 2.0) * step for n in (nx, ny, nz)]
+    radius = np.sqrt(sum(np.square(np.meshgrid(*axes, indexing="ij")))).reshape(-1)
+    per = maps.raw_data.reshape(-1, 40)
+    # The grid is clamped near the nucleus and is identically zero past the
+    # map's cutoff; neither is part of the pair function, so both are excluded
+    # rather than fitted around.
+    annulus = (radius > 0.6) & (radius < 5.0)
+    rs = radius[annulus]
+    shifts = np.arange(1.5, 4.6, 0.0025)
+    out = []
+    for g in range(10):
+        vals = per[annulus, 4 * g]
+        unclamped = np.abs(vals) < 100.0
+        d, v = rs[unclamped], vals[unclamped]
+        rms = [float(np.sqrt(np.mean(
+            (reference_pair(d - s, apolar=True)["total"] - v) ** 2)))
+            for s in shifts]
+        out.append(float(shifts[int(np.argmin(rms))]) - XS_RADIUS[atom_type])
+    return out
+
+
 #: Probes that between them cover the groups the engine distinguishes.
 #:
 #: **The names carry PDBQT type prefixes that `from_arrays` ignores** --
@@ -316,6 +382,17 @@ PROBE_TYPE = {
     "C": ["C"], "N+H": ["N", "H"], "N": ["N"], "O": ["O"],
     "OA (via file)": ["OA"],
 }
+
+#: Which of the four map slots each class reads. This is the whole of the
+#: selectivity the engine has left: no element, no group, nothing but the
+#: slot. It is mutated below, and every mutation is caught, so it is a claim
+#: being tested rather than a description.
+SLOT_MASK = {"hydrophobic": {0, 3}, "donor": {0, 2},
+             "acceptor": {0, 1}, "other": {0},
+             # The fifth class, which a one-atom ligand cannot be: it needs a
+             # bonded polar hydrogen. It is covered on the project's own shipped
+             # pose rather than left as an assumption -- see the slot-mask check.
+             "donoracceptor": {0, 1, 2}}
 
 
 def from_file(atom_types: list[str]) -> Ligand:
@@ -474,52 +551,72 @@ def main() -> int:
     h_cross = zero_crossing("C", (["H"], [0.0], np.array([[0.0, 0.0, 0.0]]),
                                   None, ["HD_H1"]), 1.0, 8.0)
     h_radius = h_cross - XS_RADIUS["C"]
-    # Is the number stable, or an artefact of one fixture? Both halves are
-    # varied: the polar hydrogen's typing, and whether the receptor carries
-    # more than the one carbon. Neither moves it, which is what makes the
-    # number a reportable measurement rather than a curiosity of the fixture.
+    # Is the number stable, or an artefact of one fixture? Both halves that
+    # *should* be neutral are varied -- the probe's own typing, and whether the
+    # receptor carries more than one atom. Neither moves it, and both move it
+    # **bitwise** not just to within a tolerance, which is what makes this a
+    # measurement of a map rather than of a rounding error.
     h_bare = zero_crossing("C", (["H"], [0.0], np.array([[0.0, 0.0, 0.0]])),
                            1.0, 8.0)
-    h_hydroxyl = zero_crossing(
-        None, (["H"], [0.0], np.array([[0.0, 0.0, 0.0]]), None, ["HD_H1"]),
-        1.0, 8.0,
-        rec_specs=[("C1", (0.0, 0.0, 0.0), "C"),
-                   ("O1", (1.43, 0.0, 0.0), "OA"),
-                   ("H1", (2.05, 0.93, 0.0), "HD")],
-    )
-    # And a probe the engine will not even score: a lone nitrogen or oxygen
-    # reads a different map group, so its bisection never brackets a crossing
-    # and the radius is not measurable for it at all. Reporting the bound is
-    # more honest than reporting a number the search never found.
-    n_bounded = zero_crossing("C", (["N"], [0.0], np.array([[0.0, 0.0, 0.0]])),
-                              1.0, 8.0)
-    check("and the hydrogen radius is NOT the 0.0 the spec states",
+    h_two_c = zero_crossing(["C", "C"], (["H"], [0.0],
+                                         np.array([[0.0, 0.0, 0.0]]),
+                                         None, ["HD_H1"]), 1.0, 8.0)
+    # And the half that used to be neutral and no longer is. While a probe read
+    # only the map group of its own element, a lone `N` or `O` probe could not
+    # see a lone carbon at all, so its bisection never bracketed a crossing and
+    # ran to its bound. All three of these now cross zero, and they cross in
+    # the order the spec's XS radii predict: the smaller the receptor's element
+    # radius (C 1.9 > N 1.75 > O 1.6), the further in the crossing sits. The
+    # ordering is the check; the three numbers being finite is not.
+    n_cross = zero_crossing("C", (["N"], [0.0], np.array([[0.0, 0.0, 0.0]])),
+                            1.0, 8.0)
+    o_cross = zero_crossing("C", (["O"], [0.0], np.array([[0.0, 0.0, 0.0]]),
+                                  None, ["OA_O1"]), 1.0, 8.0)
+    # The mechanism behind the sentence below, measured rather than asserted:
+    # fit each group's field against the spec's own pair function and read the
+    # shift off as a radius. Groups 0-2 come back as the spec's carbon, nitrogen
+    # and oxygen, so the ten groups are ten *element radii* and the crossing
+    # above is where their mixture reaches zero.
+    radii = group_radii("C")
+    radii_drift = {i: (round(r, 3), XS_RADIUS.get(e, r))
+                   for (i, e), r in zip(
+                       enumerate(("C", "N", "O")), radii) if abs(
+                           r - XS_RADIUS[e]) > 0.05}
+    check("the C...H zero crossing is far from the 1.9 A the spec's formula "
+          "gives, and it is now a property of the receptor's element rather "
+          "than of a hydrogen radius",
           h_radius > 0.4
-          and abs(h_bare - h_cross) < 0.01
-          and abs(h_hydroxyl - h_cross) < 0.01
-          and n_bounded >= 7.99,
-          f"a C...H pair crosses zero at r = {h_cross:.3f} A, so the hydrogen "
-          f"radius is {h_radius:.3f} A where SCORING.md 3.2.1 says \"H is 0\". "
-          f"The number is stable, not a fixture artefact: a bare `H` gives "
-          f"{h_bare:.3f} A and a hydroxyl receptor gives {h_hydroxyl:.3f} A, "
-          f"both within 0.01 A of it. A lone `N` or `O` probe against the same "
-          f"carbon never crosses zero anywhere in 1-8 A -- the bisection runs "
-          f"to its bound and returns {n_bounded:.2f} A -- because it reads a "
-          f"different map group, so no radius is measurable for those probes "
-          f"by this method at all. **Reported, not diagnosed.** No binding "
-          f"exposes a radius, `score_conformation` returns a total, and the "
-          f"score-time normalisation of 9.1 is not inverted here, so this file "
-          f"cannot say whether \"H is 0\" is about the receptor-side radii used "
-          f"to build the maps while the probe is given a different one, or "
-          f"whether polar hydrogen is given a carbon-scale radius outright. "
-          f"That question is answered by reading scoring.rs, which this file "
-          f"does not do -- it is written from the specification only, and "
-          f"opening the implementation to settle a discrepancy would destroy "
-          f"the only thing that makes it a cross-check. What can be said "
-          f"without it: a C...H pair's zero crossing is at {h_cross:.2f} A, not "
-          f"at the {XS_RADIUS['C']:.2f} A the spec's formula gives, and any "
-          f"reference written from the spec alone will disagree with the engine "
-          f"there")
+          and h_bare == h_cross and h_two_c == h_cross
+          and h_cross > n_cross > o_cross
+          and max(h_cross, n_cross, o_cross) < 7.99
+          and not radii_drift,
+          f"a C...H pair crosses zero at r = {h_cross:.3f} A, which is "
+          f"{h_radius:.3f} A past the {2 * XS_RADIUS['C']:.2f} A that "
+          f"SCORING.md 3.2.1's formula gives for an H radius of 0. **What the "
+          f"number is not, stated before it is used:** a per-atom hydrogen "
+          f"radius. The ten groups are built with ten different radii, and a "
+          f"probe now sums all ten: fitting each group's field against the "
+          f"spec's own pair function recovers "
+          f"{', '.join(f'{r:.2f}' for r in radii[:3])} A for the first three "
+          f"against the spec's 1.9 / 1.75 / 1.6 (drift {radii_drift or 'none'}"
+          f"), so {h_cross:.2f} A is where a *mixture* of ten radii crosses "
+          f"zero, not where any one of them does. Two things that should not "
+          f"matter do not, bitwise: a bare `H` gives {h_bare!r} and a "
+          f"two-carbon receptor gives {h_two_c!r}, both exactly {h_cross!r}. "
+          f"**And the third thing that used to not matter now does:** against "
+          f"the same lone carbon an `N` probe crosses at {n_cross:.3f} A and "
+          f"an `O` probe at {o_cross:.3f} A, where before the element "
+          f"partition was removed neither crossed anywhere in 1-8 A and the "
+          f"bisection returned its 8.00 A bound. They cross in the order the "
+          f"spec's XS radii predict -- C 1.9 > N 1.75 > O 1.6, so the smaller "
+          f"the receptor's radius the further in the probe's own repulsion "
+          f"takes over -- and that ordering is the cross-element coupling that "
+          f"was missing. **Reported, not diagnosed.** No binding exposes a "
+          f"radius and `score_conformation` returns a total, so this file "
+          f"cannot invert the ten-group mixture and does not claim the "
+          f"residual after the repulsion wall is the spec's g1/g2/hyd terms "
+          f"rather than a normalisation; the claim is an ordering and a "
+          f"distance, not a decomposition")
 
     # ------------------------------------------------------------------
     section("the configurations a wrong implementation gets wrong")
@@ -587,28 +684,44 @@ def main() -> int:
           f"visible -- an implementation that clipped instead of refusing would "
           f"score a clashed structure as merely bad, not as impossible")
 
+    # The 0.000000 anomaly this check was written around, measured the only way
+    # that isolates it. Two receptor atoms of the *same element* whose atom
+    # types put things in different slots: `OA` fills the acceptor slot, `OS`
+    # does not, and neither touches any other slot, so their steric fields are
+    # the same field. Same probe, same distance, one number's difference.
+    nh = Ligand.from_arrays(*hard["donor-acceptor (O...N-H)"][2])
+    hb_acceptor = at(nh, rec_of("OA"))
+    hb_plain = at(nh, rec_of("OS"))
     hb_row = next(t for t in hard_rows if "donor-acceptor" in t[0])
-    check("a donor-acceptor pair scores exactly zero, and the map says why: a "
-          "probe reads only the group matching its own element",
-          hb_row[3] == 0.0,
+    # The mutation: if the donor class did not read the acceptor slot, these two
+    # would be the same number and the whole claim would be vacuous. That is
+    # checked rather than assumed, by asking whether the mask actually has the
+    # slot in it -- a rule that cannot fail is not a rule.
+    hb_mask_has_acceptor = 2 in SLOT_MASK["donor"]
+    check("a donor-acceptor pair no longer scores exactly zero, and the "
+          "receptor's acceptor field is what makes it attractive",
+          hb_row[3] != 0.0 and hb_row[3] < 0.0
+          and hb_acceptor < hb_plain - 0.4
+          and hb_mask_has_acceptor,
           f"an OA receptor against an N carrying a polar H, probe classified "
           f"{hb_row[5]!r} at r = {hb_row[1]:.2f} A, gives the engine "
-          f"{hb_row[3]:+.6f} and the reference {hb_row[4]:+.4f} "
-          f"(decomposed g1 {hb_row[6]['g1']:+.4f}, g2 {hb_row[6]['g2']:+.4f}, "
-          f"rep {hb_row[6]['rep']:+.4f}, hb {hb_row[6]['hb']:+.4f}). The two "
-          f"candidates this check used to carry unresolved are now separated by "
-          f"reading the map, and **neither is the whole story**: the lone OA "
-          f"does reach the acceptor map -- a lone OA receptor populates group 2 "
-          f"slot 2, whose minimum is -0.587439, exactly the hb weight of "
-          f"section 3 -- so it is not a missing map. The zero is the four-slot "
-          f"split, and more precisely a per-element partition: the map is ten "
-          f"type groups of four slots, and a probe atom sums only the group "
-          f"matching its own element. An N probe cannot see the receptor's O "
-          f"acceptor group, and a hydrogen bond between N and O is precisely "
-          f"the interaction that requires it. Measured in the cross-tab below. "
-          f"The reference disagrees with the engine here and this file does not "
-          f"claim otherwise; the disagreement is now localised to Rust, not to "
-          f"the fixture")
+          f"{hb_row[3]:+.6f} where this check used to read exactly 0.000000, "
+          f"and the reference {hb_row[4]:+.4f} (decomposed g1 "
+          f"{hb_row[6]['g1']:+.4f}, g2 {hb_row[6]['g2']:+.4f}, rep "
+          f"{hb_row[6]['rep']:+.4f}, hb {hb_row[6]['hb']:+.4f}). The claim is "
+          f"not merely that it is non-zero. **The isolating pair:** the same "
+          f"probe at the same distance gives {hb_acceptor:+.6f} against `OA` "
+          f"and {hb_plain:+.6f} against `OS` -- same element, so the same "
+          f"steric field, and the only map component that differs between them "
+          f"is the acceptor slot -- a spread of "
+          f"{hb_plain - hb_acceptor:+.4f} kcal/mol that is therefore the "
+          f"hydrogen bond, and the only one in the cross-tab below is negative. "
+          f"What replaced the zero is not a fifth term: it is the donor class "
+          f"reading the acceptor slot, which is a property of the *slot* and "
+          f"never was a property of the elements. The reference still "
+          f"disagrees with the engine here and this file does not claim "
+          f"otherwise; that residual is reported in the same-row comparison "
+          f"above rather than explained away")
 
     # ------------------------------------------------------------------
     section("what the map contains, and which of it is read")
@@ -620,18 +733,26 @@ def main() -> int:
     # being held to is written here as a table the engine then has to match,
     # and each table is mutated below to prove the match is not a tautology.
     #:
-    #: Two rows of this table were **wrong the first time it was written** and
-    #: are the reason it is measured rather than recalled. `OD` populates slot
-    #: 1, so "no lone atom puts anything in the donor slot" was false; and
-    #: `CG0` -- a type meeko really writes -- lands in the carbon group and is
-    #: counted as an unknown type, because the engine reads its first two
-    #: characters.
+    #: Two rows of the *slot* table were **wrong the first time it was written**
+    #: and are the reason it is measured rather than recalled. `OD` populates
+    #: slot 1, so "no lone atom puts anything in the donor slot" was false; and
+    #: `CG0` -- a type meeko really writes -- is counted as an unknown type,
+    #: because the engine reads its first two characters.
+    #:
+    #: There is deliberately **no group column any more**. This table used to
+    #: carry one, asserting that a lone atom lands in group 0, 1, 2 ... by its
+    #: element, and that assertion was the file's explanation of the
+    #: `0.000000` donor-acceptor cell. It is kept below as `PARTITION_OF`, in
+    #: its historical role, purely so the cross-tab check can quote how far it
+    #: now misses -- not because it is believed.
     LONE = ("C", "A", "HD", "H", "N", "NA", "ND", "NDA", "O", "OA", "OS",
             "OD", "ODA", "P", "S", "SA", "F", "Cl", "CG0")
-    GROUP_OF = {"C": 0, "A": 0, "HD": 0, "H": 0,
-                "N": 1, "NA": 1, "ND": 1, "NDA": 1,
-                "O": 2, "OA": 2, "OS": 2, "OD": 2, "ODA": 2,
-                "P": 3, "S": 4, "SA": 4, "F": 5, "Cl": 6, "CG0": 0}
+    #: **Superseded, kept as the refuted rule.** A lone atom used to be written
+    #: into exactly one of the ten groups, this one.
+    PARTITION_OF = {"C": 0, "A": 0, "HD": 0, "H": 0,
+                    "N": 1, "NA": 1, "ND": 1, "NDA": 1,
+                    "O": 2, "OA": 2, "OS": 2, "OD": 2, "ODA": 2,
+                    "P": 3, "S": 4, "SA": 4, "F": 5, "Cl": 6, "CG0": 0}
     SLOTS_OF = {
         "C": [0, 3], "A": [0, 3], "HD": [0], "H": [0],
         "N": [0], "NA": [0, 2], "ND": [0, 1], "NDA": [0, 1],
@@ -643,43 +764,64 @@ def main() -> int:
     #: anything in it, and the check after the cross-tab is about that.
     SLOT_NAME = {0: "steric", 1: "hb-from-donor", 2: "hb-from-acceptor",
                  3: "hydrophobic"}
+    ALL_GROUPS = list(range(10))
     layout = {t: populated(rec_of(t)) for t in LONE}
-    # `populated` returns lists because a multi-atom receptor can span groups;
-    # a lone atom cannot, and the tables below are written as scalars, so the
-    # unwrap is explicit and its precondition is asserted rather than assumed.
-    spread = {t: (g[0], g[1]) for t, g in layout.items()
-              if len(g[0]) != 1 or len(g[1]) < 1}
-    measured = ({t: g[0][0] for t, g in layout.items()},
-                {t: g[1] for t, g in layout.items()})
-    group_drift = {t: (GROUP_OF[t], measured[0][t]) for t in layout
-                   if GROUP_OF[t] != measured[0][t]}
-    slot_drift = {t: (SLOTS_OF[t], measured[1][t]) for t in layout
-                  if SLOTS_OF[t] != measured[1][t]}
+    # `populated` returns lists because a receptor can span groups. A lone atom
+    # now spans **all ten**, which is the point of this check and the opposite
+    #: of what the superseded table above claimed, so the expectation is
+    #: written as "every group" and the mutation below is "one group per atom".
+    not_all_ten = {t: v[0] for t, v in layout.items() if v[0] != ALL_GROUPS}
+    # ... and the ten are not copies. If they were, the peak magnitude of a
+    #: lone receptor's steric field would be the same in every group; it is not,
+    #: and the ordering follows the ten radii recovered above.
+    peaks = {t: [round(float(np.abs(
+        rec_of(t).precalculate(PROBE_BOX, "vina").raw_data.reshape(-1, 40)[:, 4 * g]
+    ).max()), 4) for g in ALL_GROUPS] for t in ("C", "OA")}
+    interchangeable = {t: p for t, p in peaks.items() if len(set(p)) == 1}
+    slot_drift = {t: (SLOTS_OF[t], v[1]) for t, v in layout.items()
+                  if SLOTS_OF[t] != v[1]}
+    # And the element alone fixes the steric field: `N` and `NA` are the same
+    # element in different classes, and their maps must be bitwise identical
+    # outside the acceptor slot. This is the sharpest available statement that
+    # the group index is no longer doing any work.
+    na_vs_n = [k for k in range(40) if not np.array_equal(
+        rec_of("NA").precalculate(PROBE_BOX, "vina").raw_data.reshape(-1, 40)[:, k],
+        rec_of("N").precalculate(PROBE_BOX, "vina").raw_data.reshape(-1, 40)[:, k])]
+    na_slots = sorted({k % 4 for k in na_vs_n})
     donors = [t for t, s in SLOTS_OF.items() if 1 in s]
-    check("the map is ten type groups of four slots, and a single atom's whole "
-          "contribution matches a written-down table",
-          not spread and not group_drift and not slot_drift,
-          "; ".join(f"{k} -> group {v[0][0]}, slots "
+    check("every receptor atom is written into all ten groups, the ten are not "
+          "interchangeable, and the slot table is unchanged",
+          not not_all_ten and not interchangeable and not slot_drift
+          and na_slots == [2] and len(na_vs_n) == 10,
+          "; ".join(f"{k} -> groups {len(v[0])}, slots "
                     f"{[SLOT_NAME[s] for s in v[1]]}"
                     for k, v in layout.items())
-          + f". The tables above are this file's claim and these numbers are "
-            f"the engine's, compared rather than asserted in prose. Atoms "
-            f"spanning more than one group (must be none for a lone atom): "
-            f"{spread or 'none'}. Group drift: {group_drift or 'none'}. Slot "
-            f"drift: {slot_drift or 'none'}. Slot 0 is populated by every atom; "
-            f"slot 2 by the acceptors; **slot 1, {SLOT_NAME[1]}, by "
-            f"{donors} only**. Ten groups is why `raw_data`'s `type*4 + slot` "
-            f"means a slot index is not a term until a group is chosen, and why "
-            f"the four slot names this file used to assume could not be read "
-            f"off an all-carbon receptor"
-          + (f". `NDA` reproduces `ND` exactly and `ODA` reproduces `OD` "
-             f"exactly, group and slots both, which is the three-character "
-             f"truncation seen through the map rather than through "
-             f"`atom_kinds`; `CG0` lands in the carbon group and "
-             f"`unknown_atom_types` is "
-             f"{rec_of('CG0').unknown_atom_types}, so a type meeko really "
-             f"writes is mistyped as `CG`"
-             if "CG0" in layout else ""))
+          + f". **Atoms not spanning all ten groups (must be none): "
+            f"{not_all_ten or 'none'}.** That is the regression guard: the ten "
+            f"groups used to be an element partition, one group per atom, and "
+            f"the `0.000000` donor-acceptor cell was its consequence. **The ten "
+            f"are not copies** -- a lone carbon's peak steric magnitude per "
+            f"group is "
+          + ", ".join(f"{p:.2f}" for p in peaks["C"])
+          + f" across the ten (all identical in "
+            f"{interchangeable or 'no group'}, which would mean the groups "
+            f"carry the same radius and the ten-radius mixture is not real), and "
+            f"the ordering is the radius ladder recovered in the previous "
+            f"section. **Slot drift against the table: "
+            f"{slot_drift or 'none'}** -- slot 0 is populated by every atom, "
+            f"slot 2 by the acceptors, slot 1 ({SLOT_NAME[1]}) by {donors} "
+            f"only, and none of that moved, which is the point: the fix changed "
+            f"which *groups* an atom reaches, not what a slot means. **And the "
+            f"element alone now fixes the steric field:** `NA` and `N` differ "
+            f"in {len(na_vs_n)} components, all in slot {na_slots}, which is "
+            f"one slot in each of the ten groups -- so two receptor atoms of "
+            f"the same element have bitwise identical maps outside the one slot "
+            f"their classes differ in. `NDA` reproduces `ND` exactly and `ODA` "
+            f"reproduces `OD` exactly, slots both, which is the "
+            f"three-character truncation seen through the map rather than "
+            f"through `atom_kinds`; `CG0` is counted as an unknown type "
+            f"({rec_of('CG0').unknown_atom_types}), so a type meeko really "
+            f"writes is mistyped as `CG`")
 
     # The cross-tab. Every cell is a total from the engine at one distance; a
     # cell that is exactly zero means the receptor contributed *nothing at
@@ -695,73 +837,132 @@ def main() -> int:
     probes = {name: Ligand.from_arrays(*spec)
               for name, spec in PROBE_SPECS.items()}
     probes["OA (via file)"] = from_file(["OA"])
-    receptors = ["C", "N", "NA", "OA", "S", "Cl"]
+    # `O` and `OS` join the list so the table contains a **same-element family
+    # of three receptor types** (`O`, `OA`, `OS`) as well as the nitrogen pair.
+    # That is what makes the replacement rule below testable: with only one
+    # type per element there is nothing for "the class does not matter" to be
+    # wrong about.
+    receptors = ["C", "N", "NA", "O", "OA", "OS", "S", "Cl"]
+    #: Receptor families of one element, split by whether the type fills a
+    #: class slot. The claim is that the two halves of each family are
+    #: bitwise indistinguishable to a probe that does not read that slot.
+    ELEMENT_FAMILIES = {"N": ("N", "NA"), "O": ("O", "OA", "OS")}
 
     def groups_of(probe_name, group_of):
         """Which map groups a probe sums, under `group_of`."""
-        if group_of is None:                       # the mutant: every group
+        if group_of is None:                       # every group: the true rule
             return set(range(10))
         return {group_of[PROBE_TYPE[probe_name][i]]
                 for i in range(len(PROBE_TYPE[probe_name]))}
 
     def predicts_zero(probe_name, rec_type, group_of):
-        """Does the rule say this cell must be exactly zero?"""
+        """Does `group_of` say this cell must be exactly zero?
+
+        Kept, in its historical role, so the table can be held to the rule
+        that used to explain it. That rule is **superseded**: the section
+        above measures every lone atom in all ten groups.
+        """
         if group_of is None:
             return False
         return group_of[rec_type] not in groups_of(probe_name, group_of)
 
     tab = {(p, r): at(probes[p], rec_from([(r, (0, 0, 0), r)]))
            for p in probes for r in receptors}
-    wrong = sorted(f"{p}/{r}" for (p, r), v in tab.items()
-                   if (v == 0.0) != predicts_zero(p, r, GROUP_OF))
     cross_zero = sorted(f"{p}/{r}" for (p, r), v in tab.items() if v == 0.0)
     cross_live = sorted(f"{p}/{r}={v:+.4f}"
                         for (p, r), v in tab.items() if v != 0.0)
     donor_row = {r: tab[("N+H", r)] for r in receptors}
+    negative = sorted(f"{p}/{r}={v:+.6f}"
+                      for (p, r), v in tab.items() if v < 0.0)
 
-    # Three mutations of the rule. Each must move the prediction and be caught.
+    # --- the superseded rule, and how far it now misses -------------------
     def _wrong_cells(group_of):
         return sum(1 for (p, r), v in tab.items()
                    if (v == 0.0) != predicts_zero(p, r, group_of))
 
-    mutants = {
-        "rule as written": _wrong_cells(GROUP_OF),
-        "probe sums all ten groups": _wrong_cells(None),
-        "NA moved to the oxygen group": _wrong_cells({**GROUP_OF, "NA": 2}),
-        "S moved to the carbon group": _wrong_cells({**GROUP_OF, "S": 0}),
+    refuted = {
+        "superseded: probe sums its own element's group": _wrong_cells(
+            PARTITION_OF),
+        "a probe sums all ten groups": _wrong_cells(None),
     }
-    check("and the rule that explains the zeros predicts the whole table: a "
-          "probe sums only the map groups of its own elements, and three "
-          "mutations of that rule are each caught",
-          not wrong
-          and mutants["rule as written"] == 0
-          and all(mutants[k] > 0 for k in
-                  ("probe sums all ten groups", "NA moved to the oxygen group",
-                   "S moved to the carbon group")),
-          f"at {PROBE_AT} A, the engine gives {len(cross_zero)} zero cells of "
-          f"{len(tab)} and the rule predicts "
-          f"{sum(1 for p in probes for r in receptors if predicts_zero(p, r, GROUP_OF))}"
-          f"; cells where the two disagree: {wrong or 'none'}. Zero cells: "
-          f"{', '.join(cross_zero)}. Non-zero: {', '.join(cross_live)}. Probe "
-          f"classes: "
+
+    # --- the rule that replaced it ----------------------------------------
+    # The element is no longer a gate. What predicts whether two receptor types
+    # of the same element are distinguishable is the **slot** their classes
+    # differ in, and whether a probe can see it is which slots its class reads.
+    #: The one slot each family's members differ in: `NA` fills the acceptor
+    #: slot and `N` does not, `OA` fills it and `O`/`OS` do not.
+    FAMILY_SLOT = {"N": 2, "O": 2}
+
+    def predicts_distinguishable(probe_name, family, mask):
+        """Must this probe tell the two members of `family` apart?"""
+        return FAMILY_SLOT[family] in mask[PROBE_CLASS[probe_name]]
+
+    #: The class each probe is *asserted* to have, cross-checked against
+    #: `atom_kinds` in the next check. Two of the five are `other`, in different
+    #: element groups, which is a useful case rather than a duplicate.
+    PROBE_CLASS = {"C": "hydrophobic", "N+H": "donor",
+                   "OA (via file)": "acceptor", "N": "other", "O": "other"}
+    fam_drift = {pn: (PROBE_CLASS[pn], probes[pn].atom_kinds[0])
+                 for pn in probes if PROBE_CLASS[pn] != probes[pn].atom_kinds[0]}
+    fam_cells = {}
+    for fam, members in ELEMENT_FAMILIES.items():
+        for pn in probes:
+            vals = [tab[(pn, m)] for m in members]
+            fam_cells[(pn, fam)] = (len(set(vals)) == 1, vals)
+    fam_wrong = sorted(
+        f"{pn}/{fam}" for (pn, fam), (identical, _) in fam_cells.items()
+        if identical == predicts_distinguishable(pn, fam, SLOT_MASK))
+
+    def _fam_wrong(mask):
+        return sum(1 for (pn, fam), (identical, _) in fam_cells.items()
+                   if identical == predicts_distinguishable(pn, fam, mask))
+
+    fam_muts = {
+        "mask as written": _fam_wrong(SLOT_MASK),
+        "donor stops reading the acceptor slot": _fam_wrong(
+            {**SLOT_MASK, "donor": {0}}),
+        "`other` starts reading every slot": _fam_wrong(
+            {**SLOT_MASK, "other": {0, 1, 2, 3}}),
+        "acceptor starts reading the acceptor slot": _fam_wrong(
+            {**SLOT_MASK, "acceptor": {0, 1, 2}}),
+    }
+    check("no cell in the table is zero any more, the element partition that "
+          "explained them is refuted in every cell it claimed, and what "
+          "replaces it is the slot rather than the element",
+          not cross_zero and not fam_wrong and not fam_drift
+          and refuted["a probe sums all ten groups"] == 0
+          and refuted["superseded: probe sums its own element's group"] > 0
+          and all(m > 0 for k, m in fam_muts.items() if "as written" not in k),
+          f"at {PROBE_AT} A the engine gives **{len(cross_zero)} zero cells of "
+          f"{len(tab)}**, where the rule this file was built around predicted "
+          f"{sum(1 for p in probes for r in receptors if predicts_zero(p, r, PARTITION_OF))}"
+          f". Non-zero: {', '.join(cross_live)}. Probe classes: "
           + ", ".join(f"{n}->{l.atom_kinds}" for n, l in probes.items())
-          + f". N+H row: {donor_row['NA']:+.4f} against an NA receptor, an "
-            f"attraction, and {donor_row['OA']:+.6f} against an OA one, exactly "
-            f"zero -- same probe, same distance, only the element differs, and "
-            f"the element picks the group. **Mutations, counted as cells where "
-            f"the rule and the engine now disagree:** "
-          + "; ".join(f"{k} -> {v}" for k, v in mutants.items())
-          + f". Letting a probe sum all ten groups is wrong in "
-            f"{mutants['probe sums all ten groups']} cells, which is the whole "
-            f"table: that is the claim that there is no partition at all. "
-            f"Moving one receptor's group is wrong in "
-            f"{mutants['NA moved to the oxygen group']} and "
-            f"{mutants['S moved to the carbon group']} cells respectively, which "
-            f"is the claim that the group index is not arbitrary. So the "
-            f"explanation survives three attempts to break it, and a "
-            f"nitrogen-oxygen hydrogen bond remains inexpressible. Change "
-            f"request against Rust; this file did not read scoring.rs and "
-            f"claims nothing about intent")
+          + f". **How far the old rule now misses, counted as cells where it "
+            f"and the engine disagree:** "
+          + "; ".join(f"{k} -> {v}" for k, v in refuted.items())
+          + f". It is not merely unused, it is wrong in every cell it once got "
+            f"right, which is what a refuted rule should look like. **The "
+            f"replacement, stated so it can fail:** two receptor types of the "
+            f"same element are bitwise indistinguishable to a probe whose class "
+            f"does not read the one slot their classes differ in, and "
+            f"distinguishable to a probe that does. Measured across "
+          + "; ".join(
+              f"{fam} ({'/'.join(ELEMENT_FAMILIES[fam])}) via {pn} "
+              f"[{PROBE_CLASS[pn]}] -> "
+              f"{'INDISTINGUISHABLE' if ident else 'distinguished'}"
+              for (pn, fam), (ident, _) in sorted(fam_cells.items()))
+          + f"; cells where that and the engine disagree: {fam_wrong or 'none'}"
+            f"; fixture-class drift: {fam_drift or 'none'}. **Mutations, same "
+            f"counting:** "
+          + "; ".join(f"{k} -> {v}" for k, v in fam_muts.items())
+          + f". The N+H row is where the one survives: "
+          + ", ".join(f"{r} {donor_row[r]:+.4f}" for r in receptors)
+          + f", and the only negative cell in the entire table is "
+          + (", ".join(negative) or "none")
+          + f". A nitrogen-oxygen hydrogen bond is now expressible, which is "
+            f"the whole of what the `0.000000` was saying was not")
 
     # Which slots a probe reads, and the group it may read them from. Both are
     # data, both are mutated below.
@@ -773,71 +974,60 @@ def main() -> int:
     # opposite from five receptors scoring bitwise identically, and was wrong:
     # the probe it used was an `other`-class oxygen, and `other` reads the
     # steric slot only. See the module docstring.
-    SLOT_MASK = {"hydrophobic": {0, 3}, "donor": {0, 2},
-                 "acceptor": {0, 1}, "other": {0}}
-    #: The class each probe is *asserted* to have, cross-checked against
-    #: `atom_kinds` in the check below. Two of the four probes are `other`, in
-    #: different element groups, which is a useful case rather than a duplicate:
-    #: an `other` nitrogen reads slot 0 of group 1 and an `other` oxygen reads
-    #: slot 0 of group 2, so neither can confirm the other.
-    PROBE_CLASS = {"C": "hydrophobic", "N+H": "donor",
-                   "OA (via file)": "acceptor", "N": "other", "O": "other"}
-    #: Receptor pairs that differ in exactly one map component, so the
-    #: component is the only thing that can explain any difference in score.
-    ONE_COMPONENT_PAIRS = [("OD", "O", 9), ("ND", "N", 5)]
-    #: ... and one pair differing in two, used to show `other` ignores the
-    #: acceptor slot as well.
-    TWO_COMPONENT_PAIRS = [("OD", "OA", (9, 10)), ("ND", "NA", (5, 6))]
+    #: Receptor pairs that differ in exactly one **slot** -- and now that is the
+    #: only thing that can be held constant, because a lone atom is written
+    #: into all ten groups, so a one-*component* pair no longer exists: the
+    #: same slot in each of the ten. Five pairs, covering both single-slot
+    #: families and both directions of the rule.
+    ONE_SLOT_PAIRS = [("NA", "N", 2), ("OA", "O", 2), ("OA", "OS", 2),
+                      ("ND", "N", 1), ("OD", "OS", 1)]
+    #: ... and two pairs differing in two slots, used to show a probe can
+    #: respond through either of them.
+    TWO_SLOT_PAIRS = [("OD", "OA", (1, 2)), ("ND", "NA", (1, 2))]
 
     def _map_of(t):
         return rec_of(t).precalculate(PROBE_BOX, "vina").raw_data.reshape(-1, 40)
 
     pair_evidence = {}
-    for a_t, b_t, comps in ONE_COMPONENT_PAIRS + TWO_COMPONENT_PAIRS:
-        want = (comps,) if isinstance(comps, int) else comps
+    pair_groups = {}
+    for a_t, b_t, slots in ONE_SLOT_PAIRS + TWO_SLOT_PAIRS:
+        want = (slots,) if isinstance(slots, int) else slots
         ma, mb = _map_of(a_t), _map_of(b_t)
         differing = tuple(k for k in range(40)
                           if not np.array_equal(ma[:, k], mb[:, k]))
         responses = {pn: (at(probes[pn], rec_of(a_t))
                           != at(probes[pn], rec_of(b_t)))
                      for pn in probes}
-        pair_evidence[(a_t, b_t)] = (differing, want, responses)
+        pair_evidence[(a_t, b_t)] = (tuple(sorted({k % 4 for k in differing})),
+                                     want, responses)
+        pair_groups[(a_t, b_t)] = len({k // 4 for k in differing})
 
-    # The rule, as two conditions: a probe's score must change for a receptor
-    # pair only if the receptor is in the probe's own element group **and** one
-    # of the differing components is a slot that probe's class reads. The
-    # first version of this compared a group *index* against a *set* of them
-    # with `!=`, which is always true, so the mask was never consulted and
-    # every mutation of it reported the same count. Written here as `not in`
-    # so that the second condition is reachable at all.
-    def predicts_responds(probe_name, rec_type, differing, mask):
-        """Does the rule say a probe's score must differ for this receptor pair?
-
-        Two preconditions, and both are measured rather than assumed: the
-        receptor must be in the probe's own element group, and at least one
-        differing component must be a slot this probe's class reads. A pair
-        differing in two slots can therefore respond through either.
-        """
-        if GROUP_OF[rec_type] not in groups_of(probe_name, GROUP_OF):
-            return False
-        read = mask[PROBE_CLASS[probe_name]]
-        return any((k % 4) in read for k in differing)
+    # The rule, in one condition: a probe's score changes for a receptor pair if
+    # and only if one of the differing **slots** is a slot that probe's class
+    # reads. There is no element term and no group term, and that is the
+    # finding rather than a simplification -- the group condition used to be
+    # here, and it is what the engine stopped obeying. The first version of
+    # this compared a group *index* against a *set* of them with `!=`, which is
+    # always true, so the mask was never consulted and every mutation of it
+    # reported the same count. That is why the condition is written as a
+    # membership test and why the mask mutations below are expected to differ
+    # from one another rather than merely to be non-zero.
+    def predicts_responds(probe_name, differing_slots, mask):
+        """Does the rule say a probe's score must differ for this receptor pair?"""
+        return any(s in mask[PROBE_CLASS[probe_name]] for s in differing_slots)
 
     def _resp_wrong(mask):
         out = {}
         for (a_t, b_t), (differ, _, responses) in pair_evidence.items():
             for pn, got in responses.items():
-                want = predicts_responds(pn, a_t, differ, mask)
+                want = predicts_responds(pn, differ, mask)
                 if got != want:
-                    out[f"{pn}:{a_t}/{b_t}"] = (f"predicted "
-                                                f"{'RESPONDS' if want else 'no change'}",
-                                                f"got {'RESPONDS' if got else 'no change'}",
-                                                differ)
+                    out[f"{pn}:{a_t}/{b_t}"] = (
+                        f"predicted {'RESPONDS' if want else 'no change'}",
+                        f"got {'RESPONDS' if got else 'no change'}", differ)
         return out
 
     resp_wrong = _resp_wrong(SLOT_MASK)
-    #: The class table is a claim about the fixtures, so it is compared with
-    #: what the engine says they are rather than trusted.
     class_drift = {pn: (PROBE_CLASS[pn], probes[pn].atom_kinds[0])
                    for pn in probes
                    if PROBE_CLASS[pn] != probes[pn].atom_kinds[0]}
@@ -853,18 +1043,82 @@ def main() -> int:
     donor_reads = [(a_t, b_t, pn) for (a_t, b_t), (_, _, responses)
                    in pair_evidence.items() for pn, got in responses.items()
                    if got and PROBE_CLASS[pn] == "acceptor"]
-    check("the donor slot is read, and only from inside the same element group: "
-          "a one-component receptor pair is what proves it, and three mutations "
-          "of the slot mask are each caught",
-          not resp_wrong and not class_drift
+
+    # --- the fifth class, on the project's own shipped pose ---------------
+    # `donoracceptor` needs a bonded polar hydrogen, so no one-atom ligand can
+    # be it, and an earlier revision of this file declared the class uncovered
+    # on purpose rather than guess a mask for it. It does not have to be a
+    # guess: the repository ships a 16-atom pose with exactly one such atom, and
+    # the receptor can be retyped so that the *only* map component that changes
+    # is the acceptor slot. The pair of measurements below is the whole
+    # argument -- the delta is real, and removing the one atom that should own
+    # it takes the delta to exactly zero, which no other atom in the pose
+    # could have done if the mask were wrong.
+    _pose_box_half = 12.0
+
+    def _pose_parts(drop: int | None = None):
+        rec_body = [l for l in (ROOT / "examples" / "1crn_prep.pdbqt").read_text(
+            encoding="utf-8").splitlines() if l.startswith(("ATOM", "HETATM"))]
+        lig_body = [l for l in (ROOT / "examples" / "crambin_pose.pdbqt").read_text(
+            encoding="utf-8").splitlines() if l.startswith(("ATOM", "HETATM"))]
+        # MODEL 1 of the pose is the first sixteen ATOM lines; the rest belong
+        # to the other models and are not this molecule.
+        lig_body = lig_body[:16]
+        if drop is not None:
+            lig_body = [l for i, l in enumerate(lig_body) if i != drop]
+        xyz = np.array([[float(l[30:38]), float(l[38:46]), float(l[46:54])]
+                        for l in lig_body], float)
+        centre = xyz.mean(axis=0)
+        box = GridBox(centre - _pose_box_half, centre + _pose_box_half)
+        lg = Ligand.from_pdbqt_str("\n".join(lig_body) + "\nEND\n")
+        return rec_body, lg, box
+
+    def _retype(lines, old, new):
+        return [l[:77] + new.rjust(2)
+                if l.startswith(("ATOM", "HETATM")) and l[77:79].strip() == old
+                else l for l in lines]
+
+    def _pose_score(rec_lines, drop=None):
+        _, lg, box = _pose_parts(drop)
+        rec = Receptor.from_pdbqt_str("\n".join(rec_lines) + "\nEND\n")
+        maps = rec.precalculate(box, "vina")
+        return float(score_conformation(lg, maps, np.zeros(lg.num_dof))[0])
+
+    _rec_body, _pose_lig, _ = _pose_parts()
+    _pose_kinds = _pose_lig.atom_kinds
+    _da_atoms = [i for i, k in enumerate(_pose_kinds) if k == "donoracceptor"]
+    _pose_base = _pose_score(_rec_body)
+    #: Emptying the receptor's acceptor slot: `OA` -> `OS` is the same element
+    #: and the same steric field, so this isolates the acceptor slot exactly.
+    _acceptor_delta = (_pose_score(_retype(_rec_body, "OA", "OS")) - _pose_base)
+    #: The control: `N` -> `NS` empties no slot, so it must move nothing. A
+    #: delta here would mean the "isolating" retype was not isolating.
+    _null_delta = _pose_score(_retype(_rec_body, "N", "NS")) - _pose_base
+    #: And the attribution: with the pose's single `donoracceptor` atom
+    #: removed, no atom is left that reads the acceptor slot, so the delta must
+    #: be exactly zero.
+    _acceptor_delta_no_da = (_pose_score(
+        _retype(_rec_body, "OA", "OS"), drop=_da_atoms[0]) - _pose_score(
+            _rec_body, drop=_da_atoms[0]))
+    _da_ok = (len(_da_atoms) == 1
+              and abs(_acceptor_delta) > 0.5
+              and _acceptor_delta_no_da == 0.0
+              and _null_delta == 0.0
+              and _pose_kinds[_da_atoms[0]] == "donoracceptor")
+    check("the whole rule is one line and it has no element in it: a probe "
+          "responds to a receptor pair if and only if one of the differing "
+          "slots is a slot its class reads -- and the fifth class is now "
+          "measured on the shipped pose rather than left uncovered",
+          not resp_wrong and not class_drift and _da_ok
           and all(pair_evidence[k][0] == pair_evidence[k][1]
                   for k in pair_evidence)
+          and set(pair_groups.values()) == {10}
           and len(donor_reads) == 2
           and all(m == 0 if k == "mask as written" else m > 0
                   for k, m in slot_muts.items()),
           "; ".join(
-              f"{a_t} vs {b_t} differ in component(s) "
-              f"{[f'g{k // 4}s{k % 4}' for k in differ]} -> "
+              f"{a_t} vs {b_t} differ in slot {list(differ)} "
+              f"(in {pair_groups[(a_t, b_t)]} of 10 groups) -> "
               + ", ".join(f"{pn}[{PROBE_CLASS[pn]}]"
                           f"{' RESPONDS' if r else ' no change'}"
                           for pn, r in responses.items())
@@ -872,45 +1126,57 @@ def main() -> int:
               in pair_evidence.items())
           + f". Fixture classes, claimed against `atom_kinds`: "
           + ", ".join(f"{pn}={probes[pn].atom_kinds[0]}" for pn in probes)
-          + f"; drift {class_drift or 'none'}. The decisive pair is **OD vs O**, "
-            f"which differ in component 9 and nothing else: "
+          + f"; drift {class_drift or 'none'}. The decisive pair is **OA vs "
+            f"OS**: one slot, all ten groups, and only the class that reads that "
+            f"slot can tell them apart. "
           + "; ".join(f"{pn} gives {at(probes[pn], rec_of(a_t)):+.6f} vs "
                       f"{at(probes[pn], rec_of(b_t)):+.6f}"
                       for a_t, b_t, pn in donor_reads
-                      for a_t, b_t in ((a_t, b_t),) if (a_t, b_t) == ("OD", "O"))
+                      for a_t, b_t in ((a_t, b_t),)
+                      if (a_t, b_t) in (("OD", "OS"), ("ND", "N")))
           + f". **This corrects an earlier revision of this file**, which "
             f"concluded the donor slot was read by nothing on the evidence of "
             f"five oxygen receptors scoring bitwise identically. They did, and "
             f"the probe was the problem: it was an `other`-class oxygen, and "
-            f"`other` reads the steric slot only. So the finding is withdrawn "
-            f"and the chemistry inside a group is right -- a donor reads the "
-            f"receptor's acceptor field, an acceptor reads its donor field, "
-            f"like-with-like is withheld, and `other` reads sterics only. The "
-            f"one defect left is the element partition. Cells where the mask "
-            f"and the engine disagree: {resp_wrong or 'none'}. **Mutations, "
-            f"counted the same way:** "
+            f"`other` reads the steric slot only. So that finding is withdrawn. "
+            f"**And the element condition is gone too:** this check used to "
+            f"carry a second precondition -- the receptor must be in the "
+            f"probe's own element group -- and it was that precondition, not "
+            f"the mask, that made a nitrogen-oxygen hydrogen bond inexpressible. "
+            f"Cells where the mask and the engine disagree: "
+            f"{resp_wrong or 'none'}. **Mutations, counted the same way:** "
           + "; ".join(f"{k} -> {v}" for k, v in slot_muts.items())
-          + ". **What this table does not cover, stated rather than left to be "
-            "discovered:** every fixture here is a one-atom ligand, and the "
-            "engine has a fifth class a one-atom ligand cannot be -- "
-            "`donoracceptor`, which needs a bonded polar hydrogen. The "
-            "project's own shipped pose has one: in "
-            "`examples/crambin_pose.pdbqt` MODEL 1, O14 reads `acceptor` and "
-            "O15 reads `donoracceptor`, both typed `OA`, differing only in "
-            "whether the torsion tree bonds H16 to it. Measured on that real "
-            "system, the carboxylate oxygen **does** read the receptor's "
-            "acceptor field, which this table predicts it does not: "
-            "relabelling every receptor `OA` to `OS` -- same group, same "
-            "steric field, acceptor field emptied, and the *only* map "
-            "component that differs is group 2 slot 2 -- moves that pose's "
-            "score by -1.068 kcal/mol. So the table is a lower bound for "
-            "bonded ligands, and a carboxylic acid is not an exotic case. No "
-            "cheap isolated fixture was found for the class: a hand-built "
-            "torsion tree came back with 0 torsions, and centring the 16-atom "
-            "shipped ligand on a one-atom receptor puts its atoms inside one "
-            "another and hits the grid's +15999.999 clamp. Asserting a mask "
-            "for a class this file cannot place would be a claim it cannot "
-            "back, so the class is reported here and left uncovered on purpose")
+          + f". **The fifth class, which an earlier revision of this file "
+            f"declared uncovered on purpose, is now covered.** Every fixture "
+            f"above is a one-atom ligand, so none of them can be "
+            f"`donoracceptor`, which needs a bonded polar hydrogen -- but "
+            f"`examples/crambin_pose.pdbqt` MODEL 1 has exactly one: O15, "
+            f"typed `OA` like O14, differing only in whether the torsion tree "
+            f"bonds H16 to it, and the pose's classes are "
+            f"{collections.Counter(_pose_kinds)}. Relabelling every receptor "
+            f"`OA` to `OS` -- same element, same steric field, and the only map "
+            f"component that changes is the acceptor slot -- moves the pose "
+            f"from {_pose_base:+.6f} to "
+            f"{_pose_base + _acceptor_delta:+.6f}, a delta of "
+            f"{_acceptor_delta:+.6f} kcal/mol. The two controls are what make "
+            f"that a measurement of the class rather than of the pose: "
+            f"retyping every receptor `N` to `NS`, which empties no slot, moves "
+            f"it by {_null_delta:+.6f}; and deleting the one `donoracceptor` "
+            f"atom leaves the other 15, of which 13 are `hydrophobic`, 1 "
+            f"`acceptor` and 1 `other`, and the delta becomes exactly "
+            f"{_acceptor_delta_no_da:+.6f}. So the mask row "
+            f"{sorted(SLOT_MASK['donoracceptor'])} for that class is measured, "
+            f"and the carboxylate oxygen reads the receptor's acceptor field, "
+            f"which the one-atom table above could neither show nor deny. "
+            f"**What the ten-group replication did to it: nothing.** The "
+            f"pre-fix engine wrote that acceptor field once and read it once; "
+            f"it is now written into all ten groups and the delta is the same "
+            f"magnitude, so no term was rescaled by being replicated. **Still "
+            f"not covered, and named rather than hidden:** what the *weight* "
+            f"applied to a populated slot is. The score-time normalisation of "
+            f"SCORING.md 9.1 is not inverted anywhere in this file, so every "
+            f"number above is a total"
+          )
 
     # ------------------------------------------------------------------
     section("how a ligand's types are decided, and which entry point loses them")
@@ -1025,9 +1291,102 @@ def main() -> int:
           + f". So both rules are load-bearing in both directions, and neither "
             f"half of the observation is a fixture artefact. For scale, the same "
             f"hydroxyl reads {from_file(['OA', 'C', 'HD']).atom_kinds} through "
-            f"a file and cannot be an acceptor in memory at all -- which is "
-            f"why nothing in-tree is broken: every caller writes a file before "
-            f"scoring, and the file carries the types")
+            f"a file and cannot be an acceptor in memory at all. **An earlier "
+            f"revision of this check ended there, on the claim that nothing in "
+            f"tree is broken because every caller writes a file before scoring. "
+            f"That was wrong, and the next two checks are why.**")
+
+    # --- is the type-losing entry point actually reachable? ----------------
+    #
+    # Measured, not inferred, and the answer changed the previous paragraph.
+    # `cli.py` docks whatever `load_ligand` returns, and `load_ligand` routes
+    # every non-PDBQT format through `from_arrays`. So a `.sdf` reaches the
+    # engine as a ligand with no acceptors at all, and the file round trip that
+    # "saves" it is only taken by a *different* command.
+    #
+    # `bonds=None` is used deliberately rather than a reconstructed bond list:
+    # the check above already established that bonds do not restore an acceptor,
+    # so leaving them out makes this claim hold under weaker conditions, and it
+    # keeps the check free of an RDKit dependency.
+    #
+    # The elements come from a **type-to-element** map, not from the first
+    # character of the type column. Taking the first character feeds `from_arrays`
+    # an element of "A" for every aromatic carbon, which it rejects outright --
+    # and `prepare_ligand`, which is what the live path actually calls, hands it
+    # "C". The first draft of this check raised `ValueError: unsupported element
+    # "A"`, which is a fact worth recording but not the one under test.
+    _TYPE_ELEMENT = {"A": "C", "OA": "O", "OS": "O", "NA": "N", "NS": "N",
+                     "HD": "H", "SA": "S", "CL": "Cl", "BR": "Br", "MG": "Mg",
+                     "ZN": "Zn", "FE": "Fe", "MN": "Mn", "CA": "Ca",
+                     "CU": "Cu", "NI": "Ni", "CO": "Co", "CD": "Cd",
+                     "HG": "Hg", "SI": "Si"}
+    _pdbqt_lines = (ROOT / "examples" / "ibuprofen_prep.pdbqt").read_text(
+        encoding="utf-8").splitlines()
+    _el, _cr, _nm = [], [], []
+    for _l in _pdbqt_lines:
+        if _l.startswith(("ATOM", "HETATM")):
+            _tok = _l[77:79].strip()
+            _el.append(_TYPE_ELEMENT.get(_tok.upper(), _tok[0] if _tok else "C"))
+            _cr.append([float(_l[30:38]), float(_l[38:46]), float(_l[46:54])])
+            _nm.append(_l[12:16].strip())
+    _via_file = Ligand.from_pdbqt_str(
+        (ROOT / "examples" / "ibuprofen_prep.pdbqt").read_text(encoding="utf-8"))
+    _via_arrays = Ligand.from_arrays(
+        _el, [0.0] * len(_el), np.array(_cr, dtype=float), None, _nm)
+    _file_classes = collections.Counter(_via_file.atom_kinds)
+    _array_classes = collections.Counter(_via_arrays.atom_kinds)
+    _n_acc = {k: v for k, v in
+              (("file", sum(_file_classes[k] for k in
+                            ("acceptor", "donoracceptor") if k in _file_classes)),
+               ("from_arrays", sum(_array_classes[k] for k in
+                                   ("acceptor", "donoracceptor")
+                                   if k in _array_classes)))}
+    check("the type-losing entry point is reachable: the same molecule has no "
+          "acceptor through from_arrays and two through the file reader",
+          _n_acc["file"] > 0 and _n_acc["from_arrays"] == 0
+          and _file_classes != _array_classes
+          and len(_el) == _via_file.num_atoms == _via_arrays.num_atoms,
+          f"ibuprofen, {len(_el)} atoms, via `from_arrays` with "
+          f"bonds=None: {dict(sorted(_array_classes.items()))}; via the file "
+          f"reader: {dict(sorted(_file_classes.items()))}. Acceptors "
+          f"{_n_acc['from_arrays']} -> {_n_acc['file']}. The two carboxyl "
+          f"oxygens are `other` through from_arrays, and an `other` atom reads "
+          f"the steric slot and nothing else, so this is not a milder "
+          f"classification but a different one. This was previously written off "
+          f"with the claim that every caller writes a file first")
+
+    _cli_src = (ROOT / "dock-py" / "python" / "opendocking" / "cli.py").read_text(
+        encoding="utf-8")
+    _core_src = (ROOT / "dock-py" / "python" / "opendocking" / "core.py").read_text(
+        encoding="utf-8")
+    _dock_fn = _cli_src[_cli_src.index("def _cmd_dock"):]
+    _dock_fn = _dock_fn[:_dock_fn.index("\ndef ")] if "\ndef " in _dock_fn \
+        else _dock_fn
+    _links = {
+        "cli._cmd_dock calls load_ligand":
+            bool(re.search(r"ligand\s*=\s*load_ligand\(", _dock_fn)),
+        "cli._cmd_dock passes that ligand to dock()":
+            bool(re.search(r"dock\(\s*\n?\s*ligand\s*,", _dock_fn)),
+        "core.load_ligand routes non-PDBQT through from_arrays":
+            bool(re.search(
+                r"def load_ligand.*?from_arrays\(\s*\*\s*prepare_ligand",
+                _core_src, re.S)),
+    }
+    check("and the route that loses the types is the one that docks: three "
+          "links, each asserted, with a mutation that would break one of them",
+          all(_links.values())
+          and not re.search(r"def load_ligand.*?from_arrays",
+                            _core_src.replace("from_arrays", "from_pdbqt"), re.S),
+          "; ".join(f"{k} = {v}" for k, v in _links.items())
+          + f". This is the check that makes the previous one a defect rather "
+            f"than a curiosity: `rec-grid dock something.sdf` reaches the engine "
+            f"as a ligand with no acceptors. **Mutation:** with "
+            f"`from_arrays` replaced by `from_pdbqt` in core.py the last link "
+            f"reads "
+            f"{not re.search(r'def load_ligand.*?from_arrays', _core_src.replace('from_arrays', 'from_pdbqt'), re.S)}, "
+            f"so the guard is not passing because the regex cannot match",
+    )
+
 
     # ------------------------------------------------------------------
     section("the comparison discriminates: perturb the reference and it breaks")

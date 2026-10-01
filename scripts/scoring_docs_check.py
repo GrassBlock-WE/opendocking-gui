@@ -56,7 +56,7 @@ SCORING = ROOT / "docs" / "SCORING.md"
 LIMITATIONS = ROOT / "docs" / "LIMITATIONS.md"
 CORE = ROOT / "dock-core" / "src"
 
-EXPECTED_CHECKS = 74  # measured: a green run of this file, including the self-check
+EXPECTED_CHECKS = 76  # measured: a green run of this file, including the self-check
 
 CHECKS = 0
 FAILURES: list[str] = []
@@ -834,10 +834,19 @@ check(
     f"the sentence with. Each README has exactly one such line: "
     + " | ".join(f"{n} -> {v[0].strip()!r}" for n, v in _ex_lines.items())
     + f". Stale hard-coded defaults found: "
-      f"{ {k: v for k, v in _hardcoded_hits.items() if v} or 'none'}. This is "
-      f"the forward-looking half: the sentence used to say the default was 8, "
-      f"and pinning the new text alone would not have stopped it coming back, "
-      f"so the guard matches the stale wording directly",
+      f"{ {k: v for k, v in _hardcoded_hits.items() if v} or 'none'}. "
+    # Mutation, inside the check: both files are not mine to edit, so instead
+    # of breaking the prose the guard is run against the sentence it is
+    # supposed to reject. If the stale wording were reinstated the regex would
+    # have to match it, and this assertion is what proves it does.
+    + f"**Mutation:** the stale pattern against a reinstated "
+      f"'默认 8' line matches "
+      f"{bool(_stale_default.search('-e N     独立搜索轨迹数（默认 8）'))}"
+      f", against a reinstated 'defaults to 8' line matches "
+      f"{bool(_stale_default.search('-e N     walks (defaults to 8)'))}"
+      f", and against the current line matches "
+      f"{bool(_stale_default.search(_ex_lines['README.en.md'][0]))}. So the "
+      f"guard is not passing because the pattern cannot fire",
 )
 
 # The count is a digit in the Chinese and a word in the English, so the English
@@ -845,18 +854,32 @@ check(
 # whole file for a number word finds ordinary prose first -- "one" is the first
 # entry in the table and appears everywhere -- which is how this check reported
 # the count as 1 on its first run.
+_WORDS = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six",
+          7: "seven", 8: "eight", 9: "nine", 10: "ten", 11: "eleven",
+          12: "twelve", 13: "thirteen", 14: "fourteen", 15: "fifteen",
+          16: "sixteen", 17: "seventeen", 18: "eighteen", 19: "nineteen",
+          20: "twenty"}
 _cn_count = re.search(r"默认返回的\s*\*?\*?(\d+)\*?\*?\s*个位点", readme_cn)
-_en_sentence = ""
+# A *forward* window only. The English reads "ninth of the twelve", so the
+# count sits after the ordinal; a window centred on it, or a whole-file search,
+# finds ordinary prose ("one") first. 60 characters is enough for the phrase and
+# short enough not to reach the next sentence.
+_en_window = ""
 if "ninth" in readme_en:
-    _at = readme_en.index("ninth")
-    _en_sentence = readme_en[max(0, _at - 220):_at + 220]
+    _en_window = readme_en[readme_en.index("ninth"):readme_en.index("ninth") + 60]
 _en_word = next((n for n, w in sorted(_WORDS.items())
-                 if re.search(rf"\b{w}\b", _en_sentence)), None)
+                 if re.search(rf"\b{w}\b", _en_window)), None)
 check(
     _cn_count is not None and _en_word is not None
     and int(_cn_count.group(1)) == len(_sites)
     and _en_word == len(_sites)
-    and _pk.DEFAULT_MAX_POCKETS == len(_sites),
+    and _pk.DEFAULT_MAX_POCKETS == len(_sites)
+    # Mutation, inside the check: the point of reading the number out of the
+    # document is that a different answer would turn this red, so that is what
+    # is asserted -- with the code unchanged and only the comparison's inputs
+    # standing in for a future one.
+    and int(_cn_count.group(1)) != len(_sites) + 1
+    and _en_word != len(_sites) + 1,
     "the site count the READMEs publish is what find_pockets returns under "
     "its own defaults",
     f"the Chinese says {_cn_count.group(1) if _cn_count else None!r} default "
@@ -865,9 +888,12 @@ check(
     f"DEFAULT_MAX_POCKETS is {_pk.DEFAULT_MAX_POCKETS} -- so all three agree. "
     f"The number is read out of the documents rather than written here, which "
     f"is the point: transcribing 12 into this file would have kept the check "
-    f"green after the code changed to return something else. Both files are "
-    f"pinned because they express the count differently, a digit and a word, "
-    f"and a check on only one of them would let the other drift",
+    f"green after the code changed to return something else. **Mutation:** "
+    f"against a hypothetical {len(_sites) + 1} sites the Chinese comparison is "
+    f"{int(_cn_count.group(1)) == len(_sites) + 1} and the English one is "
+    f"{_en_word == len(_sites) + 1}, so both would fail. Both files are pinned "
+    f"because they express the count differently, a digit and a word, and a "
+    f"check on only one of them would let the other drift",
 )
 
 

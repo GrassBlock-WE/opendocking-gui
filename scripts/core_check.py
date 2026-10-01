@@ -843,10 +843,34 @@ def sec_result():
     check("rmsds has one per pose", len(r.rmsds) == n)
     check("rmsds is float64", r.rmsds.dtype == np.float64)
     check("the best pose's rmsd to itself is 0", r.rmsds[0] == 0.0, f"got {r.rmsds[0]}")
-    check("rmsds are non-negative and non-decreasing", bool(np.all(np.diff(r.rmsds) >= 0)) and bool((r.rmsds >= 0).all()),
+    check("rmsds are non-negative and finite", bool((r.rmsds >= 0).all()) and bool(np.isfinite(r.rmsds).all()),
           f"got {r.rmsds}")
-    check("every pose is within the rmsd_cutoff of the best", bool((r.rmsds < 1.0 + 1e-9).all())
-          or n == 1 or True, f"cutoff is 1.0 by default; actual {r.rmsds}")
+    # `rmsds` is every pose's distance to the *best* pose, while the poses are
+    # ranked by *energy*. Nothing connects the two orderings, so "the rmsds are
+    # non-decreasing" was never a contract -- it happened to hold before the
+    # grid fix and stopped holding after, and the run now reads
+    # [0, 7.687, 7.197]: the third-ranked pose is geometrically closer to the
+    # best than the second-ranked one. The first element being exactly 0 is
+    # asserted on its own line above, and the ranking contract is asserted
+    # against `energies` above. A check that encoded an unpromised ordering is
+    # not a weak check, it is a wrong one: it would have gone red the moment
+    # the engine stopped coincidentally agreeing with it.
+    #
+    # What *is* promised is the de-duplication cutoff: a pose within
+    # `rmsd_cutoff` of a better one is dropped rather than reported. So the
+    # reported poses are pairwise farther apart than the cutoff. `DockingResult`
+    # does not expose pairwise distances, so this computes them.
+    cutoff = 1.0  # the engine's default rmsd_cutoff, in angstrom
+    coords = r.all_pose_coords()
+    pairwise = [
+        float(np.sqrt(np.mean(np.sum((coords[i] - coords[j]) ** 2, axis=1))))
+        for i in range(n)
+        for j in range(i + 1, n)
+    ]
+    check("no two reported poses are within the de-duplication cutoff of each other",
+          n < 2 or min(pairwise) >= cutoff - 1e-9,
+          f"cutoff {cutoff} A; closest reported pair is {min(pairwise):.4f} A apart; "
+          f"all pairwise: {[round(v, 4) for v in pairwise]}")
     check("raw_pose_count is larger than num_poses", r.raw_pose_count > n, f"{r.raw_pose_count} vs {n}")
     check("rejected_pose_count is zero for a clean box", r.rejected_pose_count == 0)
     check("scoring_function is what was asked for", r.scoring_function == "vina", f"got {r.scoring_function}")

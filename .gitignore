@@ -31,3 +31,8 @@ examples/_shifted_receptor.pdbqt
 examples/maps/
 examples/multi/
 examples/split_dir/
+
+# PowerShell writes a file literally named `$null` when a `rm` array is not
+# expanded, and it has turned up three times in two sessions -- once staged,
+# once deleted, once back. It is never source and never wanted.
+$null

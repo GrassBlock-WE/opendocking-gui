@@ -154,11 +154,115 @@ env_blocked = False
 incomplete = ""
 
 
-def find_window_windows():
-    """The HWND whose title matches, or None."""
-    import ctypes
+def _descendants(root_pid: int) -> set[int]:
+    """Every PID whose ancestry reaches `root_pid`, `root_pid` included.
 
-    return ctypes.windll.user32.FindWindowW(None, WINDOW_TITLE)
+    Needed because the console script is two processes. `odgui` is a
+    console-script shim, and the shim starts a *child* interpreter to run the
+    launcher; the window belongs to the child, not to the process `Popen` handed
+    back. Matching on `proc.pid` alone therefore found nothing at all --
+    measured, not assumed: with an exact-PID guard the check reported "no window
+    appeared within 60 s" on a run where the window was demonstrably up.
+
+    Read from a Toolhelp32 snapshot rather than WMI, so it costs no import and no
+    subprocess. A process that exits between the snapshot and the lookup simply
+    is not in the set, which is the safe direction: the window is then not
+    claimed as ours.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    TH32CS_SNAPPROCESS = 0x00000002
+
+    class _Entry(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", wintypes.DWORD),
+            ("cntUsage", wintypes.DWORD),
+            ("th32ProcessID", wintypes.DWORD),
+            ("th32DefaultHeapID", ctypes.POINTER(ctypes.c_ulong)),
+            ("th32ModuleID", wintypes.DWORD),
+            ("cntThreads", wintypes.DWORD),
+            ("th32ParentProcessID", wintypes.DWORD),
+            ("pcPriClassBase", ctypes.c_long),
+            ("dwFlags", wintypes.DWORD),
+            ("szExeFile", wintypes.WCHAR * 260),
+        ]
+
+    kernel = ctypes.windll.kernel32
+    snapshot = kernel.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+    if snapshot == -1 or snapshot == 0xFFFFFFFF:
+        return {root_pid}
+    parents: dict[int, int] = {}
+    try:
+        entry = _Entry()
+        entry.dwSize = ctypes.sizeof(_Entry)
+        if kernel.Process32FirstW(snapshot, ctypes.byref(entry)):
+            while True:
+                parents[entry.th32ProcessID] = entry.th32ParentProcessID
+                if not kernel.Process32NextW(snapshot, ctypes.byref(entry)):
+                    break
+    finally:
+        kernel.CloseHandle(snapshot)
+
+    family = {root_pid}
+    # Repeat until it stops growing: a process tree is not one level deep, and
+    # one pass would miss a grandchild -- which is exactly what the shim is.
+    grew = True
+    while grew:
+        grew = False
+        for child, parent in parents.items():
+            if parent in family and child not in family:
+                family.add(child)
+                grew = True
+    return family
+
+
+def find_window_windows(pid: int | None = None):
+    """The HWND whose title matches **and** whose owner is in `pid`'s tree.
+
+    The title used to be the whole test, and that is not enough. A title lookup
+    returns the first window carrying that title *whoever owns it*, so a second
+    `odgui`, or another agent's `workbench_interaction_check.py` on the same
+    desktop, is indistinguishable from the window this check started. Measured
+    here, not assumed: over 42 launches, runs that matched a window within 0.3 s
+    of spawning -- too fast to be the new process, whose own window appears at
+    1.0-2.2 s -- failed 4 times in 14 (29%), while runs that matched their own
+    window failed 1 time in 28 (3.6%).
+
+    The failure mode is specific and nasty. `WM_CLOSE` goes to the *other*
+    process's window, which closes in about 70 ms, and the process being watched
+    is never asked to close at all. It then sits there until the deadline, gets
+    terminated, and `TerminateProcess` reports exit code 1 -- so the check
+    reports a viewer that will not close cleanly when the truth is that it was
+    never asked.
+
+    `pid=None` keeps the old title-only behaviour and exists so the mutation
+    that proves this guard can turn it off; nothing on the happy path passes it.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    found: list[int] = []
+    mine = _descendants(pid) if pid is not None else None
+
+    @ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+    def _collect(hwnd, _lparam):
+        length = ctypes.windll.user32.GetWindowTextLengthW(hwnd)
+        if length:
+            buf = ctypes.create_unicode_buffer(length + 1)
+            ctypes.windll.user32.GetWindowTextW(hwnd, buf, length + 1)
+            if buf.value == WINDOW_TITLE:
+                owner = wintypes.DWORD()
+                ctypes.windll.user32.GetWindowThreadProcessId(
+                    hwnd, ctypes.byref(owner)
+                )
+                if mine is None or owner.value in mine:
+                    found.append(hwnd)
+                    return False  # stop walking the desktop
+        return True
+
+    ctypes.windll.user32.EnumWindows(_collect, 0)
+    return found[0] if found else None
 
 
 def _run(argv: list[str], timeout: int = 10) -> str | None:
@@ -284,7 +388,9 @@ try:
                 break
 
             if IS_WINDOWS:
-                hwnd = find_window_windows()
+                # The PID is not a nicety: without it this matches any window on
+                # the desktop carrying the same title, including another agent's.
+                hwnd = find_window_windows(proc.pid)
                 if hwnd:
                     import win32con
                     import win32gui

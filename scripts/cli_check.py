@@ -856,13 +856,30 @@ def main() -> int:
               "differently or one of them can be absent")
         # The claim that matters, and the reason the naming had to be added: the
         # file names cannot say which scoring function produced the directory.
+        #
+        # The evidence for that used to be "some of the files are byte-identical
+        # between the two runs", and those were identical for the wrong reason:
+        # a map block for an element the receptor does not contain was left
+        # entirely zero, so it was zero under both scoring functions. The grid
+        # fix (defect 190) made every block carry every receptor atom, and now
+        # all 40 differ — the old evidence was a measurement of the bug.
+        #
+        # The claim is better supported now, and without depending on an empty
+        # block: the two runs write *identically named* files, not one name
+        # mentions the scoring function, and every single byte of content
+        # differs. A directory of matching names with wholly different content
+        # is exactly the situation where only the content can answer the
+        # question.
+        names_leak = [n for n in v_names if "vina" in n.lower() or "vinardo" in n.lower()]
         check("--scoring really changes the maps, and the file names cannot say so",
-              v_names == d_names and 0 < len(differ) < len(v_names),
+              v_names == d_names and not names_leak and len(differ) == len(v_names) > 0,
               f"vina and vinardo wrote {len(v_names)} identically named files, "
               f"{len(differ)} of which differ in content and the other "
-              f"{len(v_names) - len(differ)} are byte-identical because the grid "
-              f"points there are zero either way ({', '.join(differ)}) -- so the "
-              "directory alone still cannot answer it, only the output can")
+              f"{len(v_names) - len(differ)} are byte-identical"
+              + (f" (the identical ones: {', '.join(sorted(v_names - set(differ)))})"
+                 if len(differ) != len(v_names) else "")
+              + (f"; names that leak the scoring function: {names_leak}" if names_leak else "")
+              + " -- so the directory's names alone cannot answer it, only the content can")
 
         fails_cleanly("rec-grid with no box at all",
                       run(say("rec-grid", "-r", str(REC), "-o", str(tmp / "g1"))),
@@ -918,9 +935,18 @@ def main() -> int:
                   and len(rec["rmsd"]) == 3,
                   f"num_poses={rec['num_poses']}, {len(rec['energies'])} energies, "
                   f"{len(rec['rmsd'])} rmsds")
+            # These exact numbers are a deliberate pin, so the history of the
+            # pin is part of what the check says. Before the grid fix
+            # (defect 190) they were -4.4625182565575034, -4.37873887366038 and
+            # -4.147741349725185. The whole run is 1.45 kcal/mol stronger now,
+            # which is what it should be: a ligand carbon used to feel no
+            # receptor oxygen or nitrogen at all, and ibuprofen's aryl and
+            # methyl carbons are most of what this molecule is. Nothing here was
+            # re-tuned to produce a nicer number -- the search is unchanged and
+            # the seed is still 42, so the difference is entirely the grid.
             check("the affinities are the measured ones, best first",
-                  rec["energies"] == [-4.4625182565575034, -4.37873887366038,
-                                      -4.147741349725185]
+                  rec["energies"] == [-5.9089870567673035, -5.217115002913457,
+                                      -4.994004214433699]
                   and rec["best_energy"] == rec["energies"][0]
                   and rec["energies"] == sorted(rec["energies"]),
                   f"{['%.4f' % e for e in rec['energies']]}, "
