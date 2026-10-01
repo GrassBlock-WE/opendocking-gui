@@ -659,6 +659,29 @@ jobs:
         if: ${{ !cancelled() && steps.capability.outcome == 'success' }}
         run: xvfb-run -a -s "-screen 0 1280x1024x24" python scripts/qt_gl_probe.py
 
+      # A fourth question, asked after the capability report and the route
+      # attribution, and deliberately not folded into `odgui --check`'s
+      # vocabulary. That vocabulary is 0/3/4/5 and all four are facts about the
+      # *machine*; "the context came up and the frame is empty" is the same on
+      # every machine and its cause is in the product's `paintGL`. Folding it
+      # into 5 would give one code two owners, and folding it into 4 would send
+      # a user to buy a graphics driver for a bug in this repository. So it is
+      # its own script with its own 0/1/2, and its new state is named
+      # `drew-nothing`.
+      #
+      # This is the one that closes the original defect. `odgui --check` used to
+      # report a machine verdict for something that is a product fact, and the
+      # measurement that settles it is a frame: a live context with a neutered
+      # `paintGL` still has `_ctx == True` and still reports 1590x1045, while the
+      # frame goes from 1111 distinct colours to 1 and from 1 593 503 non-modal
+      # pixels to 0. A context handle cannot tell those apart; a frame can.
+      - name: Does the viewport actually draw (measured, not inferred)
+        if: ${{ !cancelled() && steps.capability.outcome == 'success' }}
+        env:
+          LIBGL_ALWAYS_SOFTWARE: "1"
+          QT_QPA_PLATFORM: xcb
+        run: xvfb-run -a -s "-screen 0 1280x1024x24" python scripts/probe_painted_frame.py
+
       # Deliberately NOT conditioned on the widget capability. This suite
       # renders offscreen, and the one thing it refuses to do is call a
       # framebuffer it could not read a pass: it records that as a SKIP with the
