@@ -2,17 +2,46 @@
 # Windows 11 / rustc 1.98.1 / Python 3.10 before it was written here; see
 # docs/VERIFICATION.md.
 #
-# The GUI job is best-effort on purpose, and the reason is now measured rather
-# than assumed. The runner does have a working OpenGL context under
-# `xvfb-run` with Mesa's software rasteriser: `odgui --check` and the context
-# probe both pass there, and 45 of the 50 interaction checks pass. The five
-# that do not are the ones whose truth is in the rendered pixels --
-# `grabFramebuffer()` comes back uniformly coloured on a headless runner, so
-# there is nothing to compare. The harness reports those as SKIP with the
-# reason rather than as failures, because "this environment cannot read the
-# framebuffer" and "the viewport draws nothing" are different claims and only
-# one of them is true. It is still worth running: it catches import, layout
-# and interaction regressions that nothing else would.
+# Three jobs, each named after what it actually verifies, because a job whose
+# name promises more than it pins is how a suite goes dark without anybody
+# noticing:
+#
+#   engine / bindings  -- the Rust crate, the built wheel, the two console
+#                         scripts, and `odgui --check`'s answer on a job that
+#                         deliberately installed no GUI extras.
+#   python check suite -- the audit scripts under `scripts/`. No display is
+#                         used and none is needed.
+#   workbench          -- everything that needs a real Qt OpenGL widget.
+#
+# **What this file used to get wrong**, measured on runs 36823282397 and
+# 36838365790: every audit script lived in the workbench job, behind the GUI
+# stack step. That step runs `odgui --check`, which on this runner answers
+# exit 5 -- OpenGL is fine, Qt cannot realise an OpenGL widget -- and the
+# `case` statement here knew only 0 and 4, so the step failed. A failing step
+# skips every step after it, so **13 audit steps were cancelled as collateral,
+# on two consecutive runs**: the entire Python audit suite did not execute on
+# CI at all. The run still reported success, because the job carried
+# `continue-on-error: true`, which is the one setting that turns "nothing was
+# checked" into "everything is fine".
+#
+# Hence three changes, each of which removes a way for a suite to be dark:
+#
+#   1. The audit scripts live in a job that needs no display and no widget, so
+#      no GUI capability can take them down with it.
+#   2. The workbench job no longer carries `continue-on-error`, so a failure
+#      inside it is visible on the run instead of being absorbed.
+#   3. The widget probe became a *capability report* that publishes what this
+#      runner can do, and the steps that genuinely need a widget are gated on
+#      that measurement. A step is now skipped because a measured fact says it
+#      cannot run here, never because an earlier step happened to fail, and the
+#      report step runs either way and says so out loud.
+#
+# The header used to claim the runner "does have a working OpenGL context under
+# xvfb-run". It does not, and the claim was load-bearing: it is why the audit
+# scripts were considered safe to hide behind a GUI step. The raw context works
+# (Mesa software rasteriser, GL 4.5); the Qt widget probe aborts inside
+# `show()`. Both facts are now reported separately, which is what the launcher's
+# exit code 5 exists to say.
 
 name: CI
 
@@ -127,8 +156,17 @@ jobs:
           # The payload and the process have to agree, not merely both exist. A
           # report that says one thing and exits with another is precisely the
           # failure this command was rewritten to stop making, so the agreement
-          # is asserted here rather than assumed.
-          echo "$verdict" | python -c "import json,sys; d=json.load(sys.stdin); assert d['verdict']=='no-gui-stack', d; assert d['exit']==3, d"
+          # is asserted here rather than assumed. The mapping is the whole
+          # documented vocabulary, and it is asserted as a set so a new verdict
+          # cannot be added without this line being updated with it.
+          echo "$verdict" | python -c "
+          import json, sys
+          d = json.load(sys.stdin)
+          want = {'ok': 0, 'no-gui-stack': 3, 'no-context': 4, 'no-widget': 5}
+          assert d['exit'] == 3, d
+          assert want[d['verdict']] == d['exit'], d
+          print('payload and process agree:', d['verdict'], d['exit'])
+          "
           echo "odgui --check answered 3, as it must on a job with no GUI extras"
 
       # The package ships exactly two commands: one for the viewer, one for the
@@ -141,6 +179,181 @@ jobs:
             echo "::error::expected 'odcli,odgui' but got: ${actual}"
             exit 1
           fi
+
+  checks:
+    name: python check suite (no display)
+    runs-on: ubuntu-latest
+    # The audit scripts are the project's real gate: 22 of them, each pinning a
+    # count. They used to run as steps of the workbench job, which is how a
+    # runner without a Qt OpenGL widget took all of them down with it. This job
+    # has no `continue-on-error` and no display, so "the GUI is unhappy here" is
+    # not something it can express.
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('dock-py/pyproject.toml') }}
+
+      - name: Build and install the wheel
+        run: |
+          python -m pip install --upgrade pip maturin
+          python -m maturin build --release --locked -m dock-py/Cargo.toml --out dist
+          python -m pip install --force-reinstall dist/opendocking-*.whl
+
+      # Installing the GUI extras here is not for a display -- there is none, and
+      # nothing below opens a window. It is so the scripts import exactly what
+      # they import on a maintainer's machine: `core_check.py` walks the
+      # workbench wrappers on a real instance, and a suite that silently skips
+      # the half of the API that needs PyQt6 is a suite measuring less than it
+      # appears to.
+      #
+      # rdkit and meeko are third-party oracles. rdkit is the only comparison in
+      # the bond check against a bond perception written by somebody else; meeko
+      # is the tool that produced the shipped `examples/*.pdbqt` and parses by
+      # column, so it refuses a line this project's own whitespace-based reader
+      # would accept. A check only the maintainer can run is a note, not a gate.
+      - name: Install the extras the oracles need
+        run: |
+          python -m pip install "PyQt6>=6.4" "moderngl>=5.8" rdkit meeko
+
+      # The meta-checks go first, and on purpose: `check_scripts_declare.py`
+      # audits every other script's declared count, and `docs_claims_check.py`
+      # scores the prose against the code. Running them last would mean a
+      # failure in a suite is reported without knowing whether the suite's own
+      # bookkeeping is the thing that broke.
+      - name: The audit scripts' own bookkeeping and the documents
+        run: |
+          python scripts/check_scripts_declare.py
+          python scripts/docs_claims_check.py
+
+      - name: Engine binding surface
+        # 38 pytest cases covered this module, and between them they missed a
+        # public property that raised AttributeError on every single call: its
+        # helper was named with two leading underscores, so calling it from a
+        # second class mangled it to a name that did not exist. Both pytest
+        # meta-tests look at this module from outside -- one checks that wrapper
+        # attributes are names the Rust extension exports, the other uses
+        # hasattr and only over DockingResult -- and the defect lived in the seam
+        # between two Python classes, where neither can see.
+        # This one walks every public member of every wrapper on a real
+        # instance and reverse-asserts that none was left unchecked.
+        run: python scripts/core_check.py
+
+      - name: Pose/receptor interaction criteria
+        # No display needed, and it has to be a gate rather than a note: the
+        # hydrogen-bond thresholds were once accepted as arguments and then
+        # ignored, and nothing noticed until a check loosened one criterion at a
+        # time and the answers did not change.
+        run: |
+          python scripts/contacts_check.py
+          python scripts/contacts_check2.py
+
+      - name: Scoring agrees across the two surfaces
+        # The same pose, scored through the Python wrapper and through the Rust
+        # binding, must give the same number. It is the only check that can
+        # notice one of the two quietly changing units.
+        run: python scripts/scoring_cross_check.py
+
+      - name: Pocket search geometry and thresholds
+        # Also a gate, for the same reason. The volume ceiling and the burial
+        # threshold are what stop the list reporting a protein's entire outer
+        # surface as one 3564 A^3 "site", and a check that only looked at the
+        # crambin result would have passed with both of them removed.
+        #
+        # This one docks as well as searches, so it needs the engine rather
+        # than just numpy.
+        run: python scripts/pockets_check.py
+
+      - name: Bond perception and representation geometry
+        run: |
+          python scripts/structure_bond_check.py
+          python scripts/representation_geometry_check.py
+
+      - name: Preparation reports what it dropped
+        # Also a gate, and it needs no display. `prepare_receptor` keeps one
+        # component of its input and discards the rest, which is usually right,
+        # but until now the only record was a RuntimeWarning -- and a warning is
+        # a string that GUI code and CLI code routinely drop on the floor. On
+        # 1HVR, a homodimer, the redocking benchmark searched a two-chain
+        # 1826-atom structure while docking against a 621-atom single chain, and
+        # every RMSD it produced was meaningless. This script pins the report,
+        # pins that the warning is generated *from* the report so the two cannot
+        # disagree, and pins the `prepare_receptor() -> str` contract.
+        #
+        # `prepare_ligand` had no check at all while `prepare_receptor` had one,
+        # and it is the path a first run actually goes through. It also covers
+        # the two dead-and-broken paths this found: a water/ion filter that
+        # called RemoveAtom on a Chem.Mol (which has no such method, so it had
+        # never removed anything), and a PathToSubmol call that takes a
+        # traversal path rather than a set of atoms.
+        run: |
+          python scripts/prep_check.py
+          python scripts/ligand_check.py
+
+      - name: The eight odcli subcommands
+        # `odcli` has eight subcommands and until now exactly one had been
+        # run. Exit codes are taken from the code, not guessed -- two are
+        # unintuitive: `dock` returns 2 for an empty ligand directory, and
+        # `workbench` returns 3 for a missing GUI stack. Every one of the
+        # eleven failure paths asserts that the diagnostic is present *and*
+        # that no Python traceback is.
+        # A coverage guard compares the subcommand table from `odcli --help`
+        # against the set this script actually ran, demanding set equality, so
+        # adding a command without a section fails the build.
+        # `cli_prep_check.py` runs the installed console script, not an import,
+        # because exit codes and argument parsing are exactly what a CLI gets
+        # wrong -- and it is the check that catches a source tree and an
+        # installed wheel having drifted apart.
+        # ~21 s over 36 subprocesses; the engine time is 0.26-0.40 s per
+        # docking run and the rest is interpreter cold start.
+        run: |
+          python scripts/cli_check.py
+          python scripts/cli_prep_check.py
+
+      - name: The diagnostics in examples/
+        # Five scripts that were not in CI, not in the reproduce list, and not
+        # covered by any other check -- which makes them the only diagnostics
+        # this project has, and a diagnostic nobody runs rots against a system
+        # that has since changed. `diagnose_clash.py` in particular was written
+        # to investigate a scoring function that no longer exists.
+        # Judged on what each one *printed*, not on its exit code: a script
+        # whose checks quietly stopped running still exits zero.
+        run: python scripts/examples_check.py
+
+      - name: PDBQT file format
+        # A round trip through this project's own writer and reader only proves
+        # they agree, and they can share a bug: `read_pdbqt_models` is a
+        # MODEL/ENDMDL splitter that never reads a column, and the Rust
+        # `Ligand.from_pdbqt` is whitespace-based, so it accepts a line with a
+        # space deleted at column 31. Meeko parses by column and refuses that.
+        # The three claims -- third-party parser, shipped third-party files,
+        # own readers -- are asserted separately on purpose.
+        run: python scripts/pdbqt_check.py
+
+      - name: X11 window lookup parses each tool's real output
+        # No display needed: this stubs the helpers with the formats they
+        # really print. It guards the workbench job's launch step, which needs
+        # a window and is therefore conditional on a measured capability.
+        run: python scripts/x11_window_parse_check.py
+
+      - name: What the benchmarks report
+        # pocket_benchmark.py and redock_benchmark.py are not gates and never
+        # will be -- a corpus result has no ground truth, and gating it would be
+        # asserting the internet. What *is* gateable is that every number each
+        # one prints is the number its own line says it is, which is exactly
+        # what was wrong: the pocket benchmark's "cost per 1000 atoms" was
+        # milliseconds per *atom*, so a 17.6 s search over 4779 atoms printed
+        # "4HHB 4 ms".
+        # Offline in about a second: `urlopen` is stubbed, so no case may touch
+        # the network. Deliberately gates no corpus number, and says so.
+        run: python scripts/benchmark_check.py
 
   docs:
     name: documentation hygiene
@@ -166,12 +379,15 @@ jobs:
           cffconvert --validate
 
   gui:
-    name: workbench (best effort)
+    name: workbench (needs a real OpenGL widget)
     runs-on: ubuntu-latest
-    # See the header: 45 of 50 interaction checks pass here, and the other five
-    # are skipped because a headless runner cannot read back the framebuffer.
-    # Remove this line once a runner can answer those five too.
-    continue-on-error: true
+    # No `continue-on-error` here any more. It was the setting that let a failing
+    # step inside this job vanish behind a green tick on the run, and it is how
+    # thirteen audit steps came to be skipped without anybody deciding to skip
+    # them. What replaces it is not a softer verdict: it is a capability report
+    # at the top of the job, so the steps that cannot run on a headless runner
+    # are skipped for a stated, measured reason instead of a collateral one, and
+    # everything else fails loudly.
     steps:
       - uses: actions/checkout@v4
 
@@ -220,22 +436,7 @@ jobs:
           python -m pip install --upgrade pip maturin
           python -m maturin build --release --locked -m dock-py/Cargo.toml --out dist
           python -m pip install --force-reinstall dist/opendocking-*.whl
-          python -m pip install "PyQt6>=6.4" "moderngl>=5.8"
-          # RDKit is here for one assertion, and it is the most valuable one in
-          # the bond check: it is the only comparison in the suite against a
-          # perception written by somebody else. Installing it keeps that
-          # oracle from being a thing that only runs on the maintainer's
-          # machine, where a check that nobody else can run is a note, not a
-          # gate. The check skips with a reason if it is ever missing.
-          python -m pip install rdkit
-          # Meeko is the same tool that produced the shipped examples/*.pdbqt,
-          # and -- unlike this project's own reader, which is whitespace-based
-          # and would accept anything -- it parses by column and rejects a
-          # mis-columned line. That makes it a genuine third-party oracle for
-          # the file format, and the one that would have caught the dropped
-          # REMARK found this round. Its absence must be a CI failure, not a
-          # silent reduction in what is checked.
-          python -m pip install meeko
+          python -m pip install "PyQt6>=6.4" "moderngl>=5.8" rdkit meeko
 
       # A static audit, so it needs no display and runs first: it is the check
       # that keeps the *other* GUI scripts honest. Five of them used to carry
@@ -248,162 +449,170 @@ jobs:
       - name: GUI scripts share one odgui --check wrapper
         run: python scripts/_gui_check.py
 
-      # The name used to say "(no display needed)". It was untrue, and untrue in
-      # the most instructive way: this step could only ever pass while the check
-      # was *lying*. `odgui --check` asks Qt for a real OpenGL context, a
-      # headless runner has none, so the honest check answered 4 -- which
-      # `set -e` turned into a red job. The only reason this step had ever been
-      # green was the older code path, which reported "GUI stack OK" on a
-      # machine with no context at all. Giving the step a display is the fix;
-      # softening the check would have put the lie back.
+      # The capability report. It walks a ladder of Qt/OpenGL routes until one
+      # of them can realise an actual OpenGL widget, and publishes what this
+      # runner can do as step outputs. Three properties make it a gate rather
+      # than a convenience:
       #
-      # 0 and 4 both pass, and the branch taken is echoed, because 4 is a fact
-      # about this runner's driver rather than a defect in the package. 3 does
-      # not pass: PyQt6 and moderngl were installed two steps above, so 3 would
-      # mean the extras or the wheel are broken, which is ours.
-      - name: GUI stack check (virtual display, software GL)
+      #   * It asserts the exit-code *vocabulary*, not a capability. 0 means the
+      #     widget worked, 4 means there is no OpenGL at all, 5 means OpenGL
+      #     exists and Qt cannot put it in a widget, and 3 -- no PyQt6 -- is an
+      #     error here, because the extras were installed two steps above. Any
+      #     other code is an error too: a probe that starts inventing exit codes
+      #     is a probe whose consumers have stopped meaning anything.
+      #   * It asserts that the JSON payload and the process agree, because a
+      #     report that says one thing and exits with another is the exact
+      #     failure the `--json` contract exists to prevent.
+      #   * It reports rather than fails when no route can make a widget. "This
+      #     runner cannot show a 3-D window" is a fact about the runner, and the
+      #     steps below are conditioned on it instead of being collateral.
+      - name: What this runner can do with OpenGL
+        id: capability
         env:
           LIBGL_ALWAYS_SOFTWARE: "1"
-          QT_QPA_PLATFORM: xcb
         run: |
           set +e
-          xvfb-run -a -s "-screen 0 1280x1024x24" odgui --check
-          rc=$?
+          widget=0
+          raw=0
+          route=none
+          bad=0
+          attempt() {
+            label="$1"; shift
+            echo "--- route: ${label}   env: $*"
+            out=$(env "$@" xvfb-run -a -s "-screen 0 1280x1024x24" odgui --check 2>&1)
+            rc=$?
+            printf '%s\n' "$out" | tail -n 6
+            echo "    -> exit ${rc}"
+            case "$rc" in
+              0) widget=1; route="${label}"; return 0 ;;
+              4|5) raw=1; return 1 ;;
+              3) echo "::error::exit 3 with PyQt6 and moderngl installed means the wheel or the extras are broken"; bad=1; return 1 ;;
+              *) echo "::error::exit ${rc} is outside the documented vocabulary 0/3/4/5"; bad=1; return 1 ;;
+            esac
+          }
+          attempt "xcb + Mesa software rasteriser" QT_QPA_PLATFORM=xcb LIBGL_ALWAYS_SOFTWARE=1
+          if [ "$widget" -ne 1 ]; then
+            attempt "QT_OPENGL=software" QT_QPA_PLATFORM=xcb LIBGL_ALWAYS_SOFTWARE=1 QT_OPENGL=software
+          fi
+          if [ "$widget" -ne 1 ]; then
+            attempt "xcb with the GLX integration disabled" QT_QPA_PLATFORM=xcb LIBGL_ALWAYS_SOFTWARE=1 QT_XCB_GL_INTEGRATION=none
+          fi
+          if [ "$widget" -ne 1 ]; then
+            attempt "offscreen platform" QT_QPA_PLATFORM=offscreen LIBGL_ALWAYS_SOFTWARE=1
+          fi
           set -e
-          case "$rc" in
-            0) echo "odgui --check: the viewer obtained a context on this runner";;
-            4) echo "::warning::odgui --check got no OpenGL context on this runner (exit 4). That is a fact about the runner's driver, not a packaging defect; the windowed step below is the gate that has to pass.";;
-            *) echo "::error::odgui --check exited ${rc}; expected 0 (context available) or 4 (no context on this runner)"; exit 1;;
-          esac
+          if [ "$bad" -ne 0 ]; then
+            echo "::error::a route answered outside the documented exit vocabulary; fix the launcher or this ladder, not the expectation"
+            exit 1
+          fi
+          # The payload/process agreement, on a route that actually ran here.
+          set +e
+          payload=$(env QT_QPA_PLATFORM=xcb LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1280x1024x24" odgui --check --json 2>/dev/null)
+          payload_rc=$?
+          set -e
+          echo "$payload"
+          echo "$payload" | python -c "
+          import json, sys
+          d = json.load(sys.stdin)
+          want = {'ok': 0, 'no-gui-stack': 3, 'no-context': 4, 'no-widget': 5}
+          assert d['exit'] == int(sys.argv[1]), (d, sys.argv[1])
+          assert want[d['verdict']] == d['exit'], d
+          print('payload and process agree:', d['verdict'], d['exit'])
+          " "$payload_rc"
+          echo "widget=${widget}" >> "$GITHUB_OUTPUT"
+          echo "raw=${raw}" >> "$GITHUB_OUTPUT"
+          echo "route=${route}" >> "$GITHUB_OUTPUT"
+          if [ "$widget" -eq 1 ]; then
+            echo "::notice::route '${route}' realised an OpenGL widget; the windowed steps will run"
+          elif [ "$raw" -eq 1 ]; then
+            echo "::warning::OpenGL exists on this runner but no Qt route could put it in a widget; the windowed steps are skipped for that measured reason"
+          else
+            echo "::warning::no OpenGL context on this runner at all; the windowed steps are skipped for that measured reason"
+          fi
+
+      # Runs whatever the capability report concluded, and says it out loud. A
+      # reader looking at a run must be able to tell "skipped because this
+      # runner cannot" from "skipped because something above it broke".
+      - name: What this run did and did not verify
+        if: always()
+        run: |
+          echo "OpenGL context on this runner:    ${{ steps.capability.outputs.raw == '1' && 'yes' || 'no' }}"
+          echo "Qt OpenGL widget on this runner:   ${{ steps.capability.outputs.widget == '1' && 'yes' || 'no' }}"
+          echo "route that produced a widget:      ${{ steps.capability.outputs.route || 'none' }}"
+          echo
+          echo "Verified without a widget: the GUI-stack audit, the workbench interaction"
+          echo "and framing suites, and the two shader-level smoke levels."
+          echo "Verified only with a widget:       the real launch-and-close, and the"
+          echo "                                   screenshots, which are framebuffer reads."
+          if [ "${{ steps.capability.outputs.widget }}" != "1" ]; then
+            echo "NOT verified on this runner:       the widget-dependent steps above."
+            echo "                                   That is a limit of the runner, not a pass."
+          fi
 
       # This one prints which routes obtain a context and *always* exits 0, on
-      # purpose: it is here to attribute a future failure, not to be one. It is
-      # named accordingly so that a green tick here is never read as "OpenGL
-      # was verified". The step that genuinely requires a working context is
-      # the windowed check below it.
-      - name: OpenGL route probe (informer -- never fails)
+      # purpose: it attributes a failure to Qt's own widget or to the product,
+      # which the ladder above deliberately does not distinguish -- it only
+      # decides. It is named accordingly so that a green tick here is never read
+      # as "OpenGL was verified".
+      - name: OpenGL route attribution (informer -- never fails)
         run: xvfb-run -a -s "-screen 0 1280x1024x24" python scripts/qt_gl_probe.py
 
+      # Deliberately NOT conditioned on the widget capability. This suite
+      # renders offscreen, and the one thing it refuses to do is call a
+      # framebuffer it could not read a pass: it records that as a SKIP with the
+      # reason. Conditioning it on a working widget would have re-created the
+      # exact bug this job just had, where the one suite that could still say
+      # something useful was the one that got cancelled.
       - name: Layout, interaction and behaviour
         env:
           LIBGL_ALWAYS_SOFTWARE: "1"
           QT_QPA_PLATFORM: xcb
         run: xvfb-run -a -s "-screen 0 1280x1024x24" python scripts/workbench_interaction_check.py
 
-      - name: What the benchmarks report
-        # pocket_benchmark.py and redock_benchmark.py are not gates and never
-        # will be -- a corpus result has no ground truth, and gating it would be
-        # asserting the internet. What *is* gateable is that every number each
-        # one prints is the number its own line says it is, which is exactly
-        # what was wrong: the pocket benchmark's "cost per 1000 atoms" was
-        # milliseconds per *atom*, so a 17.6 s search over 4779 atoms printed
-        # "4HHB 4 ms".
-        # Offline in about a second: `urlopen` is stubbed, so no case may touch
-        # the network. Deliberately gates no corpus number, and says so.
-        run: python scripts/benchmark_check.py
+      - name: Is the structure actually centred in the viewport
+        env:
+          LIBGL_ALWAYS_SOFTWARE: "1"
+          QT_QPA_PLATFORM: xcb
+        run: xvfb-run -a -s "-screen 0 1280x1024x24" python scripts/viewport_framing_check.py
 
-      - name: Engine binding surface
-        # 38 pytest cases covered this module, and between them they missed a
-        # public property that raised AttributeError on every single call: its
-        # helper was named with two leading underscores, so calling it from a
-        # second class mangled it to a name that did not exist. Both pytest
-        # meta-tests look at this module from outside -- one checks that wrapper
-        # attributes are names the Rust extension exports, the other uses
-        # hasattr and only over DockingResult -- and the defect lived in the seam
-        # between two Python classes, where neither can see.
-        # This one walks every public member of every wrapper on a real
-        # instance and reverse-asserts that none was left unchecked.
-        run: python scripts/core_check.py
+      # Two levels: the real MainWindow laid out by Qt, and the two shader
+      # programs run against a standalone moderngl context with the framebuffer
+      # read back. A GLSL typo, a mismatched attribute name or a wrong index
+      # buffer raises here instead of silently producing a black window.
+      - name: Renderer smoke, both levels
+        env:
+          LIBGL_ALWAYS_SOFTWARE: "1"
+          QT_QPA_PLATFORM: xcb
+        run: xvfb-run -a -s "-screen 0 1280x1024x24" python scripts/workbench_smoke.py
 
-      - name: Pose/receptor interaction criteria
-        # No display needed, and it has to be a gate rather than a note: the
-        # hydrogen-bond thresholds were once accepted as arguments and then
-        # ignored, and nothing noticed until a check loosened one criterion at
-        # a time and the answers did not change.
-        run: python scripts/contacts_check.py
+      - name: "Screenshot: contact geometry"
+        if: steps.capability.outputs.widget == '1'
+        env:
+          LIBGL_ALWAYS_SOFTWARE: "1"
+          QT_QPA_PLATFORM: xcb
+        run: xvfb-run -a -s "-screen 0 1280x1024x24" python scripts/contacts_screenshot.py
 
-      - name: Pocket search geometry and thresholds
-        # Also a gate, for the same reason. The volume ceiling and the burial
-        # threshold are what stop the list reporting a protein's entire outer
-        # surface as one 3564 A^3 "site", and a check that only looked at the
-        # crambin result would have passed with both of them removed.
-        #
-        # This one docks as well as searches, so it needs the engine rather
-        # than just numpy.
-        run: python scripts/pockets_check.py
+      - name: "Screenshot: pocket detection"
+        if: steps.capability.outputs.widget == '1'
+        env:
+          LIBGL_ALWAYS_SOFTWARE: "1"
+          QT_QPA_PLATFORM: xcb
+        run: xvfb-run -a -s "-screen 0 1280x1024x24" python scripts/pockets_screenshot.py
 
-      - name: Bond perception and representation geometry
-        run: |
-          python scripts/structure_bond_check.py
-          python scripts/representation_geometry_check.py
-
-      - name: Receptor preparation reports what it dropped
-        # Also a gate, and it needs no display. `prepare_receptor` keeps one
-        # component of its input and discards the rest, which is usually right,
-        # but until now the only record was a RuntimeWarning -- and a warning is
-        # a string that GUI code and CLI code routinely drop on the floor. On
-        # 1HVR, a homodimer, the redocking benchmark searched a two-chain
-        # 1826-atom structure while docking against a 621-atom single chain, and
-        # every RMSD it produced was meaningless. This script pins the report,
-        # pins that the warning is generated *from* the report so the two cannot
-        # disagree, and pins the `prepare_receptor() -> str` contract.
-        run: python scripts/prep_check.py
-
-      - name: Ligand preparation
-        # `prepare_ligand` had no check at all while `prepare_receptor` had one,
-        # and it is the path a first run actually goes through. It also covers
-        # the two dead-and-broken paths this found: a water/ion filter that
-        # called RemoveAtom on a Chem.Mol (which has no such method, so it had
-        # never removed anything), and a PathToSubmol call that takes a
-        # traversal path rather than a set of atoms.
-        run: python scripts/ligand_check.py
-
-      - name: odcli reports what preparation dropped
-        # Runs the installed console script, not an import, because exit codes
-        # and argument parsing are exactly what a CLI gets wrong.
-        run: python scripts/cli_prep_check.py
-
-      - name: The other seven odcli subcommands
-        # `odcli` has eight subcommands and until now exactly one had been
-        # run. Exit codes are taken from the code, not guessed -- two are
-        # unintuitive: `dock` returns 2 for an empty ligand directory, and
-        # `workbench` returns 3 for a missing GUI stack. Every one of the
-        # eleven failure paths asserts that the diagnostic is present *and*
-        # that no Python traceback is.
-        # A coverage guard compares the subcommand table from `odcli --help`
-        # against the set this script actually ran, demanding set equality, so
-        # adding a command without a section fails the build.
-        # ~21 s over 36 subprocesses; the engine time is 0.26-0.40 s per
-        # docking run and the rest is interpreter cold start.
-        run: python scripts/cli_check.py
-
-      - name: The diagnostics in examples/
-        # Five scripts that were not in CI, not in the reproduce list, and not
-        # covered by any other check -- which makes them the only diagnostics
-        # this project has, and a diagnostic nobody runs rots against a system
-        # that has since changed. `diagnose_clash.py` in particular was written
-        # to investigate a scoring function that no longer exists.
-        # Judged on what each one *printed*, not on its exit code: a script
-        # whose checks quietly stopped running still exits zero.
-        run: python scripts/examples_check.py
-
-      - name: PDBQT file format
-        # A round trip through this project's own writer and reader only proves
-        # they agree, and they can share a bug: `read_pdbqt_models` is a
-        # MODEL/ENDMDL splitter that never reads a column, and the Rust
-        # `Ligand.from_pdbqt` is whitespace-based, so it accepts a line with a
-        # space deleted at column 31. Meeko parses by column and refuses that.
-        # The three claims -- third-party parser, shipped third-party files,
-        # own readers -- are asserted separately on purpose.
-        run: python scripts/pdbqt_check.py
-
-      - name: X11 window lookup parses each tool's real output
-        # No display needed: this stubs the helpers with the formats they
-        # really print. It guards the step below, which is best-effort and so
-        # has never reported a check that could not find a window.
-        run: python scripts/x11_window_parse_check.py
+      # Published even when a step above failed, because a run whose picture was
+      # never looked at is how a rendering regression survives. `ignore` on
+      # purpose: on a runner with no widget there is nothing to publish, and
+      # that absence is already reported by the capability report above.
+      - name: Publish the screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: workbench-screenshots
+          path: dist/shot_*.png
+          if-no-files-found: ignore
 
       - name: Real launch, then close
+        if: steps.capability.outputs.widget == '1'
         run: |
           # A window manager is started by hand because xvfb-run does not start
           # one, and the check closes the window the way a person does. If
