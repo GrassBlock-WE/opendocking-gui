@@ -34,8 +34,23 @@ import numpy as np  # noqa: E402
 from opendocking.workbench import structure as st_mod  # noqa: E402
 
 EXAMPLES = ROOT / "examples"
+
+#: The number of checks this file is supposed to run, on **every** machine.
+#: measured: a green run with RDKit present (85 checks, exit 0) and a green run
+#: with the `rdkit` import blocked (85 checks, 1 skipped, exit 0). The two agree
+#: because `skip` is counted into the total rather than dropped from it -- that
+#: agreement is the whole reason this number is worth pinning, and it is not a
+#: claim that can be made about a count that only holds when an optional package
+#: happens to be installed. Lower it only after a real green run.
+EXPECTED_CHECKS = 85
+
 FAILURES: list[str] = []
 CHECKS = 0
+#: Checks this file could not run here, as (name, reason). A skip and a check are
+#: the *same* check, so a skip is counted once -- in `SKIPPED`, not in `CHECKS`.
+#: The total is `CHECKS + len(SKIPPED)` and that sum is what is pinned, which is
+#: what makes the pinned number the same on a machine with RDKit and one without.
+SKIPPED: list[tuple[str, str]] = []
 
 
 def check(name: str, ok: bool, detail: str = "") -> bool:
@@ -53,10 +68,23 @@ def skip(name: str, reason: str) -> bool:
 
     A skipped check and a failed check are different claims, and this file
     already needs the distinction: the one oracle here is RDKit, and a machine
-    without it should say so rather than quietly assert less. `skip` does not
-    increment the check count, so the number of checks a run reports does not
-    depend on which optional tools the machine has.
+    without it should say so rather than quietly assert less.
+
+    **This used to print the line and record nothing**, on the reasoning that the
+    number of checks a run reports should not depend on which optional tools the
+    machine has. The reasoning was sound and the consequence was not: with the
+    skip uncounted, a run without RDKit reported one fewer check, and since this
+    file had no pin there was nothing to notice. The tally read `84 passed, 0
+    failed, 84 checks` on a machine that had measured 84 of 85 things and could
+    not say so -- the same "N passed either way" problem as a check that stays
+    green when the thing it guards is gone.
+
+    So the skip is recorded, counted separately, and *added into the total*. The
+    total is now 85 whether the oracle was there or not, which is the property
+    that makes the total worth pinning at all. See `main()` for the summary,
+    which prints the three counts separately and never sums them into a verdict.
     """
+    SKIPPED.append((name, reason))
     print(f"  [SKIP] {name}  — {reason}")
     return False
 
@@ -2233,9 +2261,49 @@ def main() -> int:
     check_index_coverage()
 
     print("\n=== summary ===")
-    print(f"  {CHECKS - len(FAILURES)} passed, {len(FAILURES)} failed, {CHECKS} checks")
+    # The three counts are printed and never added into a verdict. `total` is the
+    # only figure meant to be compared against the pin, and it is the sum of what
+    # ran and what could not -- which is exactly why it is the same number on a
+    # machine with RDKit and one without. Printing the three separately is what
+    # makes the difference between "measured nothing" and "measured 84 of 85"
+    # legible: if the skips were folded into the pass count, `84 passed, 0 failed,
+    # 85 checks` would read as a clean run.
+    npass = CHECKS - len(FAILURES)
+    nfail = len(FAILURES)
+    nskip = len(SKIPPED)
+    total = CHECKS + nskip
+    print(f"  {npass} passed, {nfail} failed, {nskip} skipped, {total} checks")
+    for name, reason in SKIPPED:
+        print(f"    SKIP {name}: {reason}")
     for f in FAILURES:
         print(f"    FAIL {f}")
+    if nskip:
+        print(
+            f"  {nskip} check(s) were skipped, not passed. A skip means this\n"
+            f"  environment could not answer the question; it is not evidence that\n"
+            f"  the thing it guards is correct. The total above still counts them,\n"
+            f"  which is why it does not move with the machine."
+        )
+    # The one thing that must hold on *every* machine, whatever else is true.
+    # The first half is an accounting identity and the second is the pin. Keeping
+    # them as two separate conditions is deliberate: the identity is what says a
+    # skip was counted once and only once, and folding the skips into `npass`
+    # above -- which is exactly the "make the numbers add up" instinct -- breaks
+    # the identity while leaving the total at 85. A green run would then read
+    # "85 passed, 0 failed, 1 skipped, 85 checks" and mean something false.
+    if npass + nfail + nskip != total:
+        print(
+            f"  TALLY: {npass} + {nfail} + {nskip} is not {total}. The three counts "
+            f"must partition the total, or one of them is counting something twice."
+        )
+        return 2
+    if total != EXPECTED_CHECKS:
+        print(
+            f"  TALLY: {total} checks ran, {EXPECTED_CHECKS} were expected "
+            f"({npass} passed, {nfail} failed, {nskip} skipped). A check is missing "
+            f"or a site is counted twice."
+        )
+        return 2
     return 1 if FAILURES else 0
 
 

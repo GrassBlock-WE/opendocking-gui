@@ -1,6 +1,21 @@
-"""Do the numbers in `docs/SCORING.md` and `docs/LIMITATIONS.md` still hold?
+"""Do the numbers the documentation claims still hold?
 
-Run:  python scripts/scoring_docs_check.py
+Run:  python scripts/docs_claims_check.py
+
+# Why it was renamed from `scoring_docs_check.py`
+
+The old name said "scoring", and it stopped being true. This file no longer audits
+the scoring function's internals -- `scoring_cross_check.py` does that, against
+the engine, with its own literal copy of the constants. What this file audits is
+**every quantitative claim the prose makes**: the tables and line references in
+`docs/SCORING.md` and `docs/LIMITATIONS.md`, and the figures in `README.md` and
+`README.en.md`. It reads the documents and the source and asks whether each claim
+still matches, including which file a claim is attributed to.
+
+`docs_claims_check.py` says that, and nothing more is claimed for it. It is still
+a `*_check.py` on purpose: the name is the only thing that makes
+`check_scripts_declare.py` treat it as a gate, and a gate that stops looking like
+a gate stops being audited.
 
 # Why this file exists
 

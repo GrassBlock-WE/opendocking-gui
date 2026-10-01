@@ -2175,6 +2175,31 @@ class MainWindow(QtWidgets.QMainWindow):
         The picture this produces is ambiguous on its own -- a translucent
         ligand across a solid one reads as a rendering fault -- so the state is
         also stated in words next to the checkbox, in `_update_poses_label`.
+
+        **Why the selected pose changes colour along with the ghosts.** This
+        recolours the molecule the user was already looking at, which is the sort
+        of thing that reads as a bug until you know what question is being asked.
+        Turning the overlay on changes the question from *what is this molecule*
+        to *which of the nine is this* -- and the element table answers the first
+        question and is close to useless for the second. A docked ligand is
+        mostly grey carbon, so nine poses in element colours are nine grey
+        molecules, and grey carbon at 0.30 opacity sitting on grey carbon at 1.0
+        is not a distinction the eye makes.
+
+        So both ends of the comparison go flat: eight ghosts in one slate, the
+        selected pose in the green its own table row and the status bar already
+        call it. That is a difference of *kind* rather than of strength, and it
+        is the one the eye makes before it reads a single number. The green is
+        not a new colour invented for this: it is `COLOR_BEST_POSE`, the same
+        one the `*` in the pose table marks its best row with, so the picture and
+        the words name the same pose.
+
+        With the overlay off, `comparing` is False and the pose goes back to
+        element colours, because then the question is what the molecule is
+        again. This is a state of the comparison and not a repaint of the
+        molecule: the same view object is drawn in five atom colours with the box
+        unticked and in one flat green with it ticked. `_draw_colours_for` is
+        where that decision is made; the state bar reports both.
         """
         self._pose_ghosts_on = bool(checked)
         self._sync_ghosts_in_scene()

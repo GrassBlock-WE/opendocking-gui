@@ -2550,10 +2550,19 @@ def main() -> int:
         ])
     check(
         "every perceived bond is a distance a bond can physically have",
-        lengths7d and min(lengths7d) >= 0.85 and max(lengths7d) < 2.0,
-        f"{len(lengths7d)} bonds, {min(lengths7d):.2f}-{max(lengths7d):.2f} A: the "
-        "same 0.85-2.0 A window the receptor's bonds are held to, so a rule that "
-        "welded two atoms across a gap would fail here too",
+        bool(lengths7d) and min(lengths7d) >= 0.85 and max(lengths7d) < 2.0,
+        # The detail is an f-string, so `min(lengths7d)` is evaluated *before*
+        # `check` is called -- unconditionally, empty list or not. The first
+        # version of this line said `min(lengths7d):.2f` and raised
+        # `ValueError: min() arg is an empty sequence`, which took the whole
+        # suite down with exit 3 in precisely the case this check exists to
+        # catch. A check that dies instead of failing is the worst kind: the
+        # run is truncated, so it also destroys the sections after it.
+        f"{len(lengths7d)} bonds, "
+        + (f"{min(lengths7d):.2f}-{max(lengths7d):.2f} A" if lengths7d
+           else "none at all -- the view has coordinates and no connectivity")
+        + ": the same 0.85-2.0 A window the receptor's bonds are held to, so a "
+          "rule that welded two atoms across a gap would fail here too",
     )
     check(
         "and no atom carries more bonds than its element can",

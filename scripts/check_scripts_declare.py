@@ -4,8 +4,8 @@ Run:  python scripts/check_scripts_declare.py
 
 # The problem this closes
 
-Eight check scripts pin their total with `EXPECTED_CHECKS` and assert it. Thirteen
-do not. For those thirteen, the count printed at the end is whatever happened to
+Nine check scripts pin their total with `EXPECTED_CHECKS` and assert it. Twelve
+do not. For those twelve, the count printed at the end is whatever happened to
 run, and **nothing fails when it shrinks**.
 
 The clearest case is not hypothetical. On a machine with no OpenGL context,
@@ -39,18 +39,18 @@ running into -- `scoring_cross_check.py` holds its own `WEIGHTS` literal for
 exactly that reason. Requiring the comment costs nothing and makes "where did
 this number come from" answerable at a glance.
 
-# Why this is a separate file from `scoring_docs_check.py`
+# Why this is a separate file from `docs_claims_check.py`
 
 Three reasons, in order of weight:
 
 1. **This one runs without the engine.** It only reads source text. It works on
    a machine where the wheel was never built, which is exactly the machine where
    you most want to know whether the suite's own bookkeeping is intact.
-   `scoring_docs_check.py` imports `opendocking` and cannot.
+   `docs_claims_check.py` imports `opendocking` and cannot.
 2. **Different blast radius.** A failure in the documentation audit and a failure
    in the suite inventory are different facts and should not be reported as one
    number in one place.
-3. `scoring_docs_check.py` is already misnamed -- it now covers the READMEs too,
+3. `docs_claims_check.py` is already misnamed -- it now covers the READMEs too,
    which was flagged to the document owner. Adding a fourth concern to it makes
    the name wronger, not righter.
 
@@ -112,7 +112,7 @@ INVENTORY = [
     "prep_check.py",
     "representation_geometry_check.py",
     "scoring_cross_check.py",
-    "scoring_docs_check.py",
+    "docs_claims_check.py",
     "structure_bond_check.py",
     "viewport_framing_check.py",
     "workbench_interaction_check.py",
@@ -159,7 +159,7 @@ IN_FLIGHT = {
 }
 MAX_IN_FLIGHT = 2
 
-EXPECTED_CHECKS = 58  # measured: a green run of this file, including the two self-checks at the bottom that read it
+EXPECTED_CHECKS = 60  # measured: a green run of this file, including the two self-checks at the bottom that read it
 
 #: The scripts that currently have no `EXPECTED_CHECKS`, with the count each one
 #: actually ran here. This is a **ratchet, not a whitelist**: see
@@ -180,12 +180,11 @@ UNPINNED_BASELINE = {
     "examples_check.py": 19,
     "ligand_check.py": 105,
     "prep_check.py": 95,
-    "structure_bond_check.py": 85,
     "viewport_framing_check.py": None,  # GUI; no context on this machine
     "x11_window_parse_check.py": 11,
 }
 
-#: The ratchet. Thirteen scripts are unpinned today; that is a fact about the
+#: The ratchet. Twelve scripts are unpinned today; that is a fact about the
 #: repository, not a decision this file endorses. `MAX_UNPINNED_SCRIPTS` is the
 #: count the check holds them to, so:
 #:
@@ -195,15 +194,22 @@ UNPINNED_BASELINE = {
 #:   * nothing here can make the debt smaller without someone editing a pin.
 #:
 #: Lowering it is the owner's call, not this file's.
-MAX_UNPINNED_SCRIPTS = 13
+MAX_UNPINNED_SCRIPTS = 12
 
 #: The same ratchet, for the other kind of debt: a pin that exists and is
 #: compared, but carries no note saying where the number came from. An
 #: unjustified pin is a transcribed number, which is the failure this repository
 #: keeps meeting -- `scoring_cross_check.py` holds its own `WEIGHTS` literal for
-#: exactly that reason, and six of the eight pins here say "measured" in a
-#: comment.
-#: The ones that do not are listed, not silently tolerated.
+#: exactly that reason.
+#:
+#: **Empty, and every pin here now carries a note.** `cli_check.py` and
+#: `workbench_interaction_check.py` were the last two, and both were false reds
+#: caused by `pin_of` reading only the comment on the constant's own line and not
+#: the `#:` block above it -- this repository's house style for saying something at
+#: length. The reader was fixed; the vocabulary was not widened, because a
+#: mutation narrowing it straight back stayed green and proved the widening was
+#: unnecessary. The rule to keep: fix the reader before you loosen the rule.
+#: The ones that lack a note would be listed here, not silently tolerated.
 UNJUSTIFIED_PINS: dict[str, str] = {}
 MAX_UNJUSTIFIED_PINS = 0
 
@@ -433,14 +439,16 @@ for name, value, comment in sorted(pinned):
     # repository keeps meeting elsewhere.
     # `PROVENANCE_RE` is a **proxy**, not the requirement. The requirement is
     # "there is a note saying where this number came from"; the regex only
-    # recognises some ways of writing one. It was widened during this round
-    # because it produced two false reds on numbers that are in fact documented:
-    # `cli_check.py` and `workbench_interaction_check.py` both explain the
-    # constant in a `#:` block above it, which `pin_of` used to be blind to, and
-    # the second says "calibrated" rather than "measured". Both defects are in
-    # the rule, not in the notes. Widening the keyword set is still a judgement
-    # call -- it can be narrowed again in one line -- so it is named here rather
-    # than inlined at three separate call sites, which is what it was before.
+    # recognises some ways of writing one. It reads only its own set of words, and
+    # that set was deliberately left alone during this round even though it looked
+    # too narrow: two pins here are documented in a `#:` block above the constant,
+    # which `pin_of` used to be blind to, and the obvious response was to widen
+    # the keywords as well. A mutation narrowing it back proved that unnecessary --
+    # both notes now say "measured" -- so the real defect was in `pin_of`, and
+    # widening the vocabulary to paper over a reader bug would have loosened a
+    # rule for a reason that turned out to be false. Named in one place because it
+    # was previously spelled three slightly different ways at three call sites,
+    # which is how a rule quietly stops being one rule.
     justified = bool(PROVENANCE_RE.search(comment))
     check(
         justified or name in UNJUSTIFIED_PINS,
@@ -707,7 +715,7 @@ SITE_INVENTORY = {
     # nobody reads a diff for.
     "scoring_cross_check.py": (21, 0, [
     ]),
-    "scoring_docs_check.py": (44, 7, [
+    "docs_claims_check.py": (44, 7, [
         'for (doc_name, engine_name)',
         'for (doc_name, engine_name)',
         'for (element, want)',
@@ -949,8 +957,9 @@ SKIP_CONVENTION = {
         "records the skip in its own list, keeps it out of CHECKS, and prints the "
         "count beside the pass count",
     "structure_bond_check.py":
-        "prints a [SKIP] line and records nothing anywhere, by its own docstring's "
-        "choice, so its 'N passed' is the same with or without RDKit",
+        "records the skip in its own list, counts it into the pinned total, and "
+        "prints pass/fail/skip as three separate numbers that never sum to a "
+        "verdict; the total is asserted to partition into the three",
     "viewport_framing_check.py":
         "records the skip as a third tag, counts it on a separate counter, and "
         "turns zero passes into 'did not finish' (exit 2)",
@@ -959,16 +968,21 @@ SKIP_CONVENTION = {
         "the same number on every machine",
 }
 
-#: One gate names `skip()` but never reports a skip count, so its summary cannot
-#: distinguish a pass from a non-answer. A ratchet, for the usual reason: the fix
-#: is a three-line edit in a file this one does not own, so the debt is recorded
-#: and printed rather than asserted into a red the owner has to clear first.
-UNNAMED_SKIP_TALLIES = {
-    "structure_bond_check.py":
-        "defines skip() and prints a [SKIP] line, but appends nothing and counts "
-        "nothing, so its 'N passed' is the same whether or not RDKit was there",
-}
-MAX_UNNAMED_SKIP_TALLIES = 1
+#: Gates that name a skip but whose summary cannot account for it, so their
+#: tally reads the same whether or not the check happened. A ratchet.
+#:
+#: **Empty, and the emptiness is not a claim that nothing is owed.** The only
+#: entry was `structure_bond_check.py`, which has been repaired: its `skip`
+#: now records, counts into the pinned total, and the summary prints
+#: pass/fail/skip as three numbers asserted to partition that total. Read this
+#: as "the last known debt was paid", not as "the debt is zero" -- the
+#: limitation note at the assertion below is the load-bearing part of this
+#: entry.
+#:
+#: Keep the dict. An empty ledger and no ledger are different things, and only
+#: one of them records that anyone looked.
+UNNAMED_SKIP_TALLIES: dict[str, str] = {}
+MAX_UNNAMED_SKIP_TALLIES = 0
 
 
 def _defines_skip(path: Path) -> bool:
@@ -1053,12 +1067,37 @@ check(
 # whether or not the check happened. Ratcheted, for the usual reason -- the fix is
 # three lines in a file this one does not own, so the debt is recorded and printed
 # rather than asserted into a red its owner has to clear first.
+#
+#: **LIMITATION, and it is not fixable in this file: this ratchet fails only when
+#: the set GROWS.** Deleting an entry -- which is exactly what a well-meaning
+#: person does once they have fixed the file -- makes this check pass, and there
+#: is no staleness test here to notice. The other two ratchets in this file both
+#: have one (`UNPINNED_BASELINE` is cross-checked against the pins on disk;
+#: `UNJUSTIFIED_PINS` against `PROVENANCE_RE`), and it is tempting to write a
+#: third. It cannot be done, and the reason is worth more than the check would
+#: have been: whether a skip is counted is not a property of the source that a
+#: parser can be asked for. It is a property of the *relationship* between the
+#: skip and the total, and the ways to express that relationship -- an append in
+#: the body, a delegate to a `record` helper, a wrapper that converts a check
+#: into a skip, a counter summed into the headline -- are not distinguishable by
+#: looking for one token. An earlier version of this section tried, and had to be
+#: thrown away: it could not see `viewport_framing_check.skip` (which records by
+#: calling `record`) and it read a `len(results)` in a *comment* as evidence that
+#: a skip counted toward the total. A staleness test built on that would have
+#: reported the debt as fixed and as unpaid in the same breath.
+#:
+#: So the honest state is this: the ratchet catches a file *gaining* an
+#: uncounted skip, and it cannot catch a file quietly leaving the list. If
+#: `UNNAMED_SKIP_TALLIES` is ever empty, the correct reading is "nobody has
+#: looked", not "nobody owes anything". The label in `SKIP_CONVENTION` is the
+#: record of the human reading, and the way to keep that honest is to re-read it
+#: when a file's summary changes -- not to trust this dict.
 _now_unnamed = sorted(
     n for n in _found if n in UNNAMED_SKIP_TALLIES
 )
 check(
     len(_now_unnamed) <= MAX_UNNAMED_SKIP_TALLIES,
-    "no more than 1 gate has a skip() its summary cannot account for",
+    "no gate has a skip() its summary cannot account for",
     f"{len(_now_unnamed)} in UNNAMED_SKIP_TALLIES against a cap of "
     f"{MAX_UNNAMED_SKIP_TALLIES}: {_now_unnamed}. Same ratchet as the others -- "
     f"give the summary a skip count, drop the entry, lower the cap",
@@ -1069,6 +1108,57 @@ check(
     "every recorded unnamed-skip tally is still a gate that defines skip()",
     f"{sorted(UNNAMED_SKIP_TALLIES)}",
 )
+
+# ==========================================================================
+section("the probe-once wrapper, described so another file can copy it")
+
+#: THE PATTERN. `workbench_interaction_check.py` has 134 guarded call sites and
+#: gets the right answer anyway, which is the whole point of writing it down.
+#: Its shape, in four parts:
+#:
+#:   1. Decide the environment question **once**, at the point where the answer
+#:      is first available, and store it in a module-level flag:
+#:
+#:          PIXELS_OK = probe_framebuffer(win)   # or whatever the question is
+#:
+#:      The flag is assigned in one place. That is what makes it a fact about the
+#:      run rather than a condition re-evaluated at 134 different moments, and it
+#:      is why the answer cannot differ between two checks in the same run.
+#:
+#:   2. Route every affected check through a wrapper that consults the flag and
+#:      otherwise delegates unchanged:
+#:
+#:          def pixel_check(name, ok, detail=""):
+#:              if not PIXELS_OK:
+#:                  return skip(name, "the framebuffer read back blank in this environment")
+#:              return check(name, ok, detail)
+#:
+#:      Note the shape: the wrapper takes the *same* arguments as `check`, so
+#:      converting a call site is a one-word edit and the verdict is still
+#:      computed -- it is just not *reported* when the environment cannot support
+#:      it. The alternative, guarding each call site with its own `if`, is what
+#:      produces 134 separate decisions that can disagree with each other.
+#:
+#:   3. Make `skip` a result, not an absence. The wrapper's `return skip(...)` is
+#:      why the file reaches its pinned total on a machine with no OpenGL: the
+#:      skip is recorded and counted, so the sum is unchanged and only the
+#:      composition of the number moves. This is the `counts` convention, and
+#:      `structure_bond_check.py` now does the same with one flag it does not yet
+#:      need.
+#:
+#:   4. Escalate the *all-or-nothing* case, and only that case. A run with 3 skips
+#:      and 40 passes is a partial result and should report a verdict; a run with
+#:      0 passes measured nothing and must not be able to report success. The
+#:      rule `if npass == 0: exit 2` captures exactly that, and it is the form to
+#:      copy: **exit 2 means "this run measured nothing", not "this run skipped
+#:      something".** A file that escalates on skips alone will go red on every
+#:      headless machine and be switched off within a week.
+#:
+#: What to copy this for: `cli_check.py`'s 32 `try:else` sites, `pockets_check.py`'s
+#: `if cavern` / `if cavities`, `prep_check.py`'s `if made is None`. What not to
+#: do with it: apply it to a `for` loop over test cases. A loop over a fixed set
+#: of inputs is not an environment question, and turning its iterations into skips
+#: would make a data set look like a broken machine.
 
 print()
 print("  skip() -- what each gate's skip does to its tally:")

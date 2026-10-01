@@ -162,9 +162,61 @@ except ImportError:  # pragma: no cover - only on an uninstalled checkout
 
 from opendocking import pdbqt_writer as W  # noqa: E402
 from opendocking.core import (  # noqa: E402
-    GridBox, Ligand, Receptor, conformation_coordinates, score_conformation,
-    scoring_descriptions,
+    GridBox, Ligand, Receptor, conformation_coordinates, load_ligand,
+    score_conformation, scoring_descriptions, typed_ligand_from_tables,
 )
+# `prep` imports RDKit lazily inside its functions, so importing the module
+# here does not make this file depend on RDKit being installed. That matters:
+# the checks below that use it are about the prepared path, and a suite that
+# could not be imported without an optional dependency would be skipped
+# exactly where the typing logic lives.
+from opendocking.prep import prepare_ligand  # noqa: E402
+
+
+def _atom_lines(text: str) -> list[str]:
+    """The ATOM/HETATM records of a PDBQT document, in order."""
+    return [l for l in text.splitlines() if l.startswith(("ATOM", "HETATM"))]
+
+
+def _round_trip_text(*tables) -> str:
+    """The PDBQT text `typed_ligand_from_tables` carries the types through.
+
+    Returned alongside the ligand so a caller can assert on the *carrier* and
+    the *engine's reading of it* separately -- the first is a string
+    comparison needing neither the engine nor a map, which is the only guard
+    that cannot be satisfied by both sides drifting together.
+    """
+    return typed_ligand_from_tables(*tables)[1]
+
+
+# --- three ways the type carrier could silently do its job wrong ----------
+# Applied to the PDBQT text rather than to Rust, because the guard under test
+# is "the prepared path and the file path produce the same classes" and a
+# broken carrier is exactly what would break it. Each is a mistake the round
+# trip could make and never notice: no type written, an acceptor flattened to
+# a plain oxygen, and a polar hydrogen dropped from the branch that is what
+# makes a donor visible.
+def _mut_blank_type(text: str) -> str:
+    return "\n".join(
+        l[:W._COL_TYPE[0]] + "  " if l.startswith(("ATOM", "HETATM")) else l
+        for l in text.splitlines()) + "\n"
+
+
+def _mut_flatten_acceptor(text: str) -> str:
+    out = []
+    for l in text.splitlines():
+        if (l.startswith(("ATOM", "HETATM"))
+                and l[W._COL_TYPE[0]:].strip() in ("OA", "NA")):
+            l = l[:W._COL_TYPE[0]] + " O"
+        out.append(l)
+    return "\n".join(out) + "\n"
+
+
+def _mut_drop_polar_h(text: str) -> str:
+    return "\n".join(
+        l for l in text.splitlines()
+        if not (l.startswith(("ATOM", "HETATM"))
+                and l[W._COL_TYPE[0]:].strip() == "HD")) + "\n"
 
 #: How many checks this file is supposed to run, counted by running it.
 EXPECTED_CHECKS = 21  # measured; the reference is a spec check, not Vina
@@ -316,9 +368,50 @@ def at(lig, rec, distance=PROBE_AT, box=PROBE_BOX):
 FIT_HALF = 7.0
 FIT_BOX = GridBox((-FIT_HALF, -FIT_HALF, -FIT_HALF), (FIT_HALF, FIT_HALF,
                                                      FIT_HALF))
+# --------------------------------------------------------------------------
+# Where the hydrogen actually went, and why the spec's "H is 0" is not a
+# disagreement with the engine
+# --------------------------------------------------------------------------
+#
+# **Measured, and it is the reason the C...H crossing cannot be read as a
+# radius.** The ten groups are ten *element* radii -- the smallest is 1.212 A
+# and nothing in the ladder is near zero -- so there is no hydrogen group to
+# have a radius at all. A C...H zero crossing is therefore built out of the ten
+# element radii, dominated by the carbon group's 1.910 A, and the
+# `crossing - 2 * R_C` residual this file prints is an arithmetic difference,
+# not a distance. Printing it as a radius was the first draft of this check's
+# wording and it was wrong.
+#
+# **Read from the implementation, not measured, and labelled as such** because
+# this file is otherwise written from `docs/SCORING.md` alone and opening the
+# Rust to settle a discrepancy would destroy the only thing that makes it a
+# cross-check. `dock-core/src/types.rs:202-204` gives the engine's reason for
+# keeping hydrogen at zero: "Hydrogens keep a radius of 0: the only hydrogens a
+# PDBQT retains are polar ones, and they sit *on* their own heavy-atom donor, so
+# giving them a radius would make every ordinary hydrogen bond register as an
+# overlap." So the spec's "H is 0" and the measured ladder do not conflict: the
+# spec is describing a radius the engine never tabulates, because the hydrogen
+# is scored through the heavy atom it is attached to, not as a body of its own.
+# What is measurable -- and measured above -- is only that no group is near
+# zero. **The two claims are different in kind and are kept apart here on
+# purpose.**
+#: A second, deliberately different annulus. Two fits that differ only in which
+#: grid points they use give this file its own noise floor: a value that moves
+#: by more than the tolerance is not being measured, and a tolerance that is not
+#: comfortably above the noise floor is not testing anything. The tolerance is
+#: asserted against this number rather than trusted, so loosening it is a
+#: failure the check can see.
+FIT_ANNULUS = (0.6, 5.0)
+FIT_ANNULUS_ALT = (1.0, 4.2)
+#: The element whose spec radius anchors the fit's absolute scale. The fit
+#: measures `R_group + R_receptor`, so this is the one subtraction that turns a
+#: shift into a radius, and it is named rather than written inline so that the
+#: places that depend on it are visible.
+C_GRID_TYPE_ANCHOR = "C"
 
 
-def group_radii(atom_type: str = "C") -> list[float]:
+def group_radii(atom_type: str = "C",
+                annulus: tuple[float, float] = FIT_ANNULUS) -> list[float]:
     """Recover the XS radius each of the ten map groups is built with.
 
     A group's field is the spec's pair function evaluated at
@@ -329,11 +422,31 @@ def group_radii(atom_type: str = "C") -> list[float]:
     probe that reads a group does not depend on the receptor: every group is
     read by every probe now, so the same ten radii serve all of them.
 
+    The subtraction at the end is what turns a shift into a radius, and it is
+    the only place this function depends on the spec: the fit measures
+    ``R_group + R_atom``, and ``R_atom`` is taken from `XS_RADIUS`. So the
+    spec has to state a radius for the receiver's element, and when it does not
+    this raises rather than guessing -- a default anchor would shift all ten
+    numbers by the same amount and look like ten correct answers. It raises
+    rather than returning `None` because a silent `None` here becomes a
+    plausible-looking list of radii downstream.
+
     This is the mechanism behind most of what follows, and it is measured
     rather than read out of the implementation for the reason the rest of this
     file is written the way it is: the spec is the reference, and a constant
     the spec states is a prediction to be falsified, not a value to be copied.
     """
+    receiver = atom_type[0]
+    if receiver not in XS_RADIUS:
+        raise ValueError(
+            f"cannot anchor the fit for a {receiver!r} receptor: the fit measures "
+            f"R_group + R_receptor, and docs/SCORING.md 3.2.1 states no XS "
+            f"radius for {receiver!r}, so there is no anchor. It states "
+            f"{sorted(XS_RADIUS)}; pass a receiver whose element is in that list, "
+            f"or add a value you have measured -- do not let this fall back to a "
+            f"default, because a wrong anchor moves all ten radii by the same "
+            f"amount and reads as ten correct answers"
+        )
     maps = rec_of(atom_type).precalculate(FIT_BOX, "vina")
     nx, ny, nz = maps.dims
     step = maps.spacing
@@ -343,18 +456,18 @@ def group_radii(atom_type: str = "C") -> list[float]:
     # The grid is clamped near the nucleus and is identically zero past the
     # map's cutoff; neither is part of the pair function, so both are excluded
     # rather than fitted around.
-    annulus = (radius > 0.6) & (radius < 5.0)
-    rs = radius[annulus]
+    annulus_mask = (radius > annulus[0]) & (radius < annulus[1])
+    rs = radius[annulus_mask]
     shifts = np.arange(1.5, 4.6, 0.0025)
     out = []
     for g in range(10):
-        vals = per[annulus, 4 * g]
+        vals = per[annulus_mask, 4 * g]
         unclamped = np.abs(vals) < 100.0
         d, v = rs[unclamped], vals[unclamped]
         rms = [float(np.sqrt(np.mean(
             (reference_pair(d - s, apolar=True)["total"] - v) ** 2)))
             for s in shifts]
-        out.append(float(shifts[int(np.argmin(rms))]) - XS_RADIUS[atom_type])
+        out.append(float(shifts[int(np.argmin(rms))]) - XS_RADIUS[receiver])
     return out
 
 
@@ -574,49 +687,116 @@ def main() -> int:
                                   None, ["OA_O1"]), 1.0, 8.0)
     # The mechanism behind the sentence below, measured rather than asserted:
     # fit each group's field against the spec's own pair function and read the
-    # shift off as a radius. Groups 0-2 come back as the spec's carbon, nitrogen
-    # and oxygen, so the ten groups are ten *element radii* and the crossing
-    # above is where their mixture reaches zero.
+    # shift off as a radius. All ten are pinned, not the first three.
+    #
+    # Two independent numbers come out of that fit and they are worth keeping
+    # apart, because conflating them is how a good measurement becomes a bad
+    # one. The ten *absolute* radii are checked against a written-down table,
+    # and the ten *differences* are checked against the spec's own radii, taken
+    # from group 0 so that anything common to all ten cancels. The second is
+    # not a restatement of the first: it is a prediction made from
+    # `docs/SCORING.md` alone, and it would survive every entry in `LADDER`
+    # being wrong in the same direction by the same amount.
+    #
+    # There is a third property, and it is the one that catches a single group
+    # changing without any literal being updated: the ten agree *with each
+    # other* to a few thousandths of an angstrom, far below the tolerance. A
+    # per-group change to one radius shows up as a non-uniform offset even when
+    # the changed value would still sit inside the tolerance.
     radii = group_radii("C")
-    radii_drift = {i: (round(r, 3), XS_RADIUS.get(e, r))
-                   for (i, e), r in zip(
-                       enumerate(("C", "N", "O")), radii) if abs(
-                           r - XS_RADIUS[e]) > 0.05}
+    radii_alt = group_radii("C", FIT_ANNULUS_ALT)
+    #: This file's own noise floor, measured by refitting against a different
+    #: annulus. A tolerance that does not sit above it is not testing anything,
+    #: so the check asserts the relationship rather than assuming it.
+    radii_noise = max(abs(a - b) for a, b in zip(radii, radii_alt))
+    #: The ten radii as measured, in group order. **This is the claim**: a
+    #: written-down table the engine then has to match, mutated below to prove
+    #: the match is not a tautology.
+    LADDER = (1.910, 1.760, 1.610, 2.110, 2.010,
+              1.555, 1.957, 2.230, 2.360, 1.212)
+    #: How far a measured radius may sit from `LADDER` before it counts as
+    #: different. Above the noise floor by an order of magnitude and below the
+    #: smallest gap between any two entries, so it discriminates every pair.
+    LADDER_TOLERANCE = 0.05
+    ladder_drift = {g: (round(r, 3), LADDER[g], round(r - LADDER[g], 4))
+                    for g, r in enumerate(radii)
+                    if abs(r - LADDER[g]) > LADDER_TOLERANCE}
+    #: The offset between measurement and table, measured rather than assumed:
+    #: the spread of `measured - written` across all ten groups. The ten agree
+    #: with each other far more closely than the tolerance, which is what makes
+    #: this a structural guard rather than a restatement of the table: a change
+    #: to one group's radius breaks the uniformity even if the value it changed
+    #: to happened to stay inside the tolerance.
+    bias = [round(r - LADDER[g], 4) for g, r in enumerate(radii)]
+    bias_spread = max(bias) - min(bias)
+    #: The spec-anchored half, which is a *different* prediction from the same
+    #: data and does not need any of the ten literals. SCORING.md 3.2.1 names
+    #: five elements; hydrogen is not one of the ten groups, so four of the ten
+    #: have a spec value to be compared against. Differences from group 0, so
+    #: the fit bias cancels on both sides.
+    spec_drift = {e: (round(radii[g] - radii[0], 3),
+                      round(XS_RADIUS[e] - XS_RADIUS["C"], 3))
+                  for g, e in enumerate(("C", "N", "O", "P", "S", "F"))
+                  if e in XS_RADIUS
+                  and abs((radii[g] - radii[0])
+                          - (XS_RADIUS[e] - XS_RADIUS["C"])) > 0.02}
     check("the C...H zero crossing is far from the 1.9 A the spec's formula "
-          "gives, and it is now a property of the receptor's element rather "
-          "than of a hydrogen radius",
+          "gives, and all ten group radii are pinned, not the first three",
           h_radius > 0.4
           and h_bare == h_cross and h_two_c == h_cross
           and h_cross > n_cross > o_cross
           and max(h_cross, n_cross, o_cross) < 7.99
-          and not radii_drift,
+          and not ladder_drift and not spec_drift
+          and radii_noise < LADDER_TOLERANCE
+          and LADDER_TOLERANCE < 0.5
+          and bias_spread < 0.02
+          and len(LADDER) == 10,
           f"a C...H pair crosses zero at r = {h_cross:.3f} A, which is "
           f"{h_radius:.3f} A past the {2 * XS_RADIUS['C']:.2f} A that "
-          f"SCORING.md 3.2.1's formula gives for an H radius of 0. **What the "
-          f"number is not, stated before it is used:** a per-atom hydrogen "
-          f"radius. The ten groups are built with ten different radii, and a "
-          f"probe now sums all ten: fitting each group's field against the "
-          f"spec's own pair function recovers "
-          f"{', '.join(f'{r:.2f}' for r in radii[:3])} A for the first three "
-          f"against the spec's 1.9 / 1.75 / 1.6 (drift {radii_drift or 'none'}"
-          f"), so {h_cross:.2f} A is where a *mixture* of ten radii crosses "
-          f"zero, not where any one of them does. Two things that should not "
-          f"matter do not, bitwise: a bare `H` gives {h_bare!r} and a "
-          f"two-carbon receptor gives {h_two_c!r}, both exactly {h_cross!r}. "
-          f"**And the third thing that used to not matter now does:** against "
-          f"the same lone carbon an `N` probe crosses at {n_cross:.3f} A and "
-          f"an `O` probe at {o_cross:.3f} A, where before the element "
-          f"partition was removed neither crossed anywhere in 1-8 A and the "
-          f"bisection returned its 8.00 A bound. They cross in the order the "
-          f"spec's XS radii predict -- C 1.9 > N 1.75 > O 1.6, so the smaller "
-          f"the receptor's radius the further in the probe's own repulsion "
-          f"takes over -- and that ordering is the cross-element coupling that "
-          f"was missing. **Reported, not diagnosed.** No binding exposes a "
-          f"radius and `score_conformation` returns a total, so this file "
-          f"cannot invert the ten-group mixture and does not claim the "
-          f"residual after the repulsion wall is the spec's g1/g2/hyd terms "
-          f"rather than a normalisation; the claim is an ordering and a "
-          f"distance, not a decomposition")
+          f"SCORING.md 3.2.1's formula gives for an H radius of 0. **What that "
+          f"residual is not, stated before it is used:** a hydrogen radius. "
+          f"Fitting each of the ten groups against the spec's own pair function "
+          f"gives "
+          + ", ".join(f"g{g} {r:.3f}" for g, r in enumerate(radii))
+          + f" A. **The smallest of the ten is {min(radii):.3f} A, and there "
+            f"is no group near zero** -- which is the measurement behind the "
+            f"next paragraph. Drift from the written table: "
+            f"{ladder_drift or 'none'}, at a tolerance of "
+            f"{LADDER_TOLERANCE} A. **The tolerance is itself checked, and the "
+            f"noise floor it has to clear is measured here rather than "
+            f"assumed:** refitting against a different annulus "
+            f"({FIT_ANNULUS_ALT} instead of {FIT_ANNULUS}) moves the ten values "
+            f"by at most {radii_noise:.4f} A, and the check requires that to be "
+            f"below the tolerance *and* the tolerance to stay under 0.5 A. A "
+            f"tolerance wide enough to swallow the numbers is not a check, and "
+            f"loosening this one is now a failure it can see. **The bias is a "
+            f"single constant the ten agree on, which is a second guard the "
+            f"table does not give:** measured minus written is {bias}, a spread "
+            f"of {bias_spread:.4f} A across all ten, so the ten agree with each "
+            f"other far more closely than the tolerance, and a change to any one "
+            f"change to any one group's radius would break the uniformity even "
+            f"if the value it changed to stayed inside the tolerance. "
+            f"**And the spec's own four values, as differences from group 0:** "
+            f"the radius differences cancel any offset common to all ten: "
+            f"{', '.join(f'{e} {radii[g] - radii[0]:+.3f} vs {XS_RADIUS[e] - XS_RADIUS[C_GRID_TYPE_ANCHOR]:+.3f}' for g, e in enumerate(('C', 'N', 'O', 'P', 'S')) if e in XS_RADIUS)}"
+            f" (drift {spec_drift or 'none'}). Two things that should not matter "
+            f"do not, bitwise: a bare `H` gives {h_bare!r} and a two-carbon "
+            f"receptor gives {h_two_c!r}, both exactly {h_cross!r}. **And the "
+            f"third thing that used to not matter now does:** against the same "
+            f"lone carbon an `N` probe crosses at {n_cross:.3f} A and an `O` "
+            f"probe at {o_cross:.3f} A, where before the element partition was "
+            f"removed neither crossed anywhere in 1-8 A and the bisection "
+            f"returned its 8.00 A bound. They cross in the order the spec's XS "
+            f"radii predict -- C 1.9 > N 1.75 > O 1.6, so the smaller the "
+            f"receptor's radius the further in the probe's own repulsion takes "
+            f"over -- and that ordering is the cross-element coupling that was "
+            f"missing. **Reported, not diagnosed.** No binding exposes a radius "
+            f"and `score_conformation` returns a total, so this file cannot "
+            f"invert the ten-group mixture and does not claim the residual "
+            f"after the repulsion wall is the spec's g1/g2/hyd terms rather than "
+            f"a normalisation; the claim is an ordering and a distance, not a "
+            f"decomposition"
+    )
 
     # ------------------------------------------------------------------
     section("the configurations a wrong implementation gets wrong")
@@ -1303,7 +1483,10 @@ def main() -> int:
             f"a file and cannot be an acceptor in memory at all. **An earlier "
             f"revision of this check ended there, on the claim that nothing in "
             f"tree is broken because every caller writes a file before scoring. "
-            f"That was wrong, and the next two checks are why.**")
+            f"That was wrong twice over. The caller did not write a file, and "
+            f"the next two checks are why; and when it was finally made to, the "
+            f"in-memory path was changed to match rather than the file path "
+            f"changed to match the in-memory one.**")
 
     # --- is the type-losing entry point actually reachable? ----------------
     #
@@ -1386,10 +1569,9 @@ def main() -> int:
     _s_arrays = float(score_conformation(
         _pose_untyped, _pm, np.zeros(_pose_untyped.num_dof))[0])
     _acceptor_cost = _s_file - _s_arrays
-    check(f"the type-losing entry point is reachable: the same molecule has no "
-          f"acceptor through from_arrays and {_n_acc['file']} through the file "
-          f"reader, and on the shipped pose the difference is "
-          f"{_acceptor_cost:+.3f} kcal/mol",
+    check(f"the limitation is `from_arrays`' own and still costs "
+          f"{_acceptor_cost:+.3f} kcal/mol: the same molecule has no acceptor "
+          f"through it and {_n_acc['file']} through the file reader",
           _n_acc["file"] > 0 and _n_acc["from_arrays"] == 0
           and _file_classes != _array_classes
           and len(_el) == _via_file.num_atoms == _via_arrays.num_atoms
@@ -1402,9 +1584,8 @@ def main() -> int:
           f"{_n_acc['from_arrays']} -> {_n_acc['file']}. The two carboxyl "
           f"oxygens are `other` through from_arrays, and an `other` atom reads "
           f"the steric slot and nothing else, so this is not a milder "
-          f"classification but a different one. This was previously written off "
-          f"with the claim that every caller writes a file first. **What it "
-          f"costs:** the shipped crambin pose, {len(_p_el)} atoms at identical "
+          f"classification but a different one. **What it costs:** the shipped "
+          f"crambin pose, {len(_p_el)} atoms at identical "
           f"coordinates, in the field of `examples/1crn_prep.pdbqt` in a 24 A "
           f"box centred on the ligand, scores {_s_file:+.6f} through the file "
           f"reader and {_s_arrays:+.6f} through `from_arrays` -- a difference "
@@ -1413,13 +1594,21 @@ def main() -> int:
           f"one carboxylate oxygen that is an `acceptor` in one case and `other` "
           f"in the other. The typed score is bitwise the same number the "
           f"previous section measured for the same pose and the same box, which "
-          f"is asserted rather than hoped for. **The shape of this error "
-          f"changed when the engine's element partition was removed:** before "
-          f"that fix a cross-element hydrogen bond was worth exactly 0.000000 "
-          f"for *everyone*, so this difference was 0.000000 too and the defect "
-          f"was harmless in tree. It is now the full price of the missing "
-          f"acceptor channel, and a `.sdf` or `.mol2` ligand reaches the "
-          f"engine paying it")
+          f"is asserted rather than hoped for. **What has changed, and what has "
+          f"not:** the number is unchanged, because `from_arrays` is unchanged "
+          f"-- it still cannot type an atom. What changed is reachability. This "
+          f"check used to be titled \"the type-losing entry point is "
+          f"reachable\", and it was: `rec-grid dock something.sdf` did reach the "
+          f"engine through `from_arrays` with no acceptors, for exactly this "
+          f"cost. `load_ligand` and `prep-ligand` no longer ask it to -- the "
+          f"next check is that equality -- so this is now the price of calling "
+          f"`from_arrays` **directly**, a statement about the API rather than "
+          f"about what docking a `.sdf` does. **The shape of the "
+          f"error also changed when the engine's element partition was removed:** "
+          f"before that fix a cross-element hydrogen bond was worth exactly "
+          f"0.000000 for *everyone*, so this difference was 0.000000 too and "
+          f"the defect was harmless in tree. It is the full price of the missing "
+          f"acceptor channel")
 
     _cli_src = (ROOT / "dock-py" / "python" / "opendocking" / "cli.py").read_text(
         encoding="utf-8")
@@ -1428,29 +1617,152 @@ def main() -> int:
     _dock_fn = _cli_src[_cli_src.index("def _cmd_dock"):]
     _dock_fn = _dock_fn[:_dock_fn.index("\ndef ")] if "\ndef " in _dock_fn \
         else _dock_fn
+    #: `_cmd_prep_ligand`'s **body**, cut the same way, because a regex that runs
+    #: to the end of the file cannot tell a function that uses the round trip
+    #: from one that merely imports it. The first version of the link below was
+    #: `re.search(r"def _cmd_prep_ligand.*?typed_ligand_from_tables", src, re.S)`,
+    #: and a mutation that replaced the call but left the import passed it: the
+    #: name still appeared, just on the import line. Found by mutating the fix
+    #: rather than by reading it, which is the only reason it is now bounded to
+    #: the body and requires a call rather than a mention.
+    _prep_fn = _cli_src[_cli_src.index("def _cmd_prep_ligand"):]
+    _prep_fn = _prep_fn[:_prep_fn.index("\ndef ")] if "\ndef " in _prep_fn \
+        else _prep_fn
+    # --- the fix, and the guards that hold it in place --------------------
+    #
+    # `from_arrays` still cannot type an atom, and that is now a property of
+    # the API rather than a defect in the tool: `load_ligand` and
+    # `prep-ligand` carry the types across the boundary through the type
+    # column, which is what `load_receptor` has always done for receptors
+    # (`core.py:895`, fifteen lines above the function that did not).
+    #
+    # The guard is an **equality**, not a threshold, because that is what the
+    # fix actually is: for the same molecule, the prepared path and the file
+    # path must produce the same interaction classes. Everything below exists
+    # to make that equality hard to satisfy by accident.
     _links = {
         "cli._cmd_dock calls load_ligand":
             bool(re.search(r"ligand\s*=\s*load_ligand\(", _dock_fn)),
         "cli._cmd_dock passes that ligand to dock()":
             bool(re.search(r"dock\(\s*\n?\s*ligand\s*,", _dock_fn)),
-        "core.load_ligand routes non-PDBQT through from_arrays":
+        "core.load_ligand no longer hands prepare_ligand to from_arrays":
+            not re.search(r"def load_ligand.*?from_arrays\(\s*\*\s*prepare_ligand",
+                          _core_src, re.S),
+        "cli._cmd_prep_ligand *calls* the shared round trip, not just imports it":
+            bool(re.search(r"typed_ligand_from_tables\s*\(", _prep_fn))
+            and "from_arrays(" not in _prep_fn,
+        "core.typed_ligand_from_tables is the one implementation both reach":
             bool(re.search(
-                r"def load_ligand.*?from_arrays\(\s*\*\s*prepare_ligand",
-                _core_src, re.S)),
+                r"def typed_ligand_from_tables.*?ligand_to_pdbqt.*?"
+                r"Ligand\.from_pdbqt_str", _core_src, re.S)),
+        "prep-ligand still prints the classes it built":
+            "atom classes" in _prep_fn,
     }
-    check("and the route that loses the types is the one that docks: three "
-          "links, each asserted, with a mutation that would break one of them",
+
+    #: Molecules with a shipped `_prep.pdbqt` beside them. The shipped file is
+    #: the ground truth because it is what the project's own `prep-ligand
+    #: --output` produced, so a difference is a difference from the artifact
+    #: the repository already ships. `polar` says whether the molecule is
+    #: *supposed* to have acceptor-class atoms; the two that are not are the
+    #: negative control, and they are what stops the equality below from being
+    #: satisfiable by typing everything as an acceptor.
+    _PAIRS = {"ibuprofen": True, "phenol": True, "biotin": True,
+              "benzene": False, "toluene": False}
+    _equality, _byte_lines = {}, {}
+    for name, polar in _PAIRS.items():
+        _sdf = ROOT / "examples" / f"{name}.sdf"
+        _ref = ROOT / "examples" / f"{name}_prep.pdbqt"
+        _via_sdf = load_ligand(_sdf)
+        _via_file = load_ligand(_ref)
+        _acc = sum(1 for k in _via_sdf.atom_kinds
+                   if k in ("acceptor", "donoracceptor"))
+        _equality[name] = (
+            _via_sdf.atom_kinds == _via_file.atom_kinds,
+            dict(sorted(collections.Counter(_via_sdf.atom_kinds).items())),
+            _acc, polar,
+            _via_sdf.num_torsions == _via_file.num_torsions)
+        # The engine-independent half: the ATOM lines the round trip writes are
+        # the same text the shipped file contains. This compares strings and
+        # needs no ligand, no map and no score, so it cannot be satisfied by an
+        # engine change that happens to make both sides agree.
+        _byte_lines[name] = (
+            _atom_lines(_round_trip_text(*prepare_ligand(_sdf)))
+            == _atom_lines(_ref.read_text(encoding="utf-8")))
+
+    _wrong = {n: v[1] for n, v in _equality.items() if not v[0]}
+    _tree_wrong = {n: v[1] for n, v in _equality.items() if not v[4]}
+    #: The control, stated as a prediction the engine has to agree with rather
+    #: than as an absence: a polar molecule must have acceptor-class atoms, a
+    #: hydrocarbon must have none. A fix that typed every oxygen as an acceptor
+    #: satisfies the first half and fails the second.
+    _control_wrong = {n: v[1] for n, v in _equality.items()
+                      if (v[2] > 0) != v[3]}
+
+    # --- the three mutations, counted -------------------------------------
+    # The mutators are module-level, next to the carrier helper they break, so
+    # that the byte-identity guard below and the mutation counts here are held
+    # to the same three definitions rather than to two copies of them.
+    def _classes_of(text):
+        try:
+            return Ligand.from_pdbqt_str(text).atom_kinds
+        except Exception as exc:                     # noqa: BLE001
+            return f"raised {type(exc).__name__}"
+
+    _mutations = {}
+    for label, mutate in (("type column blanked", _mut_blank_type),
+                          ("acceptor typed as plain O", _mut_flatten_acceptor),
+                          ("polar hydrogen dropped", _mut_drop_polar_h)):
+        caught = []
+        for name in _PAIRS:
+            ref = Ligand.from_pdbqt_str(
+                (ROOT / "examples" / f"{name}_prep.pdbqt").read_text(
+                    encoding="utf-8"))
+            caught.append(_classes_of(mutate(_round_trip_text(
+                *prepare_ligand(ROOT / "examples" / f"{name}.sdf"))))
+                != ref.atom_kinds)
+        _mutations[label] = f"{sum(caught)}/{len(_PAIRS)}"
+
+    check("the prepared path and the file path now agree exactly, three ways of "
+          "getting there wrong are each caught, and a hydrocarbon is left alone",
           all(_links.values())
-          and not re.search(r"def load_ligand.*?from_arrays",
-                            _core_src.replace("from_arrays", "from_pdbqt"), re.S),
+          and not _wrong and not _tree_wrong and not _control_wrong
+          and all(v for v in _byte_lines.values())
+          and all(m != f"0/{len(_PAIRS)}" for m in _mutations.values()),
           "; ".join(f"{k} = {v}" for k, v in _links.items())
-          + f". This is the check that makes the previous one a defect rather "
-            f"than a curiosity: `rec-grid dock something.sdf` reaches the engine "
-            f"as a ligand with no acceptors. **Mutation:** with "
-            f"`from_arrays` replaced by `from_pdbqt` in core.py the last link "
-            f"reads "
-            f"{not re.search(r'def load_ligand.*?from_arrays', _core_src.replace('from_arrays', 'from_pdbqt'), re.S)}, "
-            f"so the guard is not passing because the regex cannot match",
+          + ". **The equality, which is the whole of the fix:** for the same "
+            "molecule, `load_ligand(\"x.sdf\")` and "
+            "`load_ligand(\"x_prep.pdbqt\")` return the same `atom_kinds` -- "
+          + "; ".join(
+              f"{n} {'==' if v[0] else '!='} ({v[2]} acceptor-class, "
+              f"{'polar' if v[3] else 'HYDROCARBON'}, torsions "
+              f"{'same' if v[4] else 'CHANGED'}) {v[1]}"
+              for n, v in _equality.items())
+          + f". Molecules where they disagree: {_wrong or 'none'}; molecules "
+            f"whose rotatable-bond count the round trip changed: "
+            f"{_tree_wrong or 'none'}. **The guard cannot be satisfied by "
+            f"typing everything as an acceptor:** the three polar molecules "
+            f"have acceptor-class atoms and the two hydrocarbons have none, so "
+            f"both halves have to hold; a fix that typed every oxygen as an "
+            f"acceptor fails the hydrocarbon half "
+            f"({_control_wrong or 'control clean'}). **Engine-independent "
+            f"half:** the ATOM lines the round trip writes are the same text "
+            f"the shipped `_prep.pdbqt` contains, per molecule "
+          + ", ".join(f"{n}={'same' if v else 'DIFFER'}" for n, v
+                      in _byte_lines.items())
+          + " -- a string comparison that no engine change can make pass for "
+            "both sides at once. **Mutations, counted as molecules whose "
+            "classes stop matching once the carrier is broken:** "
+          + "; ".join(f"{k} -> {v}" for k, v in _mutations.items())
+          + ". **The limitation of this route, recorded in "
+            "`core.typed_ligand_from_tables` rather than only here:** the "
+            "writer's type field is two columns wide, so a three-character "
+            "type cannot pass. That is unobservable today -- `NDA` and `ND` are "
+            "bitwise identical ligands, as are `ODA` and `OD` -- and if the "
+            "project ever needs one, the alternative is an optional "
+            "`atom_types` on `from_arrays` in the PyO3 binding and a rebuilt "
+            "extension. **`from_arrays` itself is unchanged and still cannot "
+            "type an atom**; what changed is that the docking path no longer "
+            "asks it to"
     )
 
 

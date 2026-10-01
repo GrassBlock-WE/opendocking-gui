@@ -243,9 +243,27 @@ class TestScoring:
         energy, grad = score_conformation(ligand, maps, conf)
         assert math.isfinite(energy)
         assert np.all(np.isfinite(grad))
-        # A Vina energy is a sum of terms of order 1; a value of 1e6 means the
-        # interpolation or the weights blew up.
-        assert abs(energy) < 100.0, f"implausible energy {energy}"
+        # The pose here is `zeros` -- the ligand at the origin with the identity
+        # rotation, which is *inside* the receptor rather than in a pocket. So
+        # this is a clash energy and always was; what changed is how big it is.
+        # Before the grid's element partition was fixed (defect 190) the zero
+        # pose only felt receptor atoms of its own element, so this number sat
+        # under 100. Now the ligand feels every receptor atom, and it measures
+        # 151.38. The assertion never claimed a docked pose; it claimed "finite
+        # and not blown up", and 1e6 is the signature of blown up.
+        #
+        # So the bound moves to 1e3: 6.6x above the worst value measured here and
+        # three orders of magnitude below the failure mode it exists to catch.
+        # It is deliberately *not* pinned to 151.38 -- pinning the exact value
+        # would make an ordinary tuning change look like an arithmetic bug.
+        assert abs(energy) < 1e3, f"implausible energy {energy}"
+        # And it should read as the clash it is: a zero pose inside the receptor
+        # is repulsive and large. Without this, a number that came back
+        # *negative* would pass the check above just as happily.
+        assert energy > 0.0, (
+            f"the zero pose sits inside the receptor, so it must be repulsive; "
+            f"got {energy}, which reads as an attractive energy for a clash"
+        )
 
     def test_analytic_gradient_matches_finite_difference(self, ligand, maps):
         """The gradient is the engine's core optimisation input.

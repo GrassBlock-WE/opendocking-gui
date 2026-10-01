@@ -645,8 +645,19 @@ def main() -> int:
               f"{values.get('radius')!r} -- that A-ring is the character a GBK "
               "decode would turn into something else")
         classes = dict(p.split("=") for p in values.get("atom classes", "").split(", "))
+        # The classes themselves moved, and the move is the point. This used to
+        # read donor 1 / hydrophobic 13 / other 2, which is what the in-memory
+        # path produced: `from_arrays` derived every type from the element
+        # symbol, so an oxygen was an `other` rather than an acceptor and a
+        # hydroxyl oxygen was a plain `other` rather than a donor-acceptor. The
+        # file path had been getting it right all along -- it round-trips
+        # through PDBQT -- so `prep-ligand` now agrees with
+        # `load_ligand("ibuprofen_prep.pdbqt")`, which is the whole of the fix.
+        # Both copies of the dictionary are still asserted against the atom
+        # count, so a class appearing without an atom to back it up would fail.
         check("the atom classes account for every atom",
-              classes == {"donor": "1", "hydrophobic": "13", "other": "2"}
+              classes == {"acceptor": "1", "donoracceptor": "1",
+                          "hydrophobic": "13", "other": "1"}
               and sum(int(v) for v in classes.values()) == int(values.get("atoms", "0")),
               f"{classes} summing to {sum(int(v) for v in classes.values())}")
 

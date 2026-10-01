@@ -304,7 +304,7 @@ E_total = E_inter + slope · E_intra,    slope = 0.006（vina）/ 0.0075（vinar
 
 > **上一版把这条常量归给 `kinematics.rs`，那个文件里根本没有它**（全文无此标识符）。
 **值 4 是对的，文件名是错的**——按文件去找的读者会找不到。本轮由
-`scripts/scoring_docs_check.py` 同时检查值与文件归属，两半都会红。
+`scripts/docs_claims_check.py` 同时检查值与文件归属，两半都会红。
 
 **偏离 Vina。** Vina 为每个构象临时构建一张配体自身网格再读表。
 本工具直接对预计算的邻居表求和，消除了插值误差——代价是每步多几十次求值，

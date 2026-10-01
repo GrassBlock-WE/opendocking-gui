@@ -307,7 +307,7 @@
 - **没有实测吞吐量数字**。`cargo bench -p dock-core` 可以跑，但本仓库的
   `VERIFICATION.md` 不引用任何 benchmark 结果，因为写它的时候没跑过。
 
-> **本节表格与 §7 的行号引用是有检查的**：`scripts/scoring_docs_check.py`
+> **本节表格与 §7 的行号引用是有检查的**：`scripts/docs_claims_check.py`
 > 把本文的数字**解析出来**（不是另抄一份）再和引擎、`types.rs` / `grid.rs` /
 > `scoring.rs` / `prep.py` 的实际值比对，共 56 项。它刻意**不**持有任何转录常量——
 > 那正是 `scoring_cross_check.py` 的 `WEIGHTS` / `XS_RADIUS` 做的事，

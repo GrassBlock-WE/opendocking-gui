@@ -453,13 +453,20 @@ def _cmd_prep_receptor(args: argparse.Namespace) -> int:
 
 
 def _cmd_prep_ligand(args: argparse.Namespace) -> int:
-    from .core import Ligand
+    from .core import typed_ligand_from_tables
     from .prep import prepare_ligand
 
     elements, charges, coords, bonds, names = prepare_ligand(
         args.ligand, keep_hydrogens=args.keep_hydrogens
     )
-    ligand = Ligand.from_arrays(elements, charges, coords, bonds, names)
+    # The same round trip `load_ligand` performs, and for the same reason: the
+    # tables carry the AutoDock types in the atom names and `from_arrays` cannot
+    # read them. This used to build the ligand untyped and print what came out,
+    # which is how the defect was visible in the CLI's own output -- the classes
+    # printed here are now the classes the engine will score with, and the print
+    # is kept precisely because it is the cheapest way for a user to see them.
+    ligand, pdbqt_text = typed_ligand_from_tables(
+        elements, charges, coords, bonds, names)
 
     print(f"{args.ligand.name}:")
     print(f"  atoms            {ligand.num_atoms}")
@@ -472,12 +479,8 @@ def _cmd_prep_ligand(args: argparse.Namespace) -> int:
     print("  atom classes     " + ", ".join(f"{k}={v}" for k, v in sorted(counts.items())))
 
     if args.output:
-        from .pdbqt_writer import ligand_to_pdbqt
-
         args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(
-            ligand_to_pdbqt(ligand, coords, names), encoding="utf-8"
-        )
+        args.output.write_text(pdbqt_text, encoding="utf-8")
         print(f"  wrote            {args.output}")
     return 0
 
