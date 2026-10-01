@@ -213,6 +213,51 @@ def _draw_colours_for(mol, comparing: bool = False) -> np.ndarray:
     return mol.atom_colors()
 
 
+def _pose_bonds(coords, elements) -> np.ndarray:
+    """Bond pairs for a pose, from the coordinates that are about to be drawn.
+
+    **This is a distance-derived approximation, and the view says so.** Pose
+    views are built by `_view_from_text` rather than by `MoleculeView.from_text`
+    because `_parse_pdbqt_atoms` hands back atoms in *serial* order, which is
+    the order the pose table's RMSD and the docking engine's atom indices both
+    speak; delegating to `from_text` would draw a pose whose bond indices
+    pointed at the wrong atoms on any file whose records are not already in
+    serial order. That is a real reason to build the view here, and it leaves the
+    view with no bonds at all -- which is why ``stick``, a representation that
+    draws bonds and nothing else, showed the receptor and no pose whatsoever.
+    The user picked a pose and the picture had nothing of it in it.
+
+    So the bonds are perceived here, from the same array the renderer will draw,
+    with the house rule from `structure._bondable`: two atoms are bonded when
+    they are closer than the sum of their covalent radii plus 0.45 A. That is
+    the same rule `parse_structure` applies to a ligand that declares no
+    `ROOT`/`BRANCH` tree, and on the shipped example it returns the identical
+    16 pairs for all nine poses, so this is the module's own answer and not a
+    second, laxer one. It is a rule about distances, not a reading of the file:
+    a pose's `ROOT`/`BRANCH` records *are* declared bonds that this does not
+    consult, and `bond_source` stays ``"distance"`` so the status bar prints
+    "inferred from distances" rather than "read from the file". That distinction
+    is the whole reason the field exists.
+
+    `_bondable` is private to `structure`. Reaching for it is deliberate: a
+    second copy of the radius table in this file would be free to drift from the
+    one the receptor was drawn with, and the two views would then disagree about
+    what counts as a bond while both claiming to be right.
+    """
+    from .structure import _bondable
+
+    n = len(coords)
+    pairs = [
+        (i, j)
+        for i in range(n)
+        for j in range(i + 1, n)
+        if _bondable(
+            elements[i], elements[j], float(np.linalg.norm(coords[i] - coords[j]))
+        )
+    ]
+    return np.asarray(pairs, np.int32).reshape(-1, 2)
+
+
 def _walks_wanted(size) -> tuple[float, float]:
     """The ``(requirement, ceiling)`` of the density rule for a box of this size.
 
@@ -2106,7 +2151,16 @@ class MainWindow(QtWidgets.QMainWindow):
     def _view_from_text(self, text, name, color, radius) -> MoleculeView:  # pragma: no cover
         coords, elements = _parse_pdbqt_atoms(text)
         return MoleculeView(
-            name=name, coords=coords, elements=elements, color=color, radius=radius
+            name=name,
+            coords=coords,
+            elements=elements,
+            bonds=_pose_bonds(coords, elements),
+            color=color,
+            radius=radius,
+            # Stated rather than inherited: the default happens to be the same
+            # string, but the default is a coincidence of a dataclass field and
+            # this is a decision about provenance. See `_pose_bonds`.
+            bond_source="distance",
         )
 
     # -- UI callbacks ------------------------------------------------------

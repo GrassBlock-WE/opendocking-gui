@@ -1043,6 +1043,14 @@ def main() -> int:
     donor_reads = [(a_t, b_t, pn) for (a_t, b_t), (_, _, responses)
                    in pair_evidence.items() for pn, got in responses.items()
                    if got and PROBE_CLASS[pn] == "acceptor"]
+    #: The donor slot is read by *something* -- the headline of this check, and
+    #: the one thing here that is not already implied by the rule, since the
+    #: rule decides only *which* probes respond, not whether any do. The count
+    #: is deliberately not asserted: the rule plus a zero disagreement count
+    #: already fixes it, so pinning a number would be a second copy of the same
+    #: fact that could go stale on its own.
+    donor_slot_read_by_someone = [p for p in donor_reads
+                                  if 1 in pair_evidence[(p[0], p[1])][0]]
 
     # --- the fifth class, on the project's own shipped pose ---------------
     # `donoracceptor` needs a bonded polar hydrogen, so no one-atom ligand can
@@ -1113,7 +1121,7 @@ def main() -> int:
           and all(pair_evidence[k][0] == pair_evidence[k][1]
                   for k in pair_evidence)
           and set(pair_groups.values()) == {10}
-          and len(donor_reads) == 2
+          and len(donor_slot_read_by_someone) > 0
           and all(m == 0 if k == "mask as written" else m > 0
                   for k, m in slot_muts.items()),
           "; ".join(
@@ -1126,14 +1134,15 @@ def main() -> int:
               in pair_evidence.items())
           + f". Fixture classes, claimed against `atom_kinds`: "
           + ", ".join(f"{pn}={probes[pn].atom_kinds[0]}" for pn in probes)
-          + f"; drift {class_drift or 'none'}. The decisive pair is **OA vs "
-            f"OS**: one slot, all ten groups, and only the class that reads that "
-            f"slot can tell them apart. "
-          + "; ".join(f"{pn} gives {at(probes[pn], rec_of(a_t)):+.6f} vs "
+          + f"; drift {class_drift or 'none'}. The decisive pairs are the ones "
+            f"that isolate a **single** slot -- an acceptor probe against "
+            f"`OS` vs `O` and against `OD`, a donor probe against `NA` vs `N`: "
+          + "; ".join(f"{a_t}/{b_t} {at(probes[pn], rec_of(a_t)):+.6f} vs "
                       f"{at(probes[pn], rec_of(b_t)):+.6f}"
-                      for a_t, b_t, pn in donor_reads
-                      for a_t, b_t in ((a_t, b_t),)
-                      if (a_t, b_t) in (("OD", "OS"), ("ND", "N")))
+                      for a_t, b_t, pn in (("OA", "O", "OA (via file)"),
+                                           ("OD", "OS", "OA (via file)"),
+                                           ("NA", "N", "N+H"),
+                                           ("OA", "OS", "N+H")))
           + f". **This corrects an earlier revision of this file**, which "
             f"concluded the donor slot was read by nothing on the evidence of "
             f"five oxygen receptors scoring bitwise identically. They did, and "
@@ -1341,11 +1350,52 @@ def main() -> int:
                ("from_arrays", sum(_array_classes[k] for k in
                                    ("acceptor", "donoracceptor")
                                    if k in _array_classes)))}
-    check("the type-losing entry point is reachable: the same molecule has no "
-          "acceptor through from_arrays and two through the file reader",
+    # What the missing channel is worth, in kcal/mol, on a real receptor. The
+    # two ligands are the same 16 atoms at the same coordinates and are scored
+    # in the same field, so the difference between them is the acceptor channel
+    # and nothing else -- no control is needed, because there is no second
+    # variable.
+    #
+    # The pose used is the shipped crambin one rather than the ibuprofen file
+    # above, and that is a fixture requirement rather than a preference: the
+    # ibuprofen coordinates are not a crambin pose, so dropping them into
+    # crambin's field puts the ligand inside the repulsion wall where every
+    # term is swamped and **both** variants score identically to six decimals.
+    # A number that cannot distinguish the thing it is measuring is not a
+    # measurement of it, and the first attempt at this reported +0.000000 for
+    # exactly that reason.
+    _rec_lines = [l for l in (ROOT / "examples" / "1crn_prep.pdbqt").read_text(
+        encoding="utf-8").splitlines() if l.startswith(("ATOM", "HETATM"))]
+    _pose_lines = [l for l in (ROOT / "examples" / "crambin_pose.pdbqt").read_text(
+        encoding="utf-8").splitlines() if l.startswith(("ATOM", "HETATM"))][:16]
+    _p_el, _p_cr, _p_nm = [], [], []
+    for _l in _pose_lines:
+        _tok = _l[77:79].strip()
+        _p_el.append(_TYPE_ELEMENT.get(_tok.upper(), _tok[0] if _tok else "C"))
+        _p_cr.append([float(_l[30:38]), float(_l[38:46]), float(_l[46:54])])
+        _p_nm.append(_l[12:16].strip())
+    _pose_typed = Ligand.from_pdbqt_str("\n".join(_pose_lines) + "\nEND\n")
+    _pose_untyped = Ligand.from_arrays(_p_el, [0.0] * len(_p_el),
+                                       np.array(_p_cr, dtype=float), None, _p_nm)
+    _pm = Receptor.from_pdbqt_str(
+        "\n".join(_rec_lines) + "\nEND\n").precalculate(
+            GridBox(np.array(_p_cr, dtype=float).mean(axis=0) - 12.0,
+                    np.array(_p_cr, dtype=float).mean(axis=0) + 12.0), "vina")
+    _s_file = float(score_conformation(
+        _pose_typed, _pm, np.zeros(_pose_typed.num_dof))[0])
+    _s_arrays = float(score_conformation(
+        _pose_untyped, _pm, np.zeros(_pose_untyped.num_dof))[0])
+    _acceptor_cost = _s_file - _s_arrays
+    check(f"the type-losing entry point is reachable: the same molecule has no "
+          f"acceptor through from_arrays and {_n_acc['file']} through the file "
+          f"reader, and on the shipped pose the difference is "
+          f"{_acceptor_cost:+.3f} kcal/mol",
           _n_acc["file"] > 0 and _n_acc["from_arrays"] == 0
           and _file_classes != _array_classes
-          and len(_el) == _via_file.num_atoms == _via_arrays.num_atoms,
+          and len(_el) == _via_file.num_atoms == _via_arrays.num_atoms
+          and len(_p_el) == _pose_typed.num_atoms == _pose_untyped.num_atoms
+          and _s_file == _pose_base
+          and abs(_acceptor_cost) > 0.1,
           f"ibuprofen, {len(_el)} atoms, via `from_arrays` with "
           f"bonds=None: {dict(sorted(_array_classes.items()))}; via the file "
           f"reader: {dict(sorted(_file_classes.items()))}. Acceptors "
@@ -1353,7 +1403,23 @@ def main() -> int:
           f"oxygens are `other` through from_arrays, and an `other` atom reads "
           f"the steric slot and nothing else, so this is not a milder "
           f"classification but a different one. This was previously written off "
-          f"with the claim that every caller writes a file first")
+          f"with the claim that every caller writes a file first. **What it "
+          f"costs:** the shipped crambin pose, {len(_p_el)} atoms at identical "
+          f"coordinates, in the field of `examples/1crn_prep.pdbqt` in a 24 A "
+          f"box centred on the ligand, scores {_s_file:+.6f} through the file "
+          f"reader and {_s_arrays:+.6f} through `from_arrays` -- a difference "
+          f"of {_acceptor_cost:+.6f} kcal/mol, "
+          f"{abs(_acceptor_cost) / abs(_s_file) * 100:.0f}% of the score, for "
+          f"one carboxylate oxygen that is an `acceptor` in one case and `other` "
+          f"in the other. The typed score is bitwise the same number the "
+          f"previous section measured for the same pose and the same box, which "
+          f"is asserted rather than hoped for. **The shape of this error "
+          f"changed when the engine's element partition was removed:** before "
+          f"that fix a cross-element hydrogen bond was worth exactly 0.000000 "
+          f"for *everyone*, so this difference was 0.000000 too and the defect "
+          f"was harmless in tree. It is now the full price of the missing "
+          f"acceptor channel, and a `.sdf` or `.mol2` ligand reaches the "
+          f"engine paying it")
 
     _cli_src = (ROOT / "dock-py" / "python" / "opendocking" / "cli.py").read_text(
         encoding="utf-8")

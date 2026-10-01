@@ -170,10 +170,36 @@ def main() -> int:
         check("the child process is importing the source tree, not the wheel",
               "--report" in with_tree.stdout and "--keep-chain" in with_tree.stdout,
               "flags that exist only in the edited source are visible to the child")
-        check("and the check is sensitive to that, not merely satisfied by it",
-              "--report" not in without_tree.stdout,
-              "the same flag is absent without PYTHONPATH, so its presence above "
-              "means something")
+        # The intent is to prove the child really imports the source tree. It
+        # used to do that by *contrast*: the installed copy predated the edited
+        # flags, so `--report` was absent without PYTHONPATH and its presence
+        # with it was evidence rather than decoration. That contrast is gone --
+        # `pip install --force-reinstall` aligned the wheel with the tree -- and
+        # a control that can no longer distinguish the two cases is a control
+        # nobody is reading. So the check now demands that whichever case holds
+        # is *explained*, and it verifies the aligned case directly by comparing
+        # the two `cli.py` files byte for byte rather than taking the identical
+        # help text as evidence that they are the same file.
+        inst = subprocess.run(
+            [sys.executable, "-c",
+             "import opendocking, pathlib;"
+             "print(pathlib.Path(opendocking.__file__).parent)"],
+            capture_output=True, text=True, encoding="utf-8",
+            env={k: v for k, v in os.environ.items() if k != "PYTHONPATH"},
+        ).stdout.strip()
+        inst_cli = Path(inst) / "cli.py" if inst else None
+        aligned = bool(
+            inst_cli and inst_cli.is_file()
+            and inst_cli.read_bytes() == (SRC / "opendocking" / "cli.py").read_bytes()
+        )
+        check("and the control either contrasts, or is explained by two identical copies",
+              ("--report" not in without_tree.stdout) or aligned,
+              f"without PYTHONPATH the flag is "
+              f"{'absent' if '--report' not in without_tree.stdout else 'PRESENT'}; "
+              f"the installed cli.py is {inst_cli}, and it is "
+              f"{'byte-identical to' if aligned else 'DIFFERENT from'} the source "
+              f"tree's, so the two cases are "
+              f"{'distinguishable' if not aligned else 'the same file and the contrast is redundant'}")
 
         # -------------------------------------------------------------------
         section("a lossy multi-chain receptor is reported in one line")
@@ -214,16 +240,23 @@ def main() -> int:
               and "RuntimeWarning" not in result.stderr,
               "the command replaced it with its own line; two languages for one "
               "fact is how a message gets ignored")
-        # The flag check above proves the source tree is on the child's path by
-        # what it can parse. This proves it by what it *does*: the same input
-        # through the installed wheel still lets the raw warning through, so the
-        # absence above is this build's doing and not the wheel's.
+        # The check above proves the source tree is on the child's path by what
+        # it can parse. This one proved it by what it *does*: the same input
+        # through the installed wheel used to let the raw warning through, so the
+        # absence above was this build's doing and not the wheel's. Once the
+        # wheel was reinstalled from this build the two behave identically and
+        # the contrast is gone -- so the check now demands the difference *or*
+        # the explanation, using the byte comparison made a few checks earlier
+        # rather than assuming the identical output proves anything.
         wheel = prep(dimer, tmp / "dimer_wheel.pdbqt", source_tree=False)[0]
-        check("the source tree is what changed the behaviour, not the wheel",
-              "kept the largest" in wheel.stderr
-              and "kept the largest" not in result.stderr,
-              f"installed copy: raw warning {'present' if 'kept the largest' in wheel.stderr else 'absent'}"
-              f"; source tree: {'present' if 'kept the largest' in result.stderr else 'absent'}")
+        check("the behaviour difference is real, or the two copies are the same file",
+              ("kept the largest" in wheel.stderr) or aligned,
+              f"installed copy: raw warning "
+              f"{'present' if 'kept the largest' in wheel.stderr else 'absent'}"
+              f"; source tree: "
+              f"{'present' if 'kept the largest' in result.stderr else 'absent'}"
+              + ("" if aligned else
+                 " -- and the two cli.py differ, so this is unexplained"))
         check("it points at the flag that shows more",
               "--report" in detail,
               "an unexplained line is one people stop reading")

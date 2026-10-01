@@ -77,7 +77,16 @@ results: list[tuple[str, str, str]] = []
 #: to reach this summary. Skips count toward the total because `skip` records a
 #: result too, so this number does not move with the environment -- which is the
 #: property that makes it worth pinning.
-EXPECTED_CHECKS = 233
+#:
+#: Plus 10 for section 7d, measured the same way: a pose view carries bonds,
+#: they are the file's declared tree, they are physical distances inside one
+#: atom's valency, every pose of a set agrees, every ghost has them, the status
+#: bar says where they came from, and the pose is measurably on screen in three
+#: representations. The `stick` skip in 7b became one of those checks, so it
+#: added nothing to the total by itself: a skip was already being counted, and
+#: a suite that reports "unanswerable" as a result and "231 passed" in its
+#: headline has quietly told the reader that everything was fine.
+EXPECTED_CHECKS = 243
 
 #: Every section this file is supposed to reach, in file order. A section that
 #: is entered always prints a header, and every header is closed by the next
@@ -96,6 +105,7 @@ EXPECTED_SECTIONS = (
     "7. a real docking run from the GUI",
     "7b. the pose table, from a run whose result is still in memory",
     "7c. a pose set that breaks the table's assumptions",
+    "7d. a pose is a molecule you can draw",
     "8. a second docking run",
     "9. a receptor at negative coordinates",
     "10. display representations",
@@ -575,6 +585,82 @@ def _greener_fraction(frame, mask) -> float:
     return min(
         _channel_excess(frame, mask, 1, 2),
         _channel_excess(frame, mask, 1, 0),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Hue, counted only where there is one
+# ---------------------------------------------------------------------------
+#
+# `_greener_fraction` and `_bluer_fraction` above ask about every pixel in the
+# mask, which is the right question for the default representation: a
+# space-filling pose is 8 578 lit sphere pixels and 78% of them have a hue.
+#
+# It is the wrong question for the bond-only ones, and the reason is measured
+# rather than guessed. A thin lit cylinder is mostly silhouette -- the normals
+# on either side of it graze the light and come back nearly black -- so 34% of
+# the pixels a `stick` pose owns have no hue at all. Counting a near-black pixel
+# against "is this green" measures the renderer's lighting, not the colour
+# hierarchy the check is about, and it fails the pose for being thin. The four
+# representations that fell over this way all read 77.6-83.5% while the same
+# pixels measured over the chromatic population alone read 92.1-97.7%.
+
+#: A pixel needs this much spread between its brightest and darkest channel
+#: before it has a hue. 24 of 255 is ~9%: far above the 1-2 levels of rounding in
+#: an 8-bit framebuffer, far below the 61 a slate ghost spreads between its own
+#: extremes, and far below `COLOR_BEST_POSE`'s green.
+CHROMA_MIN = 24
+
+
+def _chromatic(frame) -> np.ndarray:
+    """Per-pixel channel spread -- how much colour a pixel carries.
+
+    **`int16`, not the framebuffer's own dtype, and that is load-bearing.**
+    `uint8 - uint8` wraps: a pixel 38 levels bluer than green comes back 218
+    levels *greener*. A measurement written on the raw dtype therefore reports
+    every population in the frame -- the slate ghosts included -- as ~100%
+    green, and does so while looking perfectly plausible. The first version of
+    the numbers above was measured that way and said 99.7% green for the ghosts.
+    It was caught only because the ghosts being green is visibly absurd, which is
+    not a property one can rely on catching twice.
+    """
+    f = frame.astype(np.int16)
+    return f.max(axis=2) - f.min(axis=2)
+
+
+def _chromatic_fraction(frame, mask) -> float:
+    """Share of `mask`'s pixels that have a hue at all."""
+    if frame is None or mask is None or not mask.any():
+        return 0.0
+    return float((_chromatic(frame)[mask] >= CHROMA_MIN).mean())
+
+
+def _channel_excess_chromatic(frame, mask, hi: int, lo: int) -> float:
+    """`_channel_excess`, restricted to the pixels of `mask` that have a hue.
+
+    The 5-level margin is the same one `_channel_excess` documents, in the same
+    units: `>= 0.02` of full scale is `>= 5.1` of 255, and rounding is to the
+    nearer level. Using a looser 2 here would have made the new helpers quietly
+    more forgiving than the old ones rather than more accurate, which is the one
+    change to a threshold that is never a fix.
+    """
+    if frame is None or mask is None or not mask.any():
+        return 0.0
+    f = frame.astype(np.int16)
+    sel = mask & (_chromatic(frame) >= CHROMA_MIN)
+    if not sel.any():
+        return 0.0
+    return float(((f[:, :, hi] - f[:, :, lo])[sel] >= 5).mean())
+
+
+def _bluer_fraction_chromatic(frame, mask) -> float:
+    return _channel_excess_chromatic(frame, mask, 0, 2)
+
+
+def _greener_fraction_chromatic(frame, mask) -> float:
+    return min(
+        _channel_excess_chromatic(frame, mask, 1, 2),
+        _channel_excess_chromatic(frame, mask, 1, 0),
     )
 
 
@@ -2080,30 +2166,51 @@ def main() -> int:
             gf, gm = _own_pixels(pw2, lambda: _hide_role(pw2, "pose_ghost"))
             name = f"in '{key}' the selected pose is still green and the ghosts still slate"
             if pm is None or gm is None or not pm.any() or not gm.any():
-                # The representation draws no pose at all, so there is no colour
-                # to measure and the claim is unanswerable rather than false.
-                # This is a fact about the code and not about the machine, so it
-                # is named as one: pose views are built by `_view_from_text`,
-                # which passes no `bonds`, and a bond-only representation has
-                # nothing to draw. Pre-existing, and out of scope here -- see the
-                # report. Asserting a colour over an empty mask would be a
-                # green line with no claim behind it.
-                skip(
+                # A failure now, where this used to be a skip. The skip was
+                # honest -- it named the cause in full -- and it was also the
+                # thing that let the cause survive: `stick` drew the receptor
+                # and no pose, and a suite that records that as "unanswerable"
+                # is a suite that will report it again next month. The cause is
+                # fixed (`_pose_bonds`), so a representation that still draws
+                # nothing here is a new defect, and it has to look like one.
+                _pose_now = next(
+                    (m for m in pw2.viewport.molecules if m.role == "pose"), None
+                )
+                _ghost_now = next(
+                    (m for m in pw2.viewport.molecules if m.role == "pose_ghost"), None
+                )
+                pixel_check(
                     name,
-                    f"'{key}' draws no pose to measure (0 px): a pose view has "
-                    f"{len(next(m for m in pw2.viewport.molecules if m.role == 'pose').bonds)} "
-                    f"bonds, because `_view_from_text` passes none, and "
-                    f"'{key}' draws bonds only. The hierarchy cannot be read in a "
-                    f"representation that draws nothing.",
+                    False,
+                    f"'{key}' drew "
+                    f"{int(pm.sum()) if pm is not None else 'unreadable'} px for the "
+                    f"pose and {int(gm.sum()) if gm is not None else 'unreadable'} "
+                    f"for the ghosts, so there is no colour to measure. A pose "
+                    f"view carries "
+                    f"{len(_pose_now.bond_pairs()) if _pose_now is not None else 0} "
+                    f"bonds and a ghost "
+                    f"{len(_ghost_now.bond_pairs()) if _ghost_now is not None else 0}, "
+                    f"so a bond-only representation has something to draw and "
+                    f"drawing nothing is a fault, not a gap in the suite.",
                 )
                 continue
-            pg = _greener_fraction(pf, pm)
-            gb = _bluer_fraction(gf, gm)
+            # Hue over the pixels that have one, plus how saturated the pose is
+            # relative to the ghosts. The second half is the check that keeps the
+            # first honest: a uniform grey wash is "not green" and "not slate",
+            # so hue alone would pass a picture that had lost both colours. The
+            # ghosts are flat slate at low opacity, which is *supposed* to be
+            # desaturated -- the selected pose has to be the vivid thing.
+            pg = _greener_fraction_chromatic(pf, pm)
+            gb = _bluer_fraction_chromatic(gf, gm)
+            pc = _chromatic_fraction(pf, pm)
+            gc = _chromatic_fraction(gf, gm)
             pixel_check(
                 name,
-                pg >= 0.90 and gb >= 0.95,
-                f"pose greener {100 * pg:.1f}% of {int(pm.sum())} px, "
-                f"ghosts bluer {100 * gb:.1f}% of {int(gm.sum())} px",
+                pg >= 0.90 and gb >= 0.95 and pc >= 2.0 * gc,
+                f"pose greener {100 * pg:.1f}% of its {int(pm.sum())} px that have "
+                f"a hue ({100 * pc:.0f}% of its own pixels do), ghosts bluer "
+                f"{100 * gb:.1f}% of {int(gm.sum())} px; the pose is "
+                f"{pc / max(gc, 1e-9):.1f}x as saturated as the ghosts",
             )
         pw2.viewport.representation = repr_before
 
@@ -2353,6 +2460,187 @@ def main() -> int:
         app.processEvents()
         with contextlib.suppress(OSError):
             Path(fixture.name).unlink()
+
+    section("7d. a pose is a molecule you can draw")
+    # `stick` is the one representation that draws bonds and nothing else, and
+    # until now it drew the receptor and no pose at all: `_view_from_text` built
+    # every pose view without a `bonds` array, so a user could select a pose,
+    # choose the skeletal view, and the pose simply was not there. Section 7b
+    # recorded that as a skip with the cause written out in full, which was
+    # honest and is also why it survived -- a suite that reports "unanswerable"
+    # will report it again next month.
+    #
+    # A pose file does carry its connectivity, in `ROOT`/`BRANCH` and not in
+    # `CONECT`. A pose view cannot go and read it with `MoleculeView.from_text`
+    # anyway, because `_parse_pdbqt_atoms` returns atoms in *serial* order while
+    # this file is written in file order -- measured, not assumed: its serials
+    # run 5, 6, 7, 8, 9, 10, 4, 11, 12, 1, 2, 3. Delegating would have drawn a
+    # pose whose bond indices pointed at other atoms. So the bonds are perceived
+    # from the same coordinates the renderer draws, and the checks below hold
+    # that perception against the file's *own declared tree* rather than against
+    # a count -- "sixteen bonds" is a claim any threshold can be tuned into
+    # agreeing with, and "these are the bonds the file states" is not.
+    from opendocking.workbench import _parse_pdbqt_atoms  # noqa: PLC0415
+    from opendocking.workbench.app import _pose_bonds  # noqa: PLC0415
+    from opendocking.workbench.structure import (  # noqa: PLC0415
+        MAX_VALENCE,
+        parse_structure,
+    )
+
+    _bodies7d = ["\n".join(m) for m in
+                 read_pdbqt_models(EXAMPLES / "poses.pdbqt")]
+
+    def _matches_declared_tree(body: str) -> bool:
+        """Are the perceived bonds *this model's* `ROOT`/`BRANCH` tree?
+
+        The two bond lists are indexed differently on purpose, and comparing
+        them index-to-index would be comparing two numbering schemes and
+        reporting the result as a chemistry disagreement. `_parse_pdbqt_atoms`
+        returns serial order; `parse_structure` returns file order; on this file
+        they are different orders. Mapping through the permutation is the only
+        comparison that can mean anything -- and it is the strong form of the
+        claim: not the same number of bonds, the same bonds.
+        """
+        coords, elements = _parse_pdbqt_atoms(body)
+        derived = {tuple(sorted(p))
+                   for p in _pose_bonds(coords, elements).tolist()}
+        declared = {tuple(sorted(p))
+                    for p in parse_structure(body).bond_pairs()}
+        serials = [int(line[6:11]) for line in body.splitlines()
+                   if line.startswith(("ATOM", "HETATM"))]
+        file_pos = {s: i for i, s in enumerate(serials)}
+        # `_parse_pdbqt_atoms` hands atoms back ordered by serial, so its index
+        # k is the k-th smallest serial the model carries.
+        to_file = [file_pos[s] for s in sorted(serials)]
+        mapped = {tuple(sorted((to_file[a], to_file[b]))) for a, b in derived}
+        return mapped == declared
+
+    pose7d = next((m for m in win.viewport.molecules if m.role == "pose"), None)
+    check(
+        "a pose view carries bonds, not only coordinates",
+        pose7d is not None and len(pose7d.bond_pairs()) > 0,
+        f"{len(pose7d.bond_pairs()) if pose7d is not None else 0} bonds: 'stick' "
+        "draws bonds and nothing else, so a pose with none is a pose that is "
+        "not on screen in one of the five representations",
+    )
+
+    matched7d = [_matches_declared_tree(b) for b in _bodies7d]
+    check(
+        "and they are the file's own declared tree, not a lookalike",
+        len(matched7d) > 1 and all(matched7d),
+        f"{sum(matched7d)}/{len(matched7d)} models perceive exactly the bonds the "
+        "file declares, once serial order is mapped onto file order. A count "
+        "would have been enough to look convincing; this is the bonds.",
+    )
+
+    counts7d, lengths7d, overruns7d = [], [], []
+    for body in _bodies7d:
+        coords, elements = _parse_pdbqt_atoms(body)
+        pairs = _pose_bonds(coords, elements)
+        counts7d.append(len(pairs))
+        degree = np.zeros(len(coords), int)
+        for a, b in pairs:
+            degree[a] += 1
+            degree[b] += 1
+            lengths7d.append(float(np.linalg.norm(coords[a] - coords[b])))
+        overruns7d.append([
+            (elements[i], int(degree[i]), MAX_VALENCE.get(elements[i], 99))
+            for i in range(len(coords))
+            if degree[i] > MAX_VALENCE.get(elements[i], 99)
+        ])
+    check(
+        "every perceived bond is a distance a bond can physically have",
+        lengths7d and min(lengths7d) >= 0.85 and max(lengths7d) < 2.0,
+        f"{len(lengths7d)} bonds, {min(lengths7d):.2f}-{max(lengths7d):.2f} A: the "
+        "same 0.85-2.0 A window the receptor's bonds are held to, so a rule that "
+        "welded two atoms across a gap would fail here too",
+    )
+    check(
+        "and no atom carries more bonds than its element can",
+        lengths7d and not any(overruns7d),
+        f"no overrun across {len(_bodies7d)} models; over-cap atoms per model "
+        f"{[len(o) for o in overruns7d]}. `lengths7d` is in the condition on "
+        f"purpose: with no bonds at all this would pass for the same reason an "
+        f"empty list has no overruns in it, which is to say not at all",
+    )
+    check(
+        "every pose of a set perceives the same bonds, whatever its pose",
+        len(set(counts7d)) == 1 and counts7d[0] > 0,
+        f"bond counts {counts7d}: a count that moved with the conformation would "
+        "be a perception nobody could rely on, and a docking run changes "
+        "conformation by design. Nine identical *zeros* would satisfy the first "
+        "half of this, hence the second",
+    )
+
+    win.cb_ligand.setChecked(True)
+    win.cb_all_poses.setChecked(True)
+    app.processEvents()
+    QTest.qWait(150)
+    ghosts7d = [m for m in win.viewport.molecules if m.role == "pose_ghost"]
+    check(
+        "every ghost carries bonds too, or 'stick' hides eight of the nine poses",
+        len(ghosts7d) == len(counts7d)
+        and all(len(g.bond_pairs()) > 0 for g in ghosts7d),
+        f"{sum(1 for g in ghosts7d if len(g.bond_pairs()) > 0)}/{len(ghosts7d)} "
+        f"ghost views have bonds "
+        f"({sum(1 for g in ghosts7d if g.visible)} of them visible -- the scene "
+        f"keeps one ghost per pose and hides the selected pose's own), against "
+        f"{len(counts7d)} poses in the file",
+    )
+
+    repr7d = win.viewport.representation
+    for key in ("stick", "ball_and_stick", "spheres"):
+        win.cmb_representation.setCurrentIndex(
+            win.cmb_representation.findData(key)
+        )
+        app.processEvents()
+        QTest.qWait(60)
+        if PIXELS_OK:
+            _frame7d, _mask7d = _own_pixels(win, lambda: _hide_role(win, "pose"))
+            _px7d = int(_mask7d.sum()) if _mask7d is not None else 0
+            pixel_check(
+                f"in '{key}' the pose is on screen, not just the receptor",
+                _px7d > 200,
+                f"{_px7d} px belong to the pose alone, same camera either side "
+                f"of hiding it. "
+                + ("'stick' draws bonds and nothing else, so this was 0 px "
+                   "before `_pose_bonds` existed: the pose had no bonds to "
+                   "draw." if key == "stick" else
+                   f"'{key}' drew the pose from its spheres before the fix, so "
+                   f"this one is a floor rather than a repair -- it is here so "
+                   f"that a change which cost the pose its atoms anywhere would "
+                   f"be caught in all three views, not just the one that broke."),
+            )
+        else:
+            skip(f"in '{key}' the pose is on screen, not just the receptor",
+                 "no framebuffer to read")
+    # After the sweep, not before: the status bar is rewritten by
+    # `_describe_representation`, which only runs when the representation
+    # changes. Asked before the sweep it reads back whatever an earlier section
+    # left there, and this file checked it while the message was still the empty
+    # string -- a check that passes for a reason nobody can see is how a status
+    # bar stops being maintained at all.
+    _status7d = win.statusBar().currentMessage()
+    _pose_frag7d = next(
+        (p for p in _status7d.split("  |  ") if pose7d and pose7d.name in p), ""
+    )
+    check(
+        "the status bar says the pose's bonds were inferred, not read",
+        pose7d is not None
+        and pose7d.bond_source == "distance"
+        and "inferred from distances" in _status7d
+        and _pose_frag7d != "",
+        f"bond_source {pose7d.bond_source if pose7d else None!r}; the bar holds "
+        f"{len(_status7d.split('  |  '))} entries and the pose's own reads "
+        f"{_pose_frag7d[:90]!r}. These bonds *are* perceived from distances, and "
+        "the status bar is the only place a user is ever told so",
+    )
+
+    win.cmb_representation.setCurrentIndex(
+        win.cmb_representation.findData(repr7d)
+    )
+    win.cb_all_poses.setChecked(False)
+    app.processEvents()
 
     section("8. a second docking run")
     win.btn_dock.click()

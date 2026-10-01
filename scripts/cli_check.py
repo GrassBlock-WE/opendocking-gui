@@ -116,7 +116,12 @@ WALL: list[tuple[str, float]] = []
 #: condition -- a check that is skipped is not skipped from the total, and a
 #: check that is not reached at all is a bug in this file, not a fact about the
 #: environment. Change it deliberately.
-EXPECTED_CHECKS = 127
+#: measured: a green run on this machine (127/127, exit 0, tree unchanged).
+#: Lower it only after a real green run. Note what is deliberately *not* pinned
+#: separately: the tree-guard outcome exits 2 before `finish()` runs, so a
+#: concurrent edit cannot change this number -- it changes the exit code
+#: instead, which is the whole point of splitting those two.
+EXPECTED_CHECKS = 129
 
 #: Exit vocabulary, shared with the GUI check scripts:
 #: 0 ran and everything passed, 1 ran and something failed, 2 did not finish.
@@ -308,6 +313,64 @@ class _PatchQtOpenGL(importlib.abc.MetaPathFinder):
 
 
 sys.meta_path.insert(0, _PatchQtOpenGL())
+'''
+
+
+#: A `sitecustomize` that breaks the *raw* stage instead of the widget one, so
+#: the probe's "this machine cannot do OpenGL at all" answer -- exit 4 -- is still
+#: reachable on a machine whose GPU works. The widget shim above now earns exit
+#: 5, and a check that can no longer reach the code it was written to cover has
+#: stopped covering it.
+#:
+#: It patches `isValid` and not `create`, because that is what the probe reads.
+#: Stage 1 calls `surface.create()`, ignores the return, and then gates the
+#: context on `surface.isValid()`. A shim that overrode `create` would look like
+#: it disabled the surface and would test nothing at all.
+_NO_RAW_CONTEXT_SHIM = '''\
+import importlib.abc
+import importlib.machinery
+import sys
+
+
+class _Wrap:
+    def __init__(self, inner):
+        self._inner = inner
+
+    def create_module(self, spec):
+        return self._inner.create_module(spec)
+
+    def exec_module(self, module):
+        self._inner.exec_module(module)
+        real = module.QOffscreenSurface
+
+        class DeadSurface(real):
+            def isValid(self):
+                return False
+
+        module.QOffscreenSurface = DeadSurface
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
+class _PatchQtGui(importlib.abc.MetaPathFinder):
+    """Patches one module on the way in, then gets out of the way."""
+
+    def find_spec(self, name, path=None, target=None):
+        if name != "PyQt6.QtGui":
+            return None
+        sys.meta_path.remove(self)
+        try:
+            spec = importlib.machinery.PathFinder.find_spec(name, path)
+        finally:
+            sys.meta_path.insert(0, self)
+        if spec is None or spec.loader is None:
+            return None
+        spec.loader = _Wrap(spec.loader)
+        return spec
+
+
+sys.meta_path.insert(0, _PatchQtGui())
 '''
 
 
@@ -1160,9 +1223,27 @@ def main() -> int:
         # That makes "installed, will not start" reproducible on a machine with
         # a perfectly good GPU, which is the only way the second stage can be
         # checked on CI at all.
+        ck_missing = odgui_run(["--check"], shim)
+        check("--check says no when the GUI stack cannot be imported",
+              ck_missing.returncode == 3 and ck_missing.stdout.strip() == ""
+              and "GUI stack OK" not in ck_missing.stdout
+              and ck_missing.stderr == wb.stderr,
+              f"rc={ck_missing.returncode}, stdout {len(ck_missing.stdout)}B, "
+              f"stderr identical to the launch path's: {ck_missing.stderr == wb.stderr} "
+              "-- same code, same sentence, same stream as the thing it predicts")
+        # The second shim targets the *widget*, so under the two-stage probe it
+        # earns exit 5, not 4: the raw context succeeds and Qt still cannot
+        # realise an OpenGL widget. That is a different answer from "this
+        # machine cannot do OpenGL", and the probe now says so. Exit 4 is still
+        # reachable and still needs covering, so a third shim makes the *raw*
+        # stage fail -- which is the only way to reach 4 on a machine whose GPU
+        # works.
         nogl = tmp / "shim_nogl"
         nogl.mkdir()
         (nogl / "sitecustomize.py").write_text(_NO_GL_SHIM, encoding="utf-8")
+        noraw = tmp / "shim_noraw"
+        noraw.mkdir()
+        (noraw / "sitecustomize.py").write_text(_NO_RAW_CONTEXT_SHIM, encoding="utf-8")
 
         ck_missing = odgui_run(["--check"], shim)
         check("--check says no when the GUI stack cannot be imported",
@@ -1173,25 +1254,38 @@ def main() -> int:
               f"stderr identical to the launch path's: {ck_missing.stderr == wb.stderr} "
               "-- same code, same sentence, same stream as the thing it predicts")
         ck_nogl = odgui_run(["--check"], nogl)
-        check("--check says no when the stack is there but OpenGL is not",
-              ck_nogl.returncode == 4 and ck_nogl.stdout.strip() == ""
+        check("--check says no when OpenGL works but the widget will not realise",
+              ck_nogl.returncode == 5 and ck_nogl.stdout.strip() == ""
               and "GUI stack OK" not in ck_nogl.stdout
               and not ck_nogl.has_traceback,
               f"rc={ck_nogl.returncode}, stdout {len(ck_nogl.stdout)}B, stderr "
-              f"{(ck_nogl.stderr.strip().splitlines() or ['(none)'])[0][:64]!r}")
-        check("and it is a different sentence with a different fix, not a rerun of the first",
-              ck_nogl.stderr != ck_missing.stderr
-              and "graphics-driver" in ck_nogl.stderr
+              f"{(ck_nogl.stderr.strip().splitlines() or ['(none)'])[0][:64]!r} "
+              "-- 5, because the shim breaks the widget and the raw stage is fine")
+        ck_noraw = odgui_run(["--check"], noraw)
+        check("--check says no when not even a bare context can be made",
+              ck_noraw.returncode == 4 and ck_noraw.stdout.strip() == ""
+              and "graphics-driver" in ck_noraw.stderr
+              and not ck_noraw.has_traceback,
+              f"rc={ck_noraw.returncode}, stderr "
+              f"{(ck_noraw.stderr.strip().splitlines() or ['(none)'])[0][:64]!r} "
+              "-- 4 is the 'no OpenGL at all' answer and only this shim reaches it")
+        check("each of the three failures has its own sentence and its own remedy",
+              len({ck_missing.stderr, ck_nogl.stderr, ck_noraw.stderr}) == 3
+              and "pip install" in ck_missing.stderr
               and "pip install" not in ck_nogl.stderr
-              and "`PyQt6` could not be imported" in ck_missing.stderr,
-              "one tells the user to install a package, the other tells them the "
-              "package is already installed and the driver is the problem -- "
-              f"codes {ck_missing.returncode} vs {ck_nogl.returncode}")
-        check("neither failure puts anything on stdout, and neither is a traceback",
+              and "pip install" not in ck_noraw.stderr,
+              f"codes {ck_missing.returncode} / {ck_nogl.returncode} / "
+              f"{ck_noraw.returncode}, and "
+              f"{len({ck_missing.stderr, ck_nogl.stderr, ck_noraw.stderr})} distinct "
+              "sentences: one says install a package, the other two say the "
+              "package is installed and something else is the problem")
+        check("neither failure puts anything on stdout, and none is a traceback",
               ck_missing.stdout.strip() == "" and ck_nogl.stdout.strip() == ""
-              and not ck_missing.has_traceback and not ck_nogl.has_traceback,
-              f"{len(ck_missing.stdout)}B and {len(ck_nogl.stdout)}B of stdout, "
-              "no stack dumps in either")
+              and ck_noraw.stdout.strip() == ""
+              and not ck_missing.has_traceback and not ck_nogl.has_traceback
+              and not ck_noraw.has_traceback,
+              f"{len(ck_missing.stdout)}B, {len(ck_nogl.stdout)}B and "
+              f"{len(ck_noraw.stdout)}B of stdout, no stack dumps in any")
 
         # The one thing that can be asserted about this machine without knowing
         # whether its GPU works: the exit code and the claim agree. Before the

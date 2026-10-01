@@ -895,18 +895,72 @@ def load_receptor(path: str | Path) -> Receptor:
     return Receptor.from_pdbqt_str(prepare_receptor(path))
 
 
+def typed_ligand_from_tables(
+    elements: list[str],
+    charges: list[float],
+    coords: np.ndarray,
+    bonds: list[tuple[int, int]],
+    names: list[str],
+) -> tuple["Ligand", str]:
+    """Build a ligand from ``prepare_ligand``'s tables *with its atom types*, and
+    return the PDBQT text that carried them.
+
+    **Why this exists.** :meth:`Ligand.from_arrays` cannot type an atom. It
+    takes ``(elements, charges, coords, bonds, atom_names)`` and derives every
+    AutoDock type from the element symbol alone, so an RDKit-prepared carboxyl
+    oxygen arrives as ``O``, not ``OA`` -- neither an acceptor nor a donor, but
+    ``other``, which reads the steric slot and nothing else. The typing is not
+    missing from the process: ``prepare_ligand`` has already decided it (it adds
+    polar hydrogens precisely so that donors are visible) and returns the answer
+    as a name prefix. The loss is at this boundary, one line below the decision.
+
+    :func:`load_receptor` has always carried receptor types across the same
+    boundary by writing a PDBQT string and reading it back -- the type column is
+    the project's own carrier for this information, and the ligand path was the
+    one that skipped it. This function is that same step for ligands, shared
+    with ``prep-ligand`` so the two callers cannot drift apart.
+
+    **The cost, stated because it is a real limit and not a caveat.** This route
+    inherits the writer's two-column type field, so a three-character type
+    (``NDA``, ``ODA``) cannot pass through: ``format_atom_line`` refuses one
+    rather than truncate it, which is the right call for a fixed-width field.
+    That is currently unobservable -- ``NDA`` and ``ND`` are bitwise identical
+    as ligands, and so are ``ODA`` and ``OD`` -- so it costs nothing today.
+    **If the project ever needs three-character types to reach the engine
+    through the in-memory path, this approach fails and the alternative becomes
+    necessary: give ``from_arrays`` an optional per-atom ``atom_types``
+    parameter in the PyO3 binding (``dock-py/src/lib.rs``), which would mean a
+    rebuilt extension.** That is the condition under which the other design
+    wins; until it happens, the round trip is the cheaper correct answer,
+    because it needs no new API, no change to the engine, and reproduces the
+    project's own shipped artifacts byte for byte.
+    """
+    from .pdbqt_writer import ligand_to_pdbqt
+
+    untyped = Ligand.from_arrays(elements, charges, coords, bonds, names)
+    text = ligand_to_pdbqt(untyped, np.asarray(coords, dtype=float), names)
+    return Ligand.from_pdbqt_str(text), text
+
+
 def load_ligand(path: str | Path) -> Ligand:
     """Read a ligand, preparing it with RDKit for any non-PDBQT format.
 
     ``.sdf``, ``.mol2``, ``.mol`` and ``.smi`` all go through RDKit so that
     aromaticity, protonation and charges are handled chemically rather than
     guessed.
+
+    The prepared tables carry AutoDock atom types in the atom names, and they
+    are carried into the engine through the type column exactly as
+    :func:`load_receptor` does for a non-PDBQT receptor -- see
+    :func:`typed_ligand_from_tables` for why, and for what this approach cannot
+    do. Concretely: ``load_ligand("x.sdf")`` and ``load_ligand("x_prep.pdbqt")``
+    return ligands with the same ``atom_kinds``, where the direct
+    ``from_arrays`` route returned an ``other`` in place of every acceptor.
     """
     path = Path(path)
     if path.suffix.lower() == ".pdbqt":
         return Ligand.from_pdbqt(path)
     from .prep import prepare_ligand
 
-    return Ligand.from_arrays(
-        *prepare_ligand(path)
-    )
+    ligand, _text = typed_ligand_from_tables(*prepare_ligand(path))
+    return ligand

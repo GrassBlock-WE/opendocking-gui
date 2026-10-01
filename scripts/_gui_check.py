@@ -56,12 +56,30 @@ TIMEOUT = 120
 
 VERDICT_OK = "ok"
 VERDICT_NO_CONTEXT = "no-context"
+VERDICT_NO_WIDGET = "no-widget"
 VERDICT_NO_GUI_STACK = "no-gui-stack"
 
 #: `odgui --check` exit codes, unchanged from the launcher's own contract.
 EXIT_OK = 0
 EXIT_NO_GUI_STACK = 3
 EXIT_NO_CONTEXT = 4
+#: Exit 5: OpenGL works on this machine, but Qt cannot realise an OpenGL widget,
+#: so the viewport would still open empty. Its own code because the remedy for 4
+#: ("get a machine with a GPU") is wrong for 5 -- the driver is fine. Mapping it
+#: onto 4 is exactly how this file's consumers ended up telling users to go and
+#: buy hardware they did not need.
+EXIT_NO_WIDGET = 5
+
+#: Exit code -> verdict, used on the prose fallback path where there is no object
+#: to read a `verdict` from. Explicit rather than a "anything else is
+#: no-context" default: a new exit code must not be silently absorbed into the
+#: wrong verdict, which is the failure mode this table exists to prevent.
+_EXIT_TO_VERDICT = {
+    EXIT_OK: VERDICT_OK,
+    EXIT_NO_GUI_STACK: VERDICT_NO_GUI_STACK,
+    EXIT_NO_CONTEXT: VERDICT_NO_CONTEXT,
+    EXIT_NO_WIDGET: VERDICT_NO_WIDGET,
+}
 
 
 @dataclass(frozen=True)
@@ -121,8 +139,23 @@ def _reason_from_json(payload: dict) -> str:
     natively it includes the child's own exit status, e.g. `3221226505`
     (`0xC0000409`), which is the difference between "Qt could not create a
     context" and "the probe process was killed outright".
+
+    `no-widget` is the one verdict whose `problem` field, quoted bare, would
+    say the wrong thing. The problem is the *widget probe's*, while OpenGL on
+    that machine works -- so a consumer that took the field at face value would
+    tell a user their machine has no OpenGL when it demonstrably does, and send
+    them off to buy a GPU. The raw stage's facts are folded in so the sentence
+    survives being passed around without its payload.
     """
     problem = payload.get("problem")
+    if payload.get("verdict") == VERDICT_NO_WIDGET:
+        raw = payload.get("raw") or {}
+        detail = (
+            f"OpenGL works (raw context GL {raw.get('gl', '?')}, function table "
+            f"{'usable' if raw.get('functions') else 'UNUSABLE'}) but Qt cannot "
+            f"realise an OpenGL widget"
+        )
+        return f"{detail}: {problem}" if problem else detail
     if problem:
         return str(problem)
     if payload.get("verdict") == VERDICT_OK:
@@ -187,10 +220,21 @@ def odgui_check() -> Check:
             source="unavailable",
         )
     code = old.returncode
-    verdict = {
-        EXIT_OK: VERDICT_OK,
-        EXIT_NO_GUI_STACK: VERDICT_NO_GUI_STACK,
-    }.get(code, VERDICT_NO_CONTEXT)
+    verdict = _EXIT_TO_VERDICT.get(code)
+    if verdict is None:
+        # An exit code this table has never heard of. Naming it is strictly
+        # better than folding it into `no-context`: the caller is told the
+        # answer is unrecognised, and `can_make_context` is False so nobody acts
+        # on it as success.
+        return Check(
+            code=code,
+            verdict=f"unknown-exit-{code}",
+            reason=(
+                f"`odgui --check` exited {code}, which is not a code this file "
+                f"knows; treat the answer as unknown rather than as a verdict"
+            ),
+            source="prose",
+        )
     if verdict == VERDICT_OK:
         # Deliberately not the first line of stdout: on success that is the
         # banner, and a title is not a reason. Saying so is more useful than

@@ -1060,13 +1060,21 @@ def main() -> int:
     # recording only the flattering one would be the whole problem this file
     # exists to prevent.
     #
-    # On crambin, site 2's box gives -5.42 kcal/mol against the reference
-    # pose's -5.5 -- so the energy is reproduced -- at 3.93 A RMSD. Same
-    # score, different minimum. Crambin with ibuprofen has near-degenerate
-    # binding modes, and a docking engine landing in a different one is a
-    # statement about the energy surface, not about whether the box was in the
-    # right place. The box *was*: it contains all 16 ligand atoms and is lined
-    # by the residue that hydrogen-bonds them.
+    # On crambin, the auto-chosen site's box gives -5.30 kcal/mol against the
+    # reference pose's -5.50 -- a difference of +0.203, which the assertion
+    # below bounds -- at 4.35 A RMSD. Same score, different minimum. Crambin
+    # with ibuprofen has near-degenerate binding modes, and a docking engine
+    # landing in a different one is a statement about the energy surface, not
+    # about whether the box was in the right place. The box *was*: it contains
+    # all 16 ligand atoms and is lined by the residue that hydrogen-bonds them.
+    #
+    # Two corrections to what this comment used to say, both of which had been
+    # wrong for a while and were only caught once the grid's element partition
+    # was fixed (defect 190) and the docking numbers moved underneath them. It
+    # named *site 2*; the box actually used is the **9th** of twelve -- the only
+    # one that holds all 16 ligand atoms. And its figures, -5.42 and 3.93 A, are
+    # the pre-fix values; -5.36 was a third number, from neither. The threshold
+    # is unchanged and does not need to be: 0.203 against a bound of 0.5.
     #
     # So the assertion is on the energy, and the RMSD is reported alongside
     # with no claim attached to it. Asserting a small RMSD here would be
@@ -1188,47 +1196,52 @@ def main() -> int:
     if sites:
         rec_pts = np.asarray(rec.coords, np.float32)
         labels_all = rec.residue_labels()
+        problems: list[str] = []
         for idx, pocket in enumerate(sites):
             pts = np.asarray(pocket.points, np.float32)
             if len(pts) != pocket.voxels:
-                check(
-                    f"site {idx + 1} carries one point per voxel",
-                    False,
-                    f"{len(pts)} points, {pocket.voxels} voxels",
+                problems.append(
+                    f"site {idx + 1} carries {len(pts)} points for {pocket.voxels} voxels"
                 )
-                break
+                continue
             extent = (pts.max(axis=0) - pts.min(axis=0)) + P.DEFAULT_SPACING
             ok = bool(np.allclose(extent, np.asarray(pocket.size), atol=0.05))
             if not ok:
-                check(
-                    f"site {idx + 1} point cloud spans exactly the reported size",
-                    False,
-                    f"points span {np.round(extent, 2)} vs reported "
-                    f"{np.round(pocket.size, 2)}",
+                problems.append(
+                    f"site {idx + 1} spans {np.round(extent, 2)} but reports "
+                    f"{np.round(pocket.size, 2)}"
                 )
-                break
-        else:
-            check(
-                "every site carries one point per voxel",
-                all(len(np.asarray(p.points)) == p.voxels for p in sites),
-            )
-            check(
-                "every site's point cloud spans exactly the size it reports",
-                all(
-                    bool(
-                        np.allclose(
-                            (np.asarray(p.points).max(axis=0)
-                             - np.asarray(p.points).min(axis=0)) + P.DEFAULT_SPACING,
-                            np.asarray(p.size),
-                            atol=0.05,
-                        )
+        # This used to `break` out of the loop and call `check(..., False, ...)`
+        # from inside it. That had two consequences, and the second is worse than
+        # the first: the failure path never ran on a healthy day, and on a broken
+        # one it *replaced* the three `else`-branch checks below rather than
+        # joining them -- so the tally came out at 150 where the pin says 153,
+        # and the run reported a count mismatch alongside the real failure.
+        # **A second, louder symptom is not a second piece of evidence.** The
+        # per-site text is kept as the detail of the checks that were already
+        # there, so the count is 153 whether the geometry is right or not.
+        check(
+            "every site's points match the voxel count and the size it reports",
+            not problems,
+            "; ".join(problems) if problems else "the cloud and the table are the same geometry",
+        )
+        check(
+            "every site's point cloud spans exactly the size it reports",
+            all(
+                bool(
+                    np.allclose(
+                        (np.asarray(p.points).max(axis=0)
+                         - np.asarray(p.points).min(axis=0)) + P.DEFAULT_SPACING,
+                        np.asarray(p.size),
+                        atol=0.05,
                     )
-                    for p in sites
-                ),
-                "the cloud and the table are the same geometry",
-            )
-            check(
-                "the centre is the centroid of the points that are drawn",
+                )
+                for p in sites
+            ),
+            "recomputed here from the points rather than trusted from the sweep above",
+        )
+        check(
+            "the centre is the centroid of the points that are drawn",
                 all(
                     float(np.linalg.norm(
                         np.asarray(p.points).mean(axis=0) - np.asarray(p.center)

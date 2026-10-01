@@ -153,6 +153,154 @@ env_blocked = False
 #: verdict the run reached; this says there was no verdict to reach.
 incomplete = ""
 
+# ---------------------------------------------------------------------------
+# The outcome ledger.
+#
+# This script used to end with a `RESULT:` line and nothing else, so its checks
+# existed only as prose. Adding the two-stage `--check` payload guard below
+# needs somewhere to record a failure, and a guard that can only print is a
+# guard that cannot be counted.
+#
+# Placed here, before the X11 helpers, because `x11_window_parse_check.py` execs
+# the source between the `_run` helper and the watch loop below: anything added
+# inside that window has to stand alone with only `re`, `shutil`, `subprocess`,
+# `sys` and `WINDOW_TITLE` in scope.
+RESULTS: list[tuple[str, str, str]] = []
+
+
+def ok(name: str, reason: str = "") -> bool:
+    RESULTS.append(("PASS", name, reason))
+    print(f"  [PASS] {name}" + (f"  — {reason}" if reason else ""))
+    return True
+
+
+def bad(name: str, reason: str) -> bool:
+    RESULTS.append(("FAIL", name, reason))
+    print(f"  [FAIL] {name}  — {reason}")
+    return False
+
+
+def skip(name: str, reason: str) -> bool:
+    RESULTS.append(("SKIP", name, reason))
+    print(f"  [SKIP] {name}  — {reason}")
+    return False
+
+
+def check_payload(answer) -> None:
+    """`odgui --check` must report *both* stages, and the widget one must be real.
+
+    This exists because of a specific mutant, and it is worth naming: if the
+    launcher stopped running the widget probe once the cheap raw-context probe
+    succeeded, `--check` would return `ok` and exit 0 **on a machine whose
+    viewport cannot open** -- the original bug, wearing a new exit code. Nothing
+    about the exit code catches that; only the payload does.
+
+    So the assertion is about evidence rather than about the verdict:
+
+    * a `raw` and a `widget` member must both be present;
+    * if the raw stage got a context, the widget stage must have been *attempted*
+      -- a `skipped` note there is a failure, not an excuse, because a working
+      raw context is exactly the case where the widget probe is the only thing
+      left to learn;
+    * if the verdict is `ok`, the widget member must carry a GL version, because
+      `ok` is a claim about the widget and not about OpenGL in general.
+
+    When the raw stage itself failed there is nothing to say about stage 2, and
+    that is a SKIP rather than a failure -- the machine could not answer.
+    """
+    detail = dict(getattr(answer, "detail", None) or {})
+    raw = detail.get("raw")
+    widget = detail.get("widget")
+    if raw is None or widget is None:
+        bad(
+            "the --check payload reports both stages",
+            f"raw present={raw is not None}, widget present={widget is not None}, "
+            f"verdict={answer.verdict!r}, keys={sorted(detail)}",
+        )
+        return
+    if not raw.get("gl"):
+        skip(
+            "the --check payload reports both stages",
+            f"the cheap stage could not get a context either "
+            f"(verdict {answer.verdict!r}), so there is nothing to say about "
+            f"the widget stage",
+        )
+        return
+    if widget.get("skipped"):
+        bad(
+            "the --check payload reports both stages",
+            "the raw context worked, so the widget stage had to run, but it was "
+            f"skipped: {widget['skipped']}",
+        )
+        return
+    if answer.verdict == "no-widget":
+        # The reason is what four other scripts print, so a reason that only
+        # quotes the widget probe's own problem would tell every one of them
+        # "this machine cannot give Qt an OpenGL context" -- on a machine whose
+        # OpenGL demonstrably works. Requiring the raw stage's GL version to
+        # appear checks the substance without depending on the wording.
+        reason = getattr(answer, "reason", "") or ""
+        if str(raw.get("gl")) not in reason:
+            bad(
+                "the no-widget reason carries the raw stage's evidence",
+                f"verdict is no-widget but the reason does not mention the raw "
+                f"context's GL {raw.get('gl')}: {reason!r}",
+            )
+            return
+        ok(
+            "the no-widget reason carries the raw stage's evidence",
+            f"quotes raw GL {raw.get('gl')}",
+        )
+    if answer.verdict == "ok" and not widget.get("gl"):
+        bad(
+            "the --check payload reports both stages",
+            f"the verdict is 'ok' but the widget stage recorded no GL version: "
+            f"{widget}",
+        )
+        return
+    ok(
+        "the --check payload reports both stages",
+        f"raw GL {raw.get('gl')}, widget GL {widget.get('gl') or 'none'}"
+        + (f", child exit {widget['child_exit']}" if "child_exit" in widget else ""),
+    )
+
+
+def _nfail() -> int:
+    """How many recorded checks failed. The verdict below refuses to pass if >0."""
+    return sum(1 for tag, _, _ in RESULTS if tag == "FAIL")
+
+
+def _summarise() -> None:
+    """Counts, on every path out of this file including a broken watch."""
+    npass = sum(1 for tag, _, _ in RESULTS if tag == "PASS")
+    nfail = sum(1 for tag, _, _ in RESULTS if tag == "FAIL")
+    nskip = sum(1 for tag, _, _ in RESULTS if tag == "SKIP")
+    print()
+    print(f"--- summary: {npass} passed, {nfail} failed, {nskip} skipped, "
+          f"{len(RESULTS)} checks")
+    for tag, name, reason in RESULTS:
+        if tag in ("FAIL", "SKIP"):
+            print(f"    {tag} {name}: {reason}")
+
+
+# The machine's own answer to "can you start the viewer", asked once, up front.
+# The window test below is the primary evidence -- it watches a real process --
+# so this never decides the verdict. It supplies two things the window test
+# cannot: the reason to print when no window ever appears, and the payload guard
+# in `check_payload`, which is the only thing in the tree that can catch a
+# `--check` that stopped running its widget stage.
+#
+# Placed *here*, above the X11 helpers, rather than next to the watch loop it
+# feeds: the loop sits at module level because `x11_window_parse_check.py`
+# slices this file from the `_run` helper to that loop, and a statement inside
+# that window gets exec'd by the check. That was not a guess -- moving this
+# block down put `odgui_check()` inside the slice and the guard failed with
+# `NameError: name 'odgui_check' is not defined`, which is the same lesson as
+# the earlier one about quoting a helper's name in a comment.
+answer = odgui_check()
+print(f"  --check says: {answer.describe()}")
+check_payload(answer)
+
 
 def _descendants(root_pid: int) -> set[int]:
     """Every PID whose ancestry reaches `root_pid`, `root_pid` included.
@@ -533,6 +681,7 @@ finally:
 
 if incomplete:
     # The watch already printed its verdict; nothing below may overwrite it.
+    _summarise()
     raise SystemExit(EXIT_INCOMPLETE)
 
 if not seen and not exited_early and not forced:
@@ -547,7 +696,6 @@ if not seen and not exited_early and not forced:
     # its own (see `.github/workflows/ci.yml`), so a run that skips here is a run
     # whose machine has already failed a different step, and a run that fails
     # here on a machine whose `--check` passes is a real failure.
-    answer = odgui_check()
     if answer.can_make_context:
         env_blocked = False
         outcome = (
@@ -559,12 +707,13 @@ if not seen and not exited_early and not forced:
         env_blocked = True
         outcome = (
             f"no window appeared within {WINDOW_DEADLINE:.0f} s, and this machine "
-            f"cannot give Qt an OpenGL context ({answer.describe()}), so whether "
-            f"the viewer would have opened a window here is unknown"
+            f"cannot start the viewer here ({answer.describe()}), so whether the "
+            f"viewer would have opened a window is unknown"
         )
 
 if env_blocked:
     print(f"\nRESULT: SKIP — {outcome}")
+    _summarise()
     raise SystemExit(EXIT_INCOMPLETE)
 
 if seen and close_mechanism == "none":
@@ -578,22 +727,40 @@ if seen and close_mechanism == "none":
     # Deliberately not `rc is not None`: by this point odgui has usually been
     # killed by the finally block above, so that exit code is ours. What is
     # still evidence is that it was still running when we found its window.
-    ok = not exited_early
+    #
+    # Named `partial_ok` rather than `ok`: a local `ok` here would shadow the
+    # ledger's `ok()` function for the rest of the module, so the next `ok(...)`
+    # call would rebind a bool over a function. That is the kind of shadowing
+    # that only bites on the next edit, in a different place.
+    partial_ok = not exited_early
     print(
         "\nRESULT:",
         "PARTIAL — odgui opened a window and stayed up; its clean shutdown was "
         "not verified"
-        if ok
+        if partial_ok
         else f"FAIL — {outcome or 'odgui exited on its own before a window was found'}",
     )
-    raise SystemExit(EXIT_OK if ok else EXIT_FAILED)
+    _summarise()
+    raise SystemExit(EXIT_OK if partial_ok else EXIT_FAILED)
 
-ok = seen and rc == 0
+window_ok = seen and rc == 0
 print(f"\nclosed via: {close_mechanism}")
-if ok:
+if window_ok and _nfail() == 0:
     print("\nRESULT: PASS — odgui opens a real window and closes cleanly")
+    _summarise()
     raise SystemExit(EXIT_OK)
+if window_ok:
+    # The window behaved, but a recorded check did not. Reporting PASS here
+    # would let a red check ride out under a green verdict, which is the
+    # vacuous-green failure this file exists to stop.
+    print(
+        f"\nRESULT: FAIL — the window opened and closed cleanly, but "
+        f"{_nfail()} recorded check(s) did not hold"
+    )
+    _summarise()
+    raise SystemExit(EXIT_FAILED)
 print(
     f"\nRESULT: FAIL — {outcome or 'the window came up but odgui did not exit cleanly'}"
 )
+_summarise()
 raise SystemExit(EXIT_FAILED)
