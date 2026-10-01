@@ -295,6 +295,34 @@ jobs:
           print('every declared oracle is importable, at the versions above')
           "
 
+      # The two trees agree, and the rule that says so ships.
+      #
+      # `release_tree_rule.py` is the single implementation of "what is a
+      # source file", and it lives in `scripts/`, so it is in the commit tree.
+      # This reads no engine, no wheel and no display, so it is deliberately NOT
+      # conditioned on the wheel: a static audit behind a build step stops
+      # running the day the build breaks.
+      #
+      # **What it cannot do here, said out loud.** The development tree is
+      # `odock-mcode/`, which is not a git repository at all -- only
+      # `opendocking-gui/` is -- so a runner has exactly one tree and the three
+      # byte-for-byte comparisons are recorded as *not asserted* with that
+      # reason rather than silently passed. A second tree cannot be conjured up
+      # honestly either: cloning this repository twice yields two identical
+      # trees, equal by construction, measuring nothing. What does run is the
+      # audit of the rule, and a self-test that builds shadow copies of this
+      # checkout and mutates them in both directions, so the two-tree half is
+      # not left unexercised merely because it cannot execute here.
+      #
+      # The one direction nothing checks on any machine: a source file written
+      # and never committed. Inside the published tree, absent and never-written
+      # are the same observation. The oracle for it is `git ls-files` against
+      # the rule's shipped set; it is not in this step because it could not be
+      # tested on the machine that wrote it.
+      - name: The two trees agree, and the rule that says so ships
+        if: ${{ !cancelled() }}
+        run: python scripts/release_tree_parity_check.py
+
       # The meta-checks go first, and on purpose: `check_scripts_declare.py`
       # audits every other script's declared count, and `docs_claims_check.py`
       # scores the prose against the code. Running them last would mean a
@@ -353,6 +381,15 @@ jobs:
         run: |
           python scripts/structure_bond_check.py
           python scripts/representation_geometry_check.py
+          # The cartoon is guarded geometrically, not by searching for a string:
+          # its discriminator is the mean signed rotation rate of the ribbon's
+          # cross-section, which separates a twisted helical ribbon from a
+          # featureless one at +100.58 deg/residue against -0.11. A variance
+          # threshold cannot tell those two apart -- measured standard
+          # deviations are 7.07 and 7.02 -- so the tempting instrument is the
+          # wrong one, and a text search would not have caught the shipped
+          # defect either, which was this mode calling the ribbon's builder.
+          python scripts/representation_cartoon_check.py
 
       - name: Preparation reports what it dropped
         # Also a gate, and it needs no display. `prepare_receptor` keeps one
