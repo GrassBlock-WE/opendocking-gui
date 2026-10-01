@@ -752,6 +752,62 @@ def main() -> int:
         f"{win.cmb_representation.count()} entries",
     )
 
+    # Every colour the picture can contain that is not an atom colour has to
+    # be named somewhere on screen. A report said this was not so: loading a
+    # receptor draws the first pocket as magenta spheres, and the legend named
+    # only the four dashed interaction lines, so a colour appeared that
+    # nothing explained. "The 'site volume' checkbox is over there" is not the
+    # same claim as "this colour is the site volume", and the difference is
+    # the whole reason a legend exists.
+    from opendocking.workbench import (  # noqa: PLC0415
+        COLOR_CONTACT,
+        COLOR_POCKET,
+        CONTACT_LABELS,
+    )
+
+    swatches = [
+        (w.text(), w.styleSheet())
+        for w in win.findChildren(QtWidgets.QLabel)
+        if w.styleSheet().startswith("color: rgb(")
+    ]
+    legend_words = [
+        w.text() for w in win.findChildren(QtWidgets.QLabel)
+        if w.styleSheet().startswith("color: #9aa3ad")
+    ]
+    check(
+        "the legend names the site volume, not just the interaction lines",
+        "site volume" in legend_words,
+        f"legend reads {legend_words}",
+    )
+    # The swatch colour must be the colour the renderer uses, read from the
+    # same table -- otherwise the legend is a picture of a legend, and the
+    # claim "read from one table so it cannot drift" is only a comment.
+    def _rgb(style):
+        inner = style.split("rgb(", 1)[1].split(")", 1)[0]
+        return tuple(int(v) for v in inner.split(","))
+
+    pocket_rgb = tuple(int(round(v * 255)) for v in COLOR_POCKET)
+    check(
+        "the site-volume swatch is the colour the cloud is drawn in",
+        any(_rgb(style) == pocket_rgb and text == "●" for text, style in swatches),
+        f"pocket is rgb{pocket_rgb}; swatches {[(t, _rgb(s)) for t, s in swatches]}",
+    )
+    check(
+        "every interaction colour is in the legend too",
+        all(
+            any(_rgb(style) == tuple(int(round(v * 255)) for v in COLOR_CONTACT[k])
+                for _, style in swatches)
+            for k in COLOR_CONTACT
+        ),
+        f"{len(COLOR_CONTACT)} colours, {len(swatches)} swatches",
+    )
+    check(
+        "and every swatch names itself, so none is a bare colour",
+        len(legend_words) == len(swatches),
+        f"{len(swatches)} swatches against {len(legend_words)} labels "
+        f"{legend_words}",
+    )
+
     for key in REPRESENTATION_KEYS:
         index = win.cmb_representation.findData(key)
         win.cmb_representation.setCurrentIndex(index)
@@ -957,7 +1013,21 @@ def main() -> int:
         check("at least one hydrogen bond is found in a docked pose",
               any(c.kind == "hbond" for c in found),
               f"{sum(1 for c in found if c.kind == 'hbond')} h-bonds")
-        check("the interaction toggle is on by default", win5.cb_contacts.isChecked())
+        # The detail is not decoration. This check failed once with no
+        # explanation at all, which is the worst possible failure: a flaky
+        # check with nothing to look at is a check you learn to ignore, and an
+        # ignored check is a check that can be wrong forever. So it reports
+        # the state it is asserting about, and the state the viewport is in,
+        # because a difference between those two is where the answer is.
+        check(
+            "the interaction toggle is on by default",
+            win5.cb_contacts.isChecked(),
+            f"checkbox {win5.cb_contacts.isChecked()}, "
+            f"viewport.show_contacts {win5.viewport.show_contacts}, "
+            f"{len(found)} contacts, "
+            f"pocket thread running "
+            f"{getattr(win5, '_pocket_thread', None) is not None and win5._pocket_thread.isRunning()}",
+        )
 
         from opendocking.workbench.geometry import dashed_segments
 

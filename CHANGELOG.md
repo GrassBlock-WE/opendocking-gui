@@ -135,6 +135,18 @@ The project is pre-1.0. The `0.x` line is where the interfaces still move.
 
 ### Fixed
 
+- **A colour in the picture had no name anywhere on screen.** Loading a receptor
+  puts the box on the first pocket and draws that pocket's own grid points as
+  magenta spheres straight away, and the legend named only the four dashed
+  interaction lines. So a report read those spheres as unexplained balls in a
+  box. The legend now carries the site volume too, with a **dot** rather than a
+  line — it is a volume, and the shape of the swatch is part of what the legend
+  claims. "The `site volume` checkbox is over there" is not the same claim as
+  "this colour is the site volume", and that difference is the whole reason a
+  legend exists. Four checks now assert that every colour the viewport draws
+  that is not an atom colour is named, that the site-volume swatch is the
+  colour the cloud is actually drawn in, and that no swatch is left as a bare
+  colour with no label.
 - **The pocket search lost every real binding site it found.** A one-voxel
   isotropic dilation of the burial mask, applied *before* connected-component
   labelling, was there to stop thin sheets being reported as slivers. It did the

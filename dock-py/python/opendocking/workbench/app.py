@@ -937,11 +937,20 @@ class MainWindow(QtWidgets.QMainWindow):
         # are a worse feature than no colours. Each swatch is painted with the
         # same RGB the line renderer uses, read from one table, so the legend
         # cannot drift away from the picture.
+        #
+        # The site volume is in here too, and it is here because a report said
+        # it was not: loading a receptor puts a box on the first pocket and
+        # draws that pocket as a cloud of magenta spheres straight away, and
+        # the only legend entry was the four dashed interaction lines. So a
+        # colour appeared in the picture that nothing on screen named, and the
+        # first reading of it was "what are those balls". A dot rather than a
+        # line, because it is a volume and not a line -- the shape of the
+        # swatch is part of what the legend is claiming.
         legend = QtWidgets.QWidget()
         legend_row = QtWidgets.QHBoxLayout(legend)
         legend_row.setContentsMargins(0, 0, 0, 0)
         legend_row.setSpacing(8)
-        from . import COLOR_CONTACT, CONTACT_LABELS
+        from . import COLOR_CONTACT, COLOR_POCKET, CONTACT_LABELS
 
         for kind in ("hbond", "polar", "hydrophobic", "close"):
             r, g, b = (int(round(v * 255)) for v in COLOR_CONTACT[kind])
@@ -951,6 +960,19 @@ class MainWindow(QtWidgets.QMainWindow):
             text.setStyleSheet("color: #9aa3ad;")
             legend_row.addWidget(chip)
             legend_row.addWidget(text)
+
+        pr, pg, pb = (int(round(v * 255)) for v in COLOR_POCKET)
+        dot = QtWidgets.QLabel("●")
+        dot.setStyleSheet(f"color: rgb({pr},{pg},{pb}); font-weight: bold;")
+        dot.setToolTip(
+            "The selected site's own free space, drawn through the protein so "
+            "you can see whether it sits in a crevice. Toggle it with the "
+            "'site volume' box below."
+        )
+        dtext = QtWidgets.QLabel("site volume")
+        dtext.setStyleSheet("color: #9aa3ad;")
+        legend_row.addWidget(dot)
+        legend_row.addWidget(dtext)
         legend_row.addStretch(1)
         form.addRow("legend", legend)
 
