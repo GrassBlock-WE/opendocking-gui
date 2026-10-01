@@ -280,7 +280,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("-o", "--output", type=Path, help="output file or directory")
     p.add_argument(
-        "-e", "--exhaustiveness", type=int, default=8, help="independent search walks"
+        "-e",
+        "--exhaustiveness",
+        type=int,
+        default=None,
+        help="independent search walks; default follows the box's volume, "
+        "because the same walks spread through a bigger box find less "
+        f"(see `exhaustiveness_for_box`)",
     )
     p.add_argument("-m", "--num_modes", type=int, default=9, help="distinct poses to report")
     p.add_argument("--rmsd-cutoff", type=_positive_float, default=1.0, help="Ångström")
@@ -475,7 +481,13 @@ def _cmd_sites(args: argparse.Namespace) -> int:
 
 
 def _cmd_dock(args: argparse.Namespace) -> int:
-    from .core import Receptor, dock, load_ligand, load_receptor
+    from .core import (
+        Receptor,
+        dock,
+        exhaustiveness_for_box,
+        load_ligand,
+        load_receptor,
+    )
 
     ligands = _collect_ligands(args.ligand)
     if not ligands:
@@ -514,6 +526,23 @@ def _cmd_dock(args: argparse.Namespace) -> int:
         file=sys.stderr,
     )
 
+    # Resolved here rather than in argparse, because it needs the box and the
+    # box is not known until `_resolve_box` has run. Saying so out loud matters:
+    # exhaustiveness used to be a constant in the help text, and a number that
+    # changes with the box is a number the reader has to be told about, or they
+    # will assume a fixed 8 and wonder why two runs of "the same" search
+    # disagree.
+    if args.exhaustiveness is None:
+        exhaustiveness = exhaustiveness_for_box(box_.size)
+        sides = " x ".join(f"{float(v):.0f}" for v in box_.size)
+        print(
+            f"exhaustiveness: {exhaustiveness} (default for a {sides} A box; "
+            f"pass -e to choose your own)",
+            file=sys.stderr,
+        )
+    else:
+        exhaustiveness = args.exhaustiveness
+
     out_dir: Path | None = None
     out_file: Path | None = None
     if args.output is not None:
@@ -542,7 +571,7 @@ def _cmd_dock(args: argparse.Namespace) -> int:
         result = dock(
             ligand,
             maps,
-            exhaustiveness=args.exhaustiveness,
+            exhaustiveness=exhaustiveness,
             num_modes=args.num_modes,
             rmsd_cutoff=args.rmsd_cutoff,
             seed=args.seed,

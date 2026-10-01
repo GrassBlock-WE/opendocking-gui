@@ -13,6 +13,32 @@ The project is pre-1.0. The `0.x` line is where the interfaces still move.
 
 ### Added
 
+- **Search effort now follows the search box.** Exhaustiveness is a count of
+  Monte Carlo walks, and walks are spread through the box they search, so a
+  fixed 8 that comfortably covers a 20 Å box is spread four times thinner in a
+  40 Å one. The pocket search will happily hand you a 39 × 26 × 41 Å box for a
+  winding cleft, and a search that under-samples returns a bad *pose* — which
+  looks exactly like the box being wrong. Measured on that box: **12.88 Å RMSD
+  at exhaustiveness 16, 1.26 Å at 64**, two seconds either way. Same box, same
+  receptor, same ligand, same seed.
+  - The workbench's exhaustiveness box follows the box size, and **stops
+    following the moment you set it yourself** — a control that overwrites what
+    you typed is worse than one that never helped, because you learn to distrust
+    the one number whose effect you cannot see until after the run.
+  - `odcli` derives it when you do not pass `-e`, and **prints the value and the
+    reason**. It used to be a constant in the help text, and a number that moves
+    with the box has to be said out loud or you will assume 8 and wonder why two
+    runs of "the same" search disagree.
+  - The rule is `opendocking.core.exhaustiveness_for_box`, shared by all three
+    callers. The benchmark already had a copy and **it had drifted**: its ladder
+    started at 16 where the engine's starts at 8. One rule in one place, or
+    three rules that disagree.
+  - Scaling is **linear in the box's volume**, deliberately. One calibration
+    point says a 5.2× bigger box needs at least 8× the walks; a power law could
+    be fitted to match that exactly, and fitting a law to a single measurement
+    is a way of pretending to know something. Linear is a whole number, is on
+    the conservative side of the number we have, and "8 walks per 8000 Å³" fits
+    in your head.
 - **`scripts/redock_benchmark.py`**: docking a ligand that is *already bound* in
   a crystal structure, and asking whether the search finds it back. This is the
   check the project was missing. Three columns, because they are three
@@ -369,7 +395,7 @@ The project is pre-1.0. The `0.x` line is where the interfaces still move.
   until the number looks better.
 - **Re-docking from the automatic box reproduces crambin's reference energy but
   not its pose.** Docking ibuprofen into the site crambin's reference pose
-  occupies gives −5.42 kcal/mol against the reference's −5.50, at 3.93 Å RMSD.
+  occupies gives −5.36 kcal/mol against the reference's −5.50, at 4.24 Å RMSD.
   The energy is reproduced; the pose is not. Crambin with ibuprofen has
   near-degenerate binding modes, and landing in a different one is a property
   of the energy surface rather than evidence that the box was misplaced — the

@@ -340,6 +340,77 @@ def main() -> int:
           "a 1 A3 ceiling empties crambin")
 
     # ------------------------------------------------------------------
+    section("search effort follows the box, and the user can overrule it")
+
+    # A pocket search will happily hand over a 39 x 26 x 41 A box for a winding
+    # cleft, and a fixed exhaustiveness under-samples every large box: walks
+    # are spread through the volume they search. Measured on the 3PTB site box,
+    # 12.88 A RMSD at 16 and 1.26 A at 64, two seconds either way. The rule
+    # lives in the engine so the workbench, the CLI and the benchmark share it.
+    from opendocking.core import (  # noqa: PLC0415
+        EXHAUSTIVENESS_LADDER,
+        REFERENCE_BOX_SIDE,
+        exhaustiveness_for_box,
+    )
+
+    # Forward: the boxes measured in the redocking benchmark, and what the rule
+    # says for each. The 39 x 26 x 41 one is the calibration point -- it is the
+    # box that read 12.88 A at 16 and 1.26 A at 64 -- so a rule that answered
+    # "16" there would be reproducing the number that was wrong.
+    for size, want in (((20.0,) * 3, 8),
+                       ((22.0, 22.0, 22.0), 16),
+                       ((39.0, 26.0, 41.0), 64),
+                       ((30.0, 38.0, 32.0), 64)):
+        check(
+            f"a {int(size[0])}x{int(size[1])}x{int(size[2])} A box gets "
+            f"exhaustiveness {want}",
+            exhaustiveness_for_box(size) == want,
+            f"rule says {exhaustiveness_for_box(size)}",
+        )
+
+    # Reverse: every rung has to be reachable, or the rule is a constant
+    # wearing a formula. A sweep of cube sides is used rather than a handful of
+    # round numbers because the rungs are narrow bands -- sides 20, 30 and 45
+    # jump clean over 16 and 64 and would leave a rule that silently skipped
+    # them looking fine.
+    reached = {
+        exhaustiveness_for_box((s, s, s))
+        for s in (10.0, 20.0, 22.0, 26.0, 30.0, 40.0, 50.0, 60.0, 90.0)
+    }
+    check(
+        "every rung of the ladder is reachable, so this is not a constant",
+        reached == set(EXHAUSTIVENESS_LADDER),
+        f"reached {sorted(reached)}, ladder {list(EXHAUSTIVENESS_LADDER)}",
+    )
+    check(
+        "and each rung answers to a band of boxes, not to a single size",
+        exhaustiveness_for_box((22.0,) * 3) == 16
+        and exhaustiveness_for_box((25.0,) * 3) == 16
+        and exhaustiveness_for_box((31.0,) * 3) == 32,
+        "22 and 25 A cubes both land on 16; 31 A moves to 32",
+    )
+    check(
+        "and a reference-sized box is the conventional default",
+        exhaustiveness_for_box((REFERENCE_BOX_SIDE,) * 3)
+        == EXHAUSTIVENESS_LADDER[0],
+        f"{REFERENCE_BOX_SIDE:.0f} A cube -> "
+        f"{exhaustiveness_for_box((REFERENCE_BOX_SIDE,) * 3)}",
+    )
+    check(
+        "a box too big for the ladder is capped, not extrapolated",
+        exhaustiveness_for_box((200.0,) * 3) == EXHAUSTIVENESS_LADDER[-1],
+        f"200 A cube -> {exhaustiveness_for_box((200.0,) * 3)}, "
+        f"top rung {EXHAUSTIVENESS_LADDER[-1]}",
+    )
+    check(
+        "it only reads the three side lengths, not anything else",
+        exhaustiveness_for_box((39.0, 26.0, 41.0))
+        == exhaustiveness_for_box((41.0, 39.0, 26.0))
+        == exhaustiveness_for_box((26.0, 41.0, 39.0)),
+        "permuting the sides must not change the answer",
+    )
+
+    # ------------------------------------------------------------------
     section("every threshold can empty the result, and every one can loosen it")
 
     # Reverse verification. Each of these is checked in *both* directions: a

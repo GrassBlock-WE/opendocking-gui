@@ -41,6 +41,9 @@ __all__ = [
     "load_receptor",
     "load_ligand",
     "auto_box",
+    "exhaustiveness_for_box",
+    "EXHAUSTIVENESS_LADDER",
+    "REFERENCE_BOX_SIDE",
     "gpu_status",
     "available_backends",
     "scoring_descriptions",
@@ -50,6 +53,54 @@ __all__ = [
 
 #: Scoring functions the engine understands.
 SCORING_FUNCTIONS = ("vina", "vinardo")
+
+#: The side of the box that `exhaustiveness_for_box` treats as "no extra
+#: effort needed". A ligand-sized search box is 20 A on a side; that is the
+#: case the conventional default of 8 was actually chosen for.
+REFERENCE_BOX_SIDE = 20.0
+
+#: Sampling effort, as a ladder rather than a formula, so the number a run
+#: used can be read off by hand and is the same on every machine.
+EXHAUSTIVENESS_LADDER = (8, 16, 32, 64, 128)
+
+
+def exhaustiveness_for_box(size) -> int:
+    """A sensible number of search walks for a box of this size.
+
+    Exhaustiveness is a count of Monte Carlo walks, and walks are spread
+    through the box they search. The same 8 that comfortably covers a
+    20 A box is spread four times thinner in a 40 A one, so a fixed value
+    quietly under-samples every large box -- and a search that under-samples
+    reports a bad *pose*, which is indistinguishable from the box being
+    wrong. This is not a theory; it is what the redocking benchmark measured
+    on the 3PTB site box, 39 x 26 x 41 A:
+
+        exhaustiveness  16 -> 12.88 A RMSD,  -3.67 kcal/mol,  1 s
+        exhaustiveness  64 ->  1.26 A RMSD,  -3.88 kcal/mol,  2 s
+        exhaustiveness 128 ->  1.26 A RMSD,  -3.88 kcal/mol,  3 s
+
+    Same box, same receptor, same ligand, same seed. The box was fine; the
+    search had not been given enough room to find the mode.
+
+    Linear in the box's volume, and deliberately so. One calibration point
+    says a 5.2x bigger box needs at least 8x the walks; a power law could be
+    fitted to make that come out exactly, and a power law fitted to a single
+    measurement is a way of pretending to know something. Linear is a
+    whole number, it is on the conservative side of the one number we have,
+    and "8 walks per 8000 A^3" is a thing you can hold in your head.
+
+    This is a *default*, and callers are free to ignore it. The one thing not
+    free is pretending the two are the same claim: "1.2 A found in a 41,000 A^3
+    box at 64" and "1.2 A found in a 3,000 A^3 box at 8" are different results,
+    and a report that prints both as "1.2 A" is hiding the difference.
+    """
+    volume = float(np.prod(np.asarray(tuple(size), np.float64)))
+    reference = REFERENCE_BOX_SIDE ** 3
+    want = EXHAUSTIVENESS_LADDER[0] * (volume / reference)
+    for rung in EXHAUSTIVENESS_LADDER:
+        if rung >= want:
+            return rung
+    return EXHAUSTIVENESS_LADDER[-1]
 
 
 def engine_version() -> str:

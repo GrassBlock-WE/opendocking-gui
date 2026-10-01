@@ -61,7 +61,12 @@ except ImportError:  # pragma: no cover - only on an uninstalled checkout
     sys.path.insert(0, str(ROOT / "dock-py" / "python"))
 
 from opendocking import core, prep  # noqa: E402
-from opendocking.core import GridBox, Receptor  # noqa: E402
+from opendocking.core import (  # noqa: E402
+    EXHAUSTIVENESS_LADDER,
+    GridBox,
+    Receptor,
+    exhaustiveness_for_box,
+)
 from opendocking.workbench import MoleculeView  # noqa: E402
 from opendocking.workbench import pockets as P  # noqa: E402
 
@@ -80,43 +85,18 @@ CASES = [
 BOX_MARGIN = 6.0
 SEED = 20260930
 
-#: A small ligand's own box, ångström cubed. The reference for how hard to
-#: search: 20 A on a side is a box a well-behaved search handles at the
-#: bottom of the ladder.
-REFERENCE_VOLUME = 20.0 ** 3
-#: Sampling effort, chosen from the box's volume rather than fixed.
-#:
-#: This is not a knob turned to make the numbers look better, it is the
-#: reason the first run of this benchmark read 12.9 A where the same box
-#: reads 1.3 A. Exhaustiveness is a number of Monte Carlo steps, and steps
-#: spent in a 41,000 A^3 box are spread thinner than the same steps in an
-#: 8,000 A^3 one -- so a fixed value quietly under-samples every large box
-#: and makes the box look like the problem when the search was. Measured on
-#: the 3PTB site box, 39 x 26 x 41 A: 12.88 A at 16, 1.26 A at 64, 1.26 A at
-#: 128. Two seconds either way. The ladder is a set of rungs rather than a
-#: formula so the number is reproducible by hand.
-LADDER = (16, 32, 64, 128)
-
-
-def exhaustiveness_for(size) -> int:
-    """Sampling effort for a box, from its volume and the set of rungs.
-
-    Volume to the two-thirds power rather than linearly: what decides whether
-    a random walk finds a mode is roughly how far it can travel, which grows
-    like a length, and only two of the three box dimensions are spanned by a
-    search that starts anywhere in the box.
-    """
-    volume = float(np.prod(np.asarray(size, np.float64)))
-    want = EXHAUSTIVENESS * (volume / REFERENCE_VOLUME) ** (2.0 / 3.0)
-    for rung in LADDER:
-        if rung >= want:
-            return rung
-    return LADDER[-1]
-
-
-#: Effort for the small, ligand-sized boxes. Kept separate so the
-#: bound-ligand column is comparable with every earlier run of this file.
-EXHAUSTIVENESS = LADDER[0]
+# The effort a search gets is not a constant here either. Exhaustiveness is a
+# count of Monte Carlo walks and walks are spread through the box they search,
+# so a fixed value quietly under-samples every large box and makes the box look
+# like the problem when the search was. Measured on the 3PTB site box,
+# 39 x 26 x 41 A: 12.88 A RMSD at 16, 1.26 A at 64, 1.26 A at 128 -- two seconds
+# either way.
+#
+# The rule lives in `opendocking.core.exhaustiveness_for_box` because the
+# workbench and `odcli` need exactly the same rule, and three copies of one
+# rule is how they start disagreeing. This file used to have its own, and it
+# had already drifted: its ladder started at 16 where the engine's starts at 8.
+EXHAUSTIVENESS = EXHAUSTIVENESS_LADDER[0]
 
 RCSB = "https://files.rcsb.org/download/{pid}.pdb"
 
@@ -180,7 +160,7 @@ def dock_into(receptor, ligand, centre, size, ref_coords):
     printed both as "1.2 A" would be hiding the difference.
     """
     started = time.perf_counter()
-    ex = exhaustiveness_for(size)
+    ex = exhaustiveness_for_box(size)
     maps = receptor.precalculate(
         GridBox.from_center_size(tuple(centre), tuple(size)), "vina", 0.375
     )

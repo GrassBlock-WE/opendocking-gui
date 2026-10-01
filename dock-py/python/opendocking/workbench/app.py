@@ -1048,9 +1048,33 @@ class MainWindow(QtWidgets.QMainWindow):
         self.center_spins = self._spin_row(form, "box centre", -9999.0, 9999.0)
         self.size_spins = self._spin_row(form, "box size", 1.0, 500.0, value=22.0)
 
+        # Exhaustiveness is a number of search walks, and walks are spread
+        # through the box. A fixed 8 is right for a ligand-sized box and four
+        # times too thin for a 40 A one -- the pocket search will happily hand
+        # the user a 39 x 26 x 41 A box for a winding cleft, and a search that
+        # under-samples reports a bad *pose*, which looks exactly like the box
+        # being wrong. Measured on that box: 12.88 A RMSD at 16, 1.26 A at 64.
+        #
+        # So the spin box follows the box unless the user has set it
+        # themselves, and the tooltip says why the number is not a constant.
+        # `exhaustiveness_for_box` is the engine's, shared with `odcli` and the
+        # redocking benchmark, so there is one rule in three places rather than
+        # three rules that drift apart.
         self.sp_exhaust = QtWidgets.QSpinBox()
         self.sp_exhaust.setRange(1, 256)
         self.sp_exhaust.setValue(8)
+        self.sp_exhaust.setToolTip(
+            "Independent search walks. Suggested for the current box; it rises "
+            "with the box's volume, because the same walks spread through a "
+            "bigger box find less. Lower it to go faster, raise it if the "
+            "poses look wrong."
+        )
+        self._exhaust_is_default = True
+        # Set before the first `setValue` above can emit, and read by
+        # `_suggest_exhaustiveness`'s guard. The attribute has to exist before
+        # any signal can fire, so it is set here rather than at first use.
+        self._updating_exhaust = False
+        self.sp_exhaust.valueChanged.connect(self._on_exhaust_edited)
         form.addRow("exhaustiveness", self.sp_exhaust)
 
         self.sp_seed = QtWidgets.QSpinBox()
@@ -1594,7 +1618,56 @@ class MainWindow(QtWidgets.QMainWindow):
             [s.value() for s in self.center_spins], np.float32
         )
         self.viewport.box_size = np.asarray([s.value() for s in self.size_spins], np.float32)
+        self._suggest_exhaustiveness()
         self.viewport.update()
+
+    def _on_exhaust_edited(self, _value: int) -> None:  # pragma: no cover - GUI
+        """The user took the exhaustiveness over; stop suggesting."""
+        if getattr(self, "_updating_exhaust", False):
+            return
+        self._exhaust_is_default = False
+        self.sp_exhaust.setToolTip(
+            "Independent search walks. Set by you, so it is yours: the window "
+            "will not change it back when the box changes."
+        )
+
+    def _suggest_exhaustiveness(self) -> None:  # pragma: no cover - GUI
+        """Keep the search effort in step with the box, until the user says otherwise.
+
+        The only caller is `_on_box_changed`, which is the single place the box
+        changes -- whether a pocket row put it there or a spin box did -- so
+        there is one path by which the suggestion can be made and no second
+        place to forget.
+
+        Once the user touches the spin box the suggestion stops, permanently.
+        A control that keeps overwriting what you typed is worse than a
+        control that never helped: you learn to distrust the one number you
+        cannot see the effect of until after the run.
+        """
+        from ..core import exhaustiveness_for_box
+
+        if not getattr(self, "_exhaust_is_default", True):
+            return
+        size = tuple(float(s.value()) for s in self.size_spins)
+        want = exhaustiveness_for_box(size)
+        if int(self.sp_exhaust.value()) == want:
+            return
+        # Guarded, because `setValue` emits `valueChanged` and that is the very
+        # signal used to decide the user has taken over. Without the guard the
+        # suggestion marks itself as a user edit on its first application and
+        # never applies again -- which looks exactly like the feature never
+        # having been written.
+        self._updating_exhaust = True
+        try:
+            self.sp_exhaust.setValue(want)
+            self.sp_exhaust.setToolTip(
+                f"suggested for a {size[0]:.0f} x {size[1]:.0f} x {size[2]:.0f} A "
+                f"box. Walks are spread through the box, so a bigger box needs "
+                f"more of them; the same number that finds a pose in a 20 A box "
+                f"can miss it in a 40 A one."
+            )
+        finally:
+            self._updating_exhaust = False
 
     def _on_pose_selected(self, row: int) -> None:  # pragma: no cover - GUI
         if row < 0 or not self._pose_models or self._pose_view is None:

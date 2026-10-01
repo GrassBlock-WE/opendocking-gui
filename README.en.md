@@ -236,6 +236,16 @@ A large receptor takes a while, but the window stays usable.
   flat on the surface scores zero and is never listed, and the largest site is
   not necessarily the one your ligand wants. It is a shortlist to choose from,
   and choosing is the part it leaves to you.
+- **Exhaustiveness follows the search box.** It is a count of Monte Carlo walks,
+  and walks are spread through the box they search, so a fixed 8 that covers a
+  20 Å box is four times too thin for a 40 Å one — and an under-sampled search
+  returns a bad *pose*, which looks exactly like the box being wrong. Measured
+  on a 39 × 26 × 41 Å box: **12.88 Å at 16, 1.26 Å at 64**, two seconds either
+  way. `odcli` derives it when you do not pass `-e` and prints the value and the
+  reason; the workbench follows the box until you set it yourself, and then
+  leaves it alone. The rule is `opendocking.core.exhaustiveness_for_box`, shared
+  by all three callers, and it scales **linearly in the box's volume** — one
+  calibration point does not license a fitted power law.
 - **A snug binding site is found but ranked low.** On crambin with ibuprofen, the
   site the ligand occupies is **12 Å³** and comes **ninth of sixteen**, behind
   three larger lumps of surface. That is not a bug: the search measures the space
@@ -256,7 +266,7 @@ A large receptor takes a while, but the window stays usable.
   rather than that the site is wrong.
 - **Re-docking from the automatic box reproduces crambin's reference energy but
   not its pose.** Docking ibuprofen into the site the reference pose occupies
-  gives −5.42 kcal/mol against the reference's −5.50, at 3.93 Å RMSD. The energy
+  gives −5.36 kcal/mol against the reference's −5.50, at 4.24 Å RMSD. The energy
   is reproduced; the pose is not. Crambin with ibuprofen has near-degenerate
   binding modes, and that is a property of the energy surface, not a misplaced box.
 - **The 1500 Å³ ceiling on a site is a heuristic**, not a derived quantity. It is
