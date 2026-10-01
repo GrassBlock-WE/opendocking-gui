@@ -47,6 +47,12 @@ CRAMBIN_POSE = ROOT / "examples" / "crambin_pose.pdbqt"
 FAILURES: list[str] = []
 CHECKS = 0
 
+#: How many checks this file is supposed to run, counted by running it. It is a
+#: check itself, at the end of `main`, because most of the calls sit inside data
+#: guards and a check that stops running takes the total down with it, silently.
+#: Change this number only when a check is deliberately added or removed.
+EXPECTED_CHECKS = 153  # measured from a green run, including the check that reads it
+
 
 def check(name, ok, detail=""):
     global CHECKS
@@ -438,6 +444,124 @@ def main() -> int:
           >= len(P.find_pockets(shell, ["C"] * len(shell), max_volume=1500.0)))
 
     # ------------------------------------------------------------------
+    section("a ceiling that only ever gets absurd values is not a tested filter")
+
+    # Every check above that exercises `max_volume` passes 0.0, 1.0 or 1e9, so
+    # a filter deleted outright is caught only by those, and nothing says what
+    # the ceiling does at a value anyone would actually type. On crambin it
+    # does nothing at all: the largest site is 88 A3 against a 1500 A3
+    # ceiling, 17x of headroom, and zero sites differ between "no ceiling" and
+    # "the default ceiling". The fixture below is one where the default bites.
+    def big_shell(inner=18.0, outer=25.0, n_in=700, n_out=900):
+        """Two nested shells far enough apart to hold a cavern, not a pocket."""
+        return np.vstack([sphere(inner, n_in), sphere(outer, n_out)])
+
+    cavern_atoms = big_shell()
+    cavern_els = ["C"] * len(cavern_atoms)
+    cavern = P.find_pockets(cavern_atoms, cavern_els, max_pockets=99,
+                            max_volume=1e9)
+    check("a big sealed cavern is found when there is no ceiling",
+          len(cavern) == 2,
+          f"{len(cavern)} site(s) at max_volume=1e9: "
+          f"{[f'{p.volume:.0f} A3' for p in cavern]}")
+    if cavern:
+        top = cavern[0]
+        ratio = float(np.prod(top.size)) / top.volume
+        check("and the default ceiling removes it, at a value one would type",
+              len(P.find_pockets(cavern_atoms, cavern_els, max_pockets=99)) == 0
+              and top.volume > P.DEFAULT_MAX_VOLUME,
+              f"its {top.volume:.0f} A3 is over the {P.DEFAULT_MAX_VOLUME:.0f} A3 "
+              f"default, so 2 sites -> 0; this is the first fixture in the file "
+              f"where the default ceiling does any work at all")
+        check("while its box is {ratio:.0f}x its own space, so the two measures "
+              "genuinely disagree".format(ratio=ratio),
+              ratio >= 5.0 and top.volume <= float(np.prod(top.size)),
+              f"{top.volume:.0f} A3 of space in a {float(np.prod(top.size)):.0f} "
+              f"A3 box: the old bounding-box metric would have rejected this "
+              f"site too, and the ceiling is what rejects it now")
+        # Both directions at a realistic threshold, one site at a time: raise
+        # the ceiling just past the cavern's own volume and exactly that site
+        # returns; drop it just below and the list empties again. Without this
+        # the only thing pinned about the ceiling is that absurd values work.
+        back = P.find_pockets(cavern_atoms, cavern_els, max_pockets=99,
+                              max_volume=top.volume + 100.0)
+        gone = P.find_pockets(cavern_atoms, cavern_els, max_pockets=99,
+                              max_volume=top.volume - 100.0)
+        check("a ceiling just above the cavern's volume brings that one back",
+              len(back) == 1 and abs(back[0].volume - top.volume) < 1e-6,
+              f"{top.volume + 100.0:.0f} A3 -> {len(back)} site(s), "
+              f"{back[0].volume:.0f} A3" if back else "none")
+        check("and one just below it empties the list again",
+              len(gone) == 0,
+              f"{top.volume - 100.0:.0f} A3 -> {len(gone)} site(s), which is the "
+              f"same site from the other side of its own volume")
+
+    # The relaxation itself, stated as an invariant over every fixture in the
+    # file: a site's own volume can never exceed its bounding box, because the
+    # box contains the site. So switching the ceiling's metric from the box to
+    # the voxels can only ever *admit more*, never fewer, and the two places
+    # that difference is visible are both checked: the dogleg below is a cleft
+    # the old metric threw away and the new one keeps, and this cavern is one
+    # both metrics reject.
+    if all_sites and cavern:
+        every = list(all_sites) + list(cavern) + list(found)
+        ratios = [float(np.prod(p.size)) / p.volume for p in every]
+        check("a site's own volume never exceeds its bounding box, anywhere",
+              all(p.volume <= float(np.prod(p.size)) + 1e-6 for p in every)
+              and min(ratios) >= 1.0,
+              f"{len(every)} sites across three fixtures, bbox/voxel "
+              f"{min(ratios):.2f}..{max(ratios):.2f}; the metric change is a "
+              f"relaxation and that is the whole of what it is")
+
+    # ------------------------------------------------------------------
+    section("the box is the site's size plus twice the padding, on every axis")
+
+    # The 3PTB cleft's extent was written into the module docstring as
+    # 22 x 17 x 28 A while the benchmark reported a 39 x 26 x 41 A box for the
+    # same site, and the two sat in the same release for as long as the file
+    # existed. 22 + 8 = 30, not 39. Nothing recomputed one from the other, so
+    # nothing noticed. This pins the relationship the docstrings are derived
+    # from, exactly, so the arithmetic has somewhere to be wrong rather than
+    # hiding in prose. It cannot catch a wrong docstring; it can stop the code
+    # and the comment drifting apart silently.
+    def padding_holds(these, label):
+        bad = []
+        for p in these:
+            for padding in (0.0, 1.3, P.DEFAULT_PADDING, 7.5):
+                _, got = p.box_center_and_size(padding)
+                want = np.asarray(p.size, np.float32) + np.float32(2.0 * padding)
+                if not np.array_equal(np.asarray(got, np.float32), want):
+                    bad.append((p.voxels, padding))
+        return not bad, bad
+
+    ok_real, bad_real = padding_holds(all_sites, "crambin")
+    check("every crambin box is its own size plus twice the padding, exactly",
+          ok_real,
+          f"{len(all_sites)} sites at padding 0.0, 1.3, {P.DEFAULT_PADDING} and "
+          f"7.5: bit-equal on all three axes"
+          if ok_real else f"mismatches {bad_real[:3]}")
+    synthetic = list(found) + list(cavern)
+    ok_syn, bad_syn = padding_holds(synthetic, "synthetic") if synthetic else (False, [])
+    check("and so is every synthetic fixture's, so the rule is not a crambin quirk",
+          ok_syn and len(synthetic) >= 2,
+          f"{len(synthetic)} sites across the dogleg cleft and the cavern"
+          if ok_syn else f"mismatches {bad_syn[:3]}")
+    # Both directions: the padding is added on every axis, and zero padding
+    # adds nothing at all. A rule that only ever added to the longest axis
+    # would satisfy neither.
+    if all_sites:
+        p0 = all_sites[0]
+        _, s0 = p0.box_center_and_size(0.0)
+        _, s1 = p0.box_center_and_size(1.0)
+        check("padding adds to all three axes and zero adds nothing",
+              all(abs(float(a) - float(b)) < 1e-4
+                  for a, b in zip(s0, np.asarray(p0.size, np.float32)))
+              and all(abs(float(b) - float(a) - 2.0) < 1e-4
+                      for a, b in zip(s0, s1)),
+              f"size {np.round(p0.size, 1)} + 0.0 -> {np.round(s0, 1)}, "
+              f"+ 1.0 -> {np.round(s1, 1)}")
+
+    # ------------------------------------------------------------------
     section("crambin, with ibuprofen actually docked into it")
 
     pose = MoleculeView.from_pdbqt(CRAMBIN_POSE, "pose", (1, 1, 1), 0.32, role="pose")
@@ -481,23 +605,47 @@ def main() -> int:
               held[best] == len(pose_pts),
               f"best is rank {best + 1} of {len(sites)}, {held[best]}/"
               f"{len(pose_pts)} atoms; the shortlist holds {held}")
-        check("and the shortlist is long enough to include it",
-              held[best] == len(pose_pts),
-              f"rank {best + 1} against a default of {P.DEFAULT_MAX_POCKETS}. "
-              f"At 8 this site was cut off: it is 12 A^3 and crambin has "
-              f"three larger lumps of surface ahead of it")
+        # This used to be a second copy of the boolean above, with a different
+        # sentence underneath it. A check that can only fail when the one above
+        # already failed inflates the count without testing anything, and the
+        # sentence was not even true: it claimed "rank 9 against a default of
+        # 12" when the measured position is 8 of 12 (9 is its rank out of all
+        # sixteen crambin offers, a different list). The claim this was *for* is
+        # real and worth keeping -- the default list is long enough to reach a
+        # site ranked 8 -- so it is stated as the thing it is: the list length
+        # boundary, computed on both sides of it.
+        shortlist = P.find_pockets(rec_pts, list(rec.elements),
+                                   residues=rec.residue_labels(),
+                                   max_pockets=best)
+        short_held = [int(in_box(pose_pts, *p.box_center_and_size()).sum())
+                      for p in shortlist]
+        check("and the list is long enough to reach that site, not one shorter",
+              max(short_held, default=0) < len(pose_pts)
+              and max(held, default=0) == len(pose_pts),
+              f"a list cut to rank {best} keeps at most "
+              f"{max(short_held, default=0)}/{len(pose_pts)} ligand atoms; the "
+              f"default of {P.DEFAULT_MAX_POCKETS} keeps all of them")
 
-        # Ranked ninth, not first, and that is the data rather than a target.
-        # What is worth locking in is that the site is in the shortlist and
-        # that it is the one whose box works, so a ranking change that buries
-        # it entirely is caught. Asserting "first" would be asserting a
-        # result crambin does not support: its groove is a snug fit, so the
-        # free space left around the ligand is almost nothing.
-        check("and it is not the first thing on crambin, which is the point",
-              best > 0,
-              f"rank {best + 1}, {best_site.volume:.0f} A^3, and three larger "
-              f"surface lumps come first -- a snug pocket leaves little space "
-              f"behind the ligand, so volume cannot rank it")
+        # What is worth locking in here is *why* the site is late, not that it
+        # is late. Crambin's real site ranks 8th because the search measures
+        # the space a ligand **leaves**, not the space it occupies: where a
+        # ligand fits snugly that space is nearly nothing. So the honest fact
+        # is about the site's own volume against the rest of the list, and that
+        # stays true however `rank_score` is retuned. The previous version
+        # asserted `best > 0` -- "this site is not first" -- which goes red the
+        # moment the ranking improves, i.e. it punished the thing it was
+        # watching for.
+        vols = sorted(p.volume for p in sites)
+        median = vols[len(vols) // 2]
+        check("the docked site is below the middle of the list on volume",
+              best_site.volume < median,
+              f"{best_site.volume:.0f} A3 against a median of {median:.0f} A3 "
+              f"over {vols[:4]}...{vols[-2:]}: a snug pocket leaves little space "
+              f"behind the ligand, so the quantity being ranked cannot find it")
+        check("and it is not the largest site on the list either",
+              best_site.volume < max(vols) and best_site.volume >= min(vols),
+              f"{min(vols):.0f}..{max(vols):.0f} A3 across the shortlist; the "
+              f"site the ligand is actually sitting in is {best_site.volume:.0f}")
         names = {r for r, _ in best_site.lining}
         # An independent count, not a restatement: which receptor residues
         # have any atom within 4.5 A of this same pose. The site's lining is
@@ -527,8 +675,121 @@ def main() -> int:
               f"{int(in_box(pose_pts, rec_centroid, best_size).sum())}/{len(pose_pts)}, "
               f"so the centre is the part that was wrong")
 
+    # ------------------------------------------------------------------
+    section("the thickness filter, and the gap it cannot see")
+
+    # `min_extent` is the filter that stops a dent in the surface being listed
+    # as a site. Its check used to pass `min_extent=99`, which is the same shape
+    # of test the volume ceiling got: it proves the filter *exists* and says
+    # nothing about what it does. Both directions, on a real protein, at values a
+    # person would type, and on the **untruncated** list -- crambin offers 16
+    # sites and the default shows 12, so a filtered top-12 and the unfiltered
+    # top-12 are not nested lists and counting one against the other says
+    # nothing. (That mistake was made and caught while writing this: 12 -> 10
+    # sites looks like "two of the three thin ones went" until you notice the
+    # pool is 16 deep and a previously-truncated site was promoted in.) The
+    # 1e-4 tolerances are not decoration: a site's size comes out of float32
+    # arithmetic, so crambin's two-voxel site is 1.6000000238 A and a bare
+    # `<= 1.6` is False.
+    def crambin_at(**kw):
+        return P.find_pockets(rec_pts, list(rec.elements), max_pockets=99, **kw)
+
+    def site_key(p):
+        return (round(float(p.volume), 6), round(float(p.center[0]), 3),
+                round(float(p.center[1]), 3), round(float(p.center[2]), 3))
+
+    one_voxel = 1.0 * P.DEFAULT_SPACING
+    two_voxel = 2.0 * P.DEFAULT_SPACING
+    thinnest = crambin_at(min_extent=0.0)
+    default = crambin_at()
+    default_keys = {site_key(p) for p in default}
+    below = [p for p in thinnest if float(np.min(p.size)) < two_voxel - 1e-4]
+    check("the default floor is two voxels, and it is exactly what removes the "
+          "single-voxel sites",
+          abs(min(float(np.min(p.size)) for p in thinnest) - one_voxel) < 1e-4
+          and len(default) == len(thinnest) - len(below)
+          and all(site_key(p) not in default_keys for p in below)
+          and bool(below),
+          f"with the floor at nothing crambin offers {len(thinnest)} sites, "
+          f"thinnest {min(float(np.min(p.size)) for p in thinnest):.1f} A = one "
+          f"voxel; the default {two_voxel:.1f} A floor removes exactly those "
+          f"{len(below)}, leaving {len(default)}")
+    raised = crambin_at(min_extent=3.0 * P.DEFAULT_SPACING)
+    raised_keys = {site_key(p) for p in raised}
+    two_vox_sites = [p for p in default
+                     if float(np.min(p.size)) <= two_voxel + 1e-4]
+    check("raising it to three voxels drops exactly the two-voxel sites",
+          len(raised) == len(default) - len(two_vox_sites)
+          and all(site_key(p) not in raised_keys for p in two_vox_sites)
+          and bool(two_vox_sites)
+          and min(float(np.min(p.size)) for p in raised) > two_voxel + 1e-4,
+          f"{len(default)} -> {len(raised)} sites at "
+          f"{3.0 * P.DEFAULT_SPACING:.1f} A; the {len(two_vox_sites)} lost are "
+          f"exactly those at {two_voxel:.1f} A, and the thinnest left is "
+          f"{min(float(np.min(p.size)) for p in raised):.1f} A")
+    check("and it can still empty the list outright, the check it used to have",
+          crambin_at(min_extent=99.0) == [],
+          f"min_extent=99.0 -> {len(crambin_at(min_extent=99.0))} sites")
+
+    # The limit of that filter, measured rather than asserted in prose. The
+    # dilating code that used to sit in front of the labelling step was there to
+    # stop thin sheets being reported, and it was removed because it merged
+    # every real site into the protein's surface. The comment that replaced it
+    # said the sliver question was answered by a later check, and no such check
+    # existed. Here is the honest version, and it is a limitation rather than a
+    # fix: **at this grid spacing a sub-2 A gap and a 3.2 A gap are the same
+    # number of layers**, so a 1.2 A slot between two atom sheets is reported as
+    # a site of exactly the thickness crambin's real, ligand-holding site is
+    # reported at. No thickness threshold can separate them. Measured:
+    #   erosion of the free mask, 1.2 A gap -> 468/128/0 voxels at 1/2/3
+    #   erosion of the free mask, crambin's pose site -> 1/0/0 voxels
+    # i.e. the sliver has *more* clearance than the real site under that test
+    # too, which is why no guard was added: any guard strong enough to remove
+    # it removes the one binding site this project has measured. Pinned instead
+    # so the limitation cannot quietly become a claim.
+    def sheets(span=16.0, pitch=1.6, sep=8.0):
+        """Two solid carbon sheets; the free gap between them is sep - 6.2 A."""
+        half = span / 2.0
+        axis = np.arange(-half, half + 0.01, pitch)
+        g = np.stack(np.meshgrid(axis, axis, indexing="ij"), axis=-1).reshape(-1, 2)
+        lo = np.concatenate([g, np.full((len(g), 1), -sep / 2.0)], axis=1)
+        hi = np.concatenate([g, np.full((len(g), 1), sep / 2.0)], axis=1)
+        return np.vstack([lo, hi]).astype(np.float32)
+
+    thin_gap = sheets(sep=7.4)          # a 1.2 A gap: nothing can sit in it
+    wide_gap = sheets(sep=9.0)          # a 2.8 A gap: room for a methyl group
+    thin_site = P.find_pockets(thin_gap, ["C"] * len(thin_gap), max_pockets=99)
+    wide_site = P.find_pockets(wide_gap, ["C"] * len(wide_gap), max_pockets=99)
+    pose_thick = min(float(np.min(p.size)) for p in sites if
+                     int(in_box(pose_pts, *p.box_center_and_size()).sum())
+                     == len(pose_pts)) if any(
+        int(in_box(pose_pts, *p.box_center_and_size()).sum()) == len(pose_pts)
+        for p in sites) else 0.0
+    if thin_site and wide_site:
+        gap_thick = float(np.min(thin_site[0].size))
+        check("a 1.2 A gap between two atom sheets is reported as thick as the "
+              "site that holds a real ligand",
+              abs(gap_thick - pose_thick) < 1e-3
+              and float(np.min(wide_site[0].size)) > gap_thick,
+              f"the {7.4 - 6.2:.1f} A gap reports {gap_thick:.1f} A "
+              f"({gap_thick / P.DEFAULT_SPACING:.0f} voxels), the ligand's own "
+              f"site reports {pose_thick:.1f} A, and only widening the gap to "
+              f"{9.0 - 6.2:.1f} A moves it to "
+              f"{float(np.min(wide_site[0].size)):.1f} A. No thickness filter "
+              f"can tell the first two apart, so none is added")
+        check("so the claim that a thin sheet is filtered is not made, and the "
+              "volume ceiling cannot make it either",
+              thin_site[0].volume < P.DEFAULT_MAX_VOLUME
+              and float(np.prod(thin_site[0].size)) > P.DEFAULT_MAX_VOLUME,
+              f"the gap is {thin_site[0].volume:.0f} A3 of voxels in a "
+              f"{float(np.prod(thin_site[0].size)):.0f} A3 box: the voxel "
+              f"ceiling admits it and the old bounding-box metric would have "
+              f"rejected it. The switch from one metric to the other is a pure "
+              f"relaxation, and this is the fixture where that shows")
+
     section("a shallower threshold finds the shallow site, and says so")
     deep = P.find_pockets(rec_pts, list(rec.elements), min_burial=2, max_pockets=64)
+
     shallow = P.find_pockets(rec_pts, list(rec.elements), min_burial=1, max_pockets=64)
     check("min_burial=1 returns at least as many sites as min_burial=2",
           len(shallow) >= len(deep), f"{len(shallow)} vs {len(deep)}")
@@ -584,6 +845,192 @@ def main() -> int:
         check("the box is a sane size for a docking run",
               10.0 <= float(np.min(size)) and float(np.max(size)) <= 40.0,
               f"{np.round(size, 2)}")
+
+    # ------------------------------------------------------------------
+    section("a size budget that says what it cost, and can be shown to fail")
+
+    # `box_center_and_size` gives a site its full extent, so a winding cleft
+    # hands the interface a 39 x 26 x 41 A box with nothing to say that this
+    # is not a binding site. `box_with_budget` is the opt-in that caps the box
+    # *and says so*. Every check below therefore comes in a pair: a budget that
+    # cannot cap anything must leave the site untouched, and a budget that must
+    # cap must visibly cap. A guard that only ever sees the first direction
+    # would pass against a `box_with_budget` that always returns the uncapped
+    # box and an empty note.
+    long_sites = P.find_pockets(cleft, ["C"] * len(cleft))
+    check("the long cleft is available to this section",
+          len(long_sites) >= 1, f"{len(cleft)} atoms -> {len(long_sites)} site(s)")
+    if long_sites and sites:
+        long_site = long_sites[0]
+        small = sites[0]
+        small_c, small_req = small.box_center_and_size()
+        long_c, long_req = long_site.box_center_and_size()
+
+        # --- direction 1: a budget too loose to bite changes nothing ---------
+        loose = small.box_with_budget(max_side=1e6, max_volume=1e12)
+        check("a budget too loose to cap leaves the box bit-for-bit alone",
+              loose.size == small_req and loose.center == small_c,
+              f"{np.round(loose.size, 2)} is the same {len(small_req)} floats as "
+              f"box_center_and_size's {np.round(small_req, 2)}")
+        check("and says it capped nothing and has nothing to add",
+              loose.capped is False and loose.note == "",
+              f"capped={loose.capped}, note={loose.note!r}")
+        check("and the default budget leaves every crambin site alone",
+              all(p.box_with_budget().size == p.box_center_and_size()[1]
+                  and p.box_with_budget().capped is False
+                  and p.box_with_budget().note == "" for p in sites),
+              f"all {len(sites)} crambin sites; the longest side anywhere on "
+              f"crambin is {max(max(p.box_center_and_size()[1]) for p in sites):.1f} A "
+              f"against a {P.DEFAULT_BOX_MAX_SIDE:.0f} A cap")
+        check("so a crambin box is never silently shrunk",
+              all(max(p.box_with_budget().size) <= P.DEFAULT_BOX_MAX_SIDE
+                  for p in sites),
+              "the cap is inert on the only real protein this check can load "
+              "offline, and that is the measurement, not an assumption")
+
+        # --- direction 2: a budget that must cap, does ----------------------
+        tight = small.box_with_budget(max_side=10.0)
+        check("the same site under a budget it cannot fit is capped",
+              tight.capped is True and max(tight.size) == 10.0
+              and max(tight.size) < max(small_req),
+              f"{np.round(small_req, 2)} -> {np.round(tight.size, 2)}, "
+              f"capped={tight.capped}")
+        check("and capping a small site is said out loud",
+              tight.note != "" and "10 A side budget" in tight.note
+              and " x ".join(f"{v:.1f}" for v in small_req) in tight.note,
+              tight.note)
+
+        capped = long_site.box_with_budget()
+        check("a winding cleft is capped by the default budget",
+              capped.capped is True and max(capped.size) == P.DEFAULT_BOX_MAX_SIDE
+              and max(capped.requested_size) > P.DEFAULT_BOX_MAX_SIDE,
+              f"{np.round(capped.requested_size, 2)} -> {np.round(capped.size, 2)} A")
+        check("and the capped box is genuinely smaller, not the same one relabelled",
+              capped.volume < capped.requested_volume * 0.75,
+              f"{capped.volume:.0f} A3 down from {capped.requested_volume:.0f} A3 "
+              f"({capped.requested_volume / capped.volume:.2f}x)")
+        check("while the centre does not move, and the note says so",
+              capped.center == long_c
+              and "same centre" in capped.note
+              and "does not move" in capped.note,
+              "the bounding-box middle of a curved cleft lands in the wall, so "
+              "re-centring on a cap would reintroduce the defect this file "
+              "already fixed")
+        check("and the note names the size the site asked for",
+              " x ".join(f"{v:.1f}" for v in long_req) in capped.note
+              and " x ".join(f"{v:.1f}" for v in capped.size) in capped.note,
+              capped.note)
+        check("and the note reports what is now outside the box",
+              f"{100.0 * capped.coverage:.1f}%" in capped.note
+              and str(long_site.voxels) in capped.note,
+              capped.note)
+
+        # --- the coverage number is a measurement, so re-derive it ----------
+        cloud = np.asarray(long_site.points, np.float32)
+        kept = int(in_box(cloud, capped.center, capped.size).sum())
+        check("coverage is the site's own points the box holds, recomputed here",
+              abs(capped.coverage - kept / len(cloud)) < 1e-12
+              and kept < len(cloud) < 2 * kept,
+              f"{kept}/{len(cloud)} = {100.0 * kept / len(cloud):.1f}%, and the "
+              f"uncapped box holds "
+              f"{int(in_box(cloud, long_c, long_req).sum())}/{len(cloud)}")
+        check("and it moves when the box does, so it is not a constant",
+              capped.coverage < long_site.box_with_budget(
+                  max_side=None).coverage,
+              f"uncapped {long_site.box_with_budget(max_side=None).coverage:.4f} "
+              f"vs capped {capped.coverage:.4f}")
+        check("a site that fits reports full coverage and no note",
+              all(p.box_with_budget().coverage == 1.0 for p in sites),
+              "so an empty note is a positive claim -- the box is the site's own "
+              "and holds all of it -- rather than an absence of one")
+
+        # --- a box does not even always contain its own site ---------------
+        # The centre is the centroid, not the middle of the bounds, so a site
+        # that curves back on itself sticks out of the box built from it. This
+        # is measured rather than argued: at the default padding the dogleg's
+        # own box already misses 48 of 1985 points, and at zero padding it
+        # misses 336 of them.
+        bare = long_site.box_with_budget(max_side=None, padding=0.0)
+        check("the site's own box does not contain the whole site, and says so",
+              bare.capped is False and bare.coverage < 1.0 and bare.note != ""
+              and int(in_box(cloud, bare.center, bare.size).sum())
+              < int(in_box(cloud, long_c, long_req).sum()),
+              f"zero padding holds {bare.coverage * 100:.1f}% against "
+              f"{long_site.box_with_budget(max_side=None).coverage * 100:.1f}% "
+              f"at the default 4 A")
+        check("so a note can be present with nothing capped -- and must be",
+              long_site.box_with_budget(max_side=None).capped is False
+              and long_site.box_with_budget(max_side=None).note != "",
+              "97.6% coverage is not 'all of it', and the note says so")
+
+        # --- the volume knob is a separate, live knob ----------------------
+        vol = long_site.box_with_budget(max_side=None, max_volume=20000.0)
+        ratio_before = np.asarray(long_req) / long_req[0]
+        ratio_after = np.asarray(vol.size) / vol.size[0]
+        check("a volume budget caps by scaling all three axes alike",
+              vol.capped is True and abs(vol.volume - 20000.0) < 1e-3
+              and bool(np.allclose(ratio_before, ratio_after, rtol=1e-9)),
+              f"{np.round(vol.size, 2)} = {vol.volume:.0f} A3, proportions "
+              f"{np.round(ratio_after, 3)} unchanged from {np.round(ratio_before, 3)}")
+        check("and a volume budget too loose to bite is inert",
+              long_site.box_with_budget(max_side=None, max_volume=1e9).capped
+              is False,
+              "the two knobs are independent, so each has to be checked alone")
+        check("and a volume cap bites on a box the side cap lets through",
+              small.box_with_budget(
+                  max_side=P.DEFAULT_BOX_MAX_SIDE, max_volume=100.0
+              ).capped is True,
+              f"crambin site 1 is {np.round(small_req, 2)} A, inside the "
+              f"{P.DEFAULT_BOX_MAX_SIDE:.0f} A side cap and over 100 A3")
+        check("a bigger budget never buys a smaller box",
+              all(
+                  max(long_site.box_with_budget(max_side=a).size) <= max(
+                      long_site.box_with_budget(max_side=b).size)
+                  for a, b in ((20.0, 30.0), (30.0, 45.0), (45.0, 100.0))
+              ),
+              "20 -> 30 -> 45 -> 100 A side caps, monotone")
+
+        # --- the two measured benchmark boxes, as fixtures -----------------
+        # Taken from `scripts/redock_benchmark.py` rather than measured here,
+        # because the checks run offline and these are the two cases where the
+        # problem is real. Built by hand at the box's own size minus the 8 A of
+        # padding, so the cap sees exactly the geometry that was reported.
+        for label, box, want in (("3PTB benzamidine", (39.0, 26.0, 41.0),
+                                 (30.0, 26.0, 30.0)),
+                                 ("1HVR XK2", (30.0, 38.0, 32.0),
+                                 (30.0, 30.0, 30.0))):
+            far = P.Pocket(center=np.zeros(3, np.float32),
+                           size=np.asarray(box, np.float32) - 8.0, voxels=0)
+            plan = far.box_with_budget()
+            check(f"the {label} box {box[0]:.0f}x{box[1]:.0f}x{box[2]:.0f} A "
+                  f"is capped to {want[0]:.0f}x{want[1]:.0f}x{want[2]:.0f} A",
+                  plan.capped is True
+                  and all(abs(a - b) < 1e-6
+                          for a, b in zip(plan.size, want))
+                  and f"{float(np.prod(box)):.0f} A3" in plan.note,
+                  f"{plan.volume:.0f} A3 down from {plan.requested_volume:.0f} A3")
+            check(f"and a {label} pocket with no points claims no coverage",
+                  plan.coverage is None and "no grid points" in plan.note,
+                  "the note must not invent a number it cannot measure")
+
+        # --- the old call is untouched, and the new one cannot be skimmed ---
+        pair = small.box_center_and_size()
+        check("the existing call is still a plain 2-tuple of 3 floats",
+              isinstance(pair, tuple) and len(pair) == 2
+              and all(isinstance(t, tuple) and len(t) == 3
+                      and all(isinstance(float(v), float) for v in t)
+                      for t in pair),
+              f"unpacked as centre, size: "
+              f"{tuple(round(float(v), 2) for v in t) for t in pair}")
+        try:
+            centre, size = small.box_with_budget()
+            unpackable = True
+        except TypeError:
+            centre, size, unpackable = None, None, False
+        check("and the budgeted box cannot be unpacked into a bare 2-tuple",
+              not unpackable and not isinstance(small.box_with_budget(), tuple),
+              "silently discarding the note is how the current behaviour came "
+              "about, so the type refuses to let it happen quietly")
 
     section("reported geometry is self-consistent")
     if sites:
@@ -845,6 +1292,358 @@ def main() -> int:
             f"{len(lined)} reported, {len(recomputed)} recomputed, "
             f"symmetric difference {sorted(lined ^ recomputed)}",
         )
+
+    # ------------------------------------------------------------------
+    section("a site can be asked whether it fits a ligand, in both directions")
+
+    # The shortlist is ranked by the space a ligand *leaves*, so the site that
+    # holds crambin's ibuprofen is 8th of 12 and below the median volume, and no
+    # retuning of `rank_score` could move it. The ranking cannot see the ligand
+    # because the ligand is not in it. These two fractions can, because the
+    # caller supplies one -- and both are reported because each one alone hides
+    # a failure the other catches.
+    #
+    # Not a score, not affinity, and deliberately not folded into `rank_score`:
+    # doing that would silently move the ranking the benchmark and the README
+    # numbers were measured against. The check at the end of this section pins
+    # that it does not.
+    pose_els = list(pose.elements)
+    pose_radii = np.asarray([P.VDW_RADII.get(e, 1.70) for e in pose_els])
+    pose_xyz = np.asarray(pose_pts, np.float64)
+
+    if sites:
+        reads = [p.fit_to(pose_xyz, pose_radii) for p in sites]
+        filled = [r.site_filled for r in reads]
+        in_site = [r.ligand_in_site for r in reads]
+        top = int(np.argmax(filled))
+        check("the site holding the docked ligand is the only one with any fit "
+              "at all",
+              filled[top] > 0.5 and in_site[top] > 0.0
+              and sum(1 for f in filled if f and f > 0.0) == 1
+              and top == best,
+              f"site {top + 1} of {len(sites)} reads {in_site[top]:.3f} / "
+              f"{filled[top]:.3f}; the other {len(sites) - 1} read "
+              f"{sum(1 for f in filled if f and f > 0.0) and 0} exactly. "
+              f"rank_score puts this site {top + 1}, so the reading carries "
+              f"information the ranking does not -- the rank is reported, not "
+              f"asserted, because it is not a property anything promises")
+        check("and it is the strict maximum in both directions",
+              filled[top] == max(filled) and in_site[top] == max(in_site)
+              and filled.count(max(filled)) == 1,
+              f"site_filled max {max(filled):.3f}, ligand_in_site max "
+              f"{max(in_site):.3f}, both at site {top + 1} and nowhere else")
+
+    # The controlled case, on the one site in the suite whose size is
+    # comparable to a real ligand's envelope. crambin's pose site is 12 A3 and
+    # ibuprofen's envelope is 178 A3, so "twice the site's volume" is not a
+    # question one can ask of it; the two-shell cavity is 111 A3, which makes it
+    # a question. The ligand is translated to the cavity's own centre first --
+    # left at crambin's coordinates the two never overlap and both numbers are
+    # zero, which is a different case and is checked separately below.
+    cavity_atoms = np.vstack([sphere(6.0, 120), sphere(10.0, 200)])
+    cavity = [p for p in P.find_pockets(cavity_atoms, ["C"] * len(cavity_atoms))
+              if p.kind == "cavity"]
+    check("the cavity fixture for the fit reading is a real sealed cavity",
+          len(cavity) == 1 and cavity[0].volume > 50.0,
+          f"{cavity[0].volume:.0f} A3 in {cavity[0].voxels} voxels"
+          if cavity else "none found")
+    if cavity:
+        cav = cavity[0]
+        at_centre = pose_xyz - pose_xyz.mean(axis=0)
+
+        def placed(scale):
+            return cav.fit_to(at_centre * scale, pose_radii)
+
+        quarter, half, same, twice, four = (placed(s) for s in
+                                            (0.25, 0.5, 1.0, 2.0, 4.0))
+        check("a ligand about half the site's size reads as a good fit in both "
+              "directions",
+              half.ligand_in_site >= 0.9 and half.site_filled >= 0.5,
+              f"in_site {half.ligand_in_site:.3f}, site_filled "
+              f"{half.site_filled:.3f}, against a site of {cav.volume:.0f} A3")
+        check("while a ligand twice the site's volume reads low on the ligand "
+              "side",
+              twice.ligand_in_site <= 0.5
+              and twice.ligand_in_site < half.ligand_in_site,
+              f"in_site falls {half.ligand_in_site:.3f} -> "
+              f"{twice.ligand_in_site:.3f} and keeps falling at 4x "
+              f"({four.ligand_in_site:.3f}): the ligand has atoms that cannot go "
+              f"anywhere near the site")
+        check("and a ligand a quarter of the site's size reads high on the "
+              "ligand side but low on the site side",
+              quarter.ligand_in_site >= 0.9
+              and quarter.site_filled < half.site_filled,
+              f"in_site {quarter.ligand_in_site:.3f} (it fits easily) but "
+              f"site_filled {quarter.site_filled:.3f} against "
+              f"{half.site_filled:.3f} (it uses less of the hole)")
+        # The reason both are reported, as one falsifiable claim about the two
+        # numbers: they order the candidates differently, so a caller printing
+        # one of them cannot recover the other's information. Here the ligand
+        # side is *exactly* tied between a quarter and a half while the site
+        # side separates them.
+        check("so the two directions are not reciprocals: one alone cannot do "
+              "the other's job",
+              quarter.ligand_in_site == half.ligand_in_site
+              and quarter.site_filled != half.site_filled
+              and (twice.site_filled > quarter.ligand_in_site * 0
+                   and twice.ligand_in_site < quarter.site_filled),
+              f"ligand_in_site cannot tell {quarter.ligand_in_site:.3f} from "
+              f"{half.ligand_in_site:.3f} (identical), and site_filled puts the "
+              f"too-big ligand at {twice.site_filled:.3f} where the ligand side "
+              f"has it at {twice.ligand_in_site:.3f}")
+        check("and geometry that does not overlap at all reads zero in both, "
+              "which is a third case neither direction catches alone",
+              cav.fit_to(pose_xyz, pose_radii).ligand_in_site == 0.0
+              and cav.fit_to(pose_xyz, pose_radii).site_filled == 0.0,
+              "the same ligand at crambin's own coordinates, with the cavity at "
+              "the origin: 0.000/0.000. Measured and zero, which is not the "
+              "same answer as not measured")
+
+        # A site that is a protein's whole outer surface. Hand-built, because
+        # the dilation that used to produce these was removed and crambin
+        # genuinely offers none -- its largest site is 88 A3, 6.6% of the
+        # protein's 1118 A3 box. A shell at 13 A stands in for the face of a
+        # small protein, and it must not read as a pocket for anything.
+        def shell_site(radius, n=3000):
+            return P.Pocket(
+                center=np.zeros(3, np.float32),
+                size=np.asarray([2.0 * radius] * 3, np.float32), voxels=n,
+                volume=n * P.DEFAULT_SPACING ** 3,
+                points=sphere(radius, n).astype(np.float32),
+            )
+
+        sheets = [(r, shell_site(r).fit_to(at_centre, pose_radii))
+                  for r in (13.0, 20.0, 30.0)]
+        check("a site that is a protein's whole outer surface does not read as a "
+              "good fit for anything",
+              all(not (f.ligand_in_site > 0.6 and f.site_filled > 0.6)
+                  and f.site_filled <= 0.02 for _, f in sheets),
+              "; ".join(f"a {int(2 * r)} A sheet reads "
+                        f"{f.ligand_in_site:.3f}/{f.site_filled:.3f}"
+                        for r, f in sheets)
+              + f" -- against a real pocket's 0.500/0.833, so a surface cannot "
+                f"pass for one at any of these sizes")
+
+    # What cannot be computed is None with a reason, never 0.0: a caller has to
+    # be able to tell "does not fit" from "was not asked properly".
+    blank = P.Pocket(center=np.zeros(3, np.float32), size=np.ones(3, np.float32),
+                     voxels=0, volume=0.0)
+    solid = sites[0] if sites else None
+    if solid is not None:
+        unanswerable = {
+            "a site with no grid points":
+                blank.fit_to(pose_xyz, pose_radii),
+            "no ligand coordinates":
+                solid.fit_to(np.zeros((0, 3)), pose_radii),
+            "a radius array of the wrong length":
+                solid.fit_to(pose_xyz, pose_radii[:3]),
+            "a non-finite coordinate":
+                solid.fit_to(np.vstack([pose_xyz, [[np.nan, 0.0, 0.0]]]),
+                             np.append(pose_radii, 1.7)),
+            "a negative radius":
+                solid.fit_to(pose_xyz, -1.0),
+        }
+        check("every unanswerable case is None with a reason, never 0.0",
+              all(f.ligand_in_site is None and f.site_filled is None
+                  and not f.measured and f.note for f in unanswerable.values()),
+              "; ".join(f"{k} -> {v.note[:28]!r}"
+                        for k, v in unanswerable.items()))
+        check("and a measured zero is still a zero, not a None",
+              solid.fit_to(pose_xyz + 500.0, pose_radii).site_filled == 0.0
+              and solid.fit_to(pose_xyz + 500.0, pose_radii).measured,
+              "the same ligand 500 A away measures 0.000, and `measured` is "
+              "True: the two are different answers and the type keeps them apart")
+
+    # The radii are the caller's envelope, and the reading follows it. All three
+    # spellings of the radius have to work because `core.Ligand` exposes
+    # `reference_coords` and a *scalar* `radius` about the ligand's centroid,
+    # with no per-atom array at all.
+    if sites:
+        one = sites[best].fit_to(pose_xyz, 1.7)
+        default = sites[best].fit_to(pose_xyz)
+        bigger = sites[best].fit_to(pose_xyz, 3.0)
+        per_atom = sites[best].fit_to(pose_xyz, pose_radii)
+        check("a scalar radius, and the default radius, both work, and the "
+              "reading follows the envelope it is given",
+              one.measured and default.measured and bigger.measured
+              and per_atom.measured
+              and one.site_filled > 0.5 and default.site_filled > 0.5
+              and bigger.site_filled > one.site_filled
+              and bigger.ligand_in_site > one.ligand_in_site,
+              f"on the pose site: per-atom radii {per_atom.site_filled:.3f}, one "
+              f"scalar 1.7 A {one.site_filled:.3f}, the default "
+              f"({P.DEFAULT_LIGAND_RADIUS} A) {default.site_filled:.3f}, and a "
+              f"3.0 A envelope {bigger.site_filled:.3f}. It is a geometric "
+              f"reading of the envelope it is handed, not a property of the site")
+        # Read the scores off *fresh* sites, before anything in this file has
+        # called `fit_to` on them. Two earlier versions of this check could not
+        # fail: one compared `(p.fit_to(...), p.rank_score)[1]` with itself,
+        # which evaluates the call first; the other reused the `sites` list,
+        # which an earlier check in this same section had already asked, so both
+        # readings were post-mutation and the mutation turned out to be
+        # idempotent. Both were caught by mutation, not by reading.
+        fresh = P.find_pockets(rec_pts, list(rec.elements),
+                               residues=rec.residue_labels())
+        pristine = [p.rank_score for p in fresh]
+        for p in fresh:
+            p.fit_to(pose_xyz, pose_radii)
+        check("and asking changes nothing about the ranking, and asking twice "
+              "changes nothing at all",
+              pristine == [p.rank_score for p in fresh]
+              and sites[best].fit_to(pose_xyz, pose_radii)
+              == sites[best].fit_to(pose_xyz, pose_radii),
+              f"rank_score over {len(fresh)} freshly-found sites, read before "
+              f"and after calling `fit_to` on every one: "
+              f"{[round(v, 3) for v in pristine[:4]]}... unchanged. The reading "
+              f"is opt-in, and folding it into the ranking would silently move "
+              f"every number the benchmark and the README were measured against")
+
+    # ------------------------------------------------------------------
+    section("a site's own thickness, in grid layers")
+
+    # The quantity the `min_extent` floor acts on, exposed so a caller can see
+    # what that floor is about to reject. It is `min(size) / spacing`, and the
+    # site has to carry its own pitch for that to mean anything.
+    every = list(sites) + list(found) + list(cavern) if sites and cavern else []
+    if every:
+        check("thickness is the smallest extent in grid layers, on every site "
+              "in the file",
+              all(abs(p.thickness
+                      - float(np.min(np.asarray(p.size, np.float64)))
+                      / float(p.spacing)) < 1e-9 for p in every)
+              and all(p.spacing == P.DEFAULT_SPACING for p in every),
+              f"{len(every)} sites across crambin, the dogleg cleft and the "
+              f"cavern; crambin runs "
+              f"{min(p.thickness for p in sites):.0f} to "
+              f"{max(p.thickness for p in sites):.0f} layers at "
+              f"{P.DEFAULT_SPACING} A")
+        # Both sides of the floor, per site, identified by volume and centre
+        # rather than by thickness -- several crambin sites share a thickness,
+        # so "a site of this thickness is still there" would pass even if this
+        # one had been dropped.
+        def same(p, others):
+            return (round(float(p.volume), 6),
+                    round(float(p.center[0]), 3), round(float(p.center[1]), 3),
+                    round(float(p.center[2]), 3)) in {
+                (round(float(q.volume), 6), round(float(q.center[0]), 3),
+                 round(float(q.center[1]), 3), round(float(q.center[2]), 3))
+                for q in others}
+
+        edges = []
+        holds = True
+        for p in sites[:4]:
+            # `min_extent` is in angstrom, so the floor that means "this site's
+            # own thickness" is `thickness * spacing`. Two things this had to get
+            # right, both of them found by the check failing first: passing the
+            # voxel count instead asks for a floor of 8 A against a 6.4 A site
+            # and drops it, and a floor of *exactly* `thickness * spacing` is a
+            # float32/float64 round trip that can land one ULP above the site's
+            # own float32 extent -- so the two sides are taken with a tenth of a
+            # percent of slack rather than as a knife-edge float comparison.
+            at = P.find_pockets(rec_pts, list(rec.elements), max_pockets=99,
+                                min_extent=p.thickness * p.spacing * 0.999)
+            over = P.find_pockets(rec_pts, list(rec.elements), max_pockets=99,
+                                   min_extent=(p.thickness + 1.0) * p.spacing)
+            kept, gone = same(p, at), not same(p, over)
+            holds = holds and kept and gone
+            edges.append(f"{p.thickness:.0f} layers: "
+                         f"{'kept' if kept else 'LOST'} just under its own "
+                         f"thickness, "
+                         f"{'gone' if gone else 'STILL THERE'} one layer above")
+        check("and it is the quantity the min_extent floor acts on, on both "
+              "sides of the boundary",
+              holds,
+              "; ".join(edges) + ". A floor just under a site's own thickness "
+              "still returns it; one grid layer above and it is gone")
+        # And the limit, which is why this is a reading and not a verdict. The
+        # 1.2 A sliver and crambin's real binding site are both 4 layers, so
+        # nothing built on thickness tells them apart -- pinned here through the
+        # property the docstring points readers at.
+        sliver_atoms = np.vstack([
+            np.concatenate([g, np.full((len(g), 1), -3.7)], axis=1)
+            for g in [np.stack(np.meshgrid(*[np.arange(-8.0, 8.01, 1.6)] * 2,
+                                           indexing="ij"), axis=-1)
+                      .reshape(-1, 2)]
+        ] + [
+            np.concatenate([g, np.full((len(g), 1), 3.7)], axis=1)
+            for g in [np.stack(np.meshgrid(*[np.arange(-8.0, 8.01, 1.6)] * 2,
+                                           indexing="ij"), axis=-1)
+                      .reshape(-1, 2)]
+        ]).astype(np.float32)
+        sliver = P.find_pockets(sliver_atoms, ["C"] * len(sliver_atoms),
+                                max_pockets=99)
+        if sliver and sites:
+            pose_thick = sites[best].thickness
+            check("but it does not tell a sliver from a tight binding site, "
+                  "which is the finding and not a caveat",
+                  abs(sliver[0].thickness - pose_thick) < 1e-6
+                  and sliver[0].volume <= P.DEFAULT_MAX_VOLUME,
+                  f"a 1.2 A gap between two atom sheets is {sliver[0].thickness:.0f} "
+                  f"layers thick and crambin's own ligand-holding site is "
+                  f"{pose_thick:.0f}: the same number, so `thickness` is "
+                  f"reported because it is cheap and true, and the docstring "
+                  f"says what it is not")
+
+    # ------------------------------------------------------------------
+    section("the shortlist length is a budget, and pinned from both sides")
+
+    # `DEFAULT_MAX_POCKETS` is a budget, and the comment in pockets.py used to
+    # call it a measured value. It is one crambin number plus a margin: the site
+    # holding the docked ibuprofen is 9th of the 16 crambin offers, so an
+    # 8-entry list dropped a real binding site. A second protein to measure a
+    # second requirement against is not in the tree -- 1crn is the only real
+    # fixture -- so the honest thing is to pin the budget and the boundary it
+    # was chosen for, separately, and let the number be what it is.
+    def best_held(n: int):
+        got = P.find_pockets(rec_pts, list(rec.elements),
+                             residues=rec.residue_labels(), max_pockets=n)
+        if not got:
+            return 0, 0
+        return (max(int(in_box(pose_pts, *p.box_center_and_size()).sum())
+                    for p in got), len(got))
+
+    keep8, n8 = best_held(8)
+    keep9, n9 = best_held(9)
+    keep_def, n_def = best_held(P.DEFAULT_MAX_POCKETS)
+    keep_all, n_all = best_held(99)
+    check("the default shortlist length is the budget it is documented as",
+          P.DEFAULT_MAX_POCKETS == 12 and n_def == 12,
+          f"DEFAULT_MAX_POCKETS = {P.DEFAULT_MAX_POCKETS}, and crambin fills "
+          f"the list to {n_def}; pinned as a number so a change to it is a "
+          f"deliberate act rather than a quiet one")
+    check("and it is crambin's ninth plus a margin, with the boundary measured",
+          keep8 < len(pose_pts) <= keep9 and keep_def == len(pose_pts),
+          f"8 entries hold {keep8}/{len(pose_pts)} ligand atoms, 9 hold {keep9}, "
+          f"and the default {P.DEFAULT_MAX_POCKETS} holds {keep_def}: 12 is the "
+          f"ninth plus three, not a number a benchmark chose")
+    check("while crambin only offers sixteen sites, so twelve is a truncation "
+          "and not a count the search arrived at",
+          n_all == 16 and n_def < n_all,
+          f"{n_all} sites at max_pockets=99, {n_def} at the default: the four "
+          f"dropped are {16 - n_def} of the sixteen, and nothing measured says "
+          f"those four are the wrong ones")
+
+    # ------------------------------------------------------------------
+    section("every check in this file ran")
+
+    # 59 of the check() calls in main() sit inside an `if`, and most of those
+    # are data guards: no sites, no fixture, no engine. That is the right shape
+    # for a check script and also its worst failure mode -- a check that stops
+    # running takes its count with it, so the total quietly falls and the run
+    # still says "all passed". It happened here: tightening the volume ceiling
+    # dropped the suite from 118 to 84 with 8 failures and 34 checks simply not
+    # executed. So the total is itself a check, and it has to be updated by
+    # hand -- which is the point, because the update is where the noticing
+    # happens.
+    before_total = CHECKS
+    check(
+        "the number of checks that ran is the number this file is supposed to "
+        "have, so none of them is hiding behind a guard",
+        before_total + 1 == EXPECTED_CHECKS,
+        f"{before_total} ran before this one and {EXPECTED_CHECKS} are expected; "
+        f"the +1 is this check. If a check was added or removed, change "
+        f"EXPECTED_CHECKS deliberately",
+    )
 
     print(f"\n{CHECKS - len(FAILURES)}/{CHECKS} passed")
     for f in FAILURES:

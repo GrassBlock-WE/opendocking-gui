@@ -73,6 +73,11 @@ d(rᵢ, rⱼ) = ‖rᵢ − rⱼ‖ − (R_i + R_j)
 回归测试 `the_interaction_radii_place_the_terms_at_real_contact_distances`
 用晶体学接触距离把这条钉死，不依赖任何参考实现的内部数值。
 
+> **本节的两个数字（`−0.815`、2.39 Å）本轮无法离线复现。** 冠醚/酚羟基的
+> 夹具不在 `examples/` 里，跑它需要自己搭分子。它们是**一次历史测量的记录**，
+> 不是当前可复算的量。半径表本身（上一节）已逐项对照 `types.rs:189-208` 核实，
+> 与代码一致。<!-- DEFECT -->
+
 ---
 
 ## 2. 空间形状函数
@@ -135,6 +140,16 @@ hyd(d) = 1 − S( 0.5,  1.5, d)     近程 apolar 接触为 1，到 1.5 Å 归�
 
 改成 C¹ 过渡不改变势阱位置和深度，代价为零，但让 L-BFGS 在平台上不再打转。
 单测 `smoothstep_is_c1` 直接在结点两侧检查单侧斜率都趋零。
+
+> **这个单测目前钉住的是已经废弃的窗口。** `scoring.rs:485` 迭代的是
+> `&[(-0.7, -0.5), (0.5, 1.5)]`——`(-0.7, -0.5)` 正是上一段说被修掉的 `hb` 旧窗口，
+> 而 `hbond_term` 现在用的是 `smoothstep(-0.5, 0.0, d)`。因为 `smoothstep` 是
+> 一个与窗口无关的通用函数，测任何一个窗口都能证明它是 C¹，所以这个测试**没有
+> 测错、也不会因此漏掉回归**；但它**不覆盖 `hb` 现在实际在用的窗口**，而且
+> 字面上还留着一个本文档已宣布作废的数字。修法是把那一行改成
+> `&[(-0.5, 0.0), (0.5, 1.5)]`。<!-- DEFECT -->
+>
+> 归属：`dock-core`，本轮未改（不在本文件的所有权范围内）。
 
 > 节点位置会被 `spatial_derivatives_match_finite_differences` 的采样点列表依赖：
 > 那个测试必须避开所有结点（`hb` 的 −0.5 / 0.0，`hyd` 的 0.5 / 1.5），
@@ -331,12 +346,34 @@ pose 1: closest approach to a cell face = 0.0000 cells
 单边导数，它们大小相近、符号相反，而函数本身在那里取到极小值——所以沿任一方向
 都走不动能量（实测：沿解析方向最好 −5.209，沿数值方向 −5.215，起点 −5.222）。
 
+> 上面的生物素/crambin 数字（`|grad|` 2.3–5.9、dof 分量表、`−5.209 / −5.215 /
+> `−5.222`）**本轮无法离线复现**：`examples/` 里没有 crambin 也没有生物素，
+> 需要自己准备。**但机理在同一套代码上重现了**——布洛芬对 30 原子受体、
+> 14 Å 盒 @ 0.5 Å、`exhaustiveness=4`、`seed=42`，三个返回姿势到最近 cell 面的
+> 距离是 `0.000000 / 0.000056 / 0.000000` cells，对应 `|grad|` 2.46 / 4.07 / 3.11，
+> 落在本文档给出的 2.3–5.9 区间内。所以下面是**机理成立**，上面那组具体数字
+> **属于一次不可复算的历史测量**。<!-- DEFECT -->
+
 因此：
 
 * **判断一个返回姿势是不是极小点，不能看梯度模长**，必须用线搜索。梯度大只说明
   它落在 cell 面上。`examples/audit_poses.py` 现在就是这么做的（`downhill` 列）。
-* 解析梯度本身是**正确**的：在 10 组随机在盒内构象上，11 个 DOF 全部与中心差分
-  吻合到 `err = 0.0000`。单测 `the_analytic_gradient_is_the_gradient_of_the_reported_energy`
+* 解析梯度本身是**正确**的，但**只在离开 cell 面之后**。本轮实测（布洛芬对
+  30 原子受体，14 Å 盒 @ 0.5 Å，随机取 10 个盒内构象，对全部 10 个 DOF
+  逐分量与中心差分比对）：
+
+  | 构象 | 与中心差分的最大偏差 |
+  |---|---|
+  | 10 个中的 9 个 | `0.000000` |
+  | 10 个中的 1 个 | `2.6 × 10³` |
+
+  第二个数字不是梯度算错了，正是本节上面描述的 C⁰ 间断。把该构象的平移
+  挪开 0.05 Å 偏差没有变好（`2.8 × 10³`），所以触发间断的不是平移自由度，
+  而是配体原子在网格里的实际位置。**这也说明"随机取几个构象验证梯度"这句话
+  本身不安全**：命中 cell 面的概率不为零，命中时中心差分与两个单边导数都不符。
+  上一版这里写的是「10 组随机构象、11 个 DOF 全部吻合到 `err = 0.0000`」，
+  那个"全部"在一次新的随机抽样上就不成立，与本节自己的解释互相矛盾。
+  单测 `the_analytic_gradient_is_the_gradient_of_the_reported_energy`
   （butane + hexane）在 Rust 层把这条链整条钉死。
 
 单测 `interpolated_gradient_matches_finite_difference` 用**严格落在 cell 内部**的
@@ -352,16 +389,48 @@ pose 1: closest approach to a cell face = 0.0000 cells
 分类**以原子自身的 PDBQT 类型为权威**，`HD` 标记只用于向重原子传播：
 
 ```
-若该原子键连了一个显式极性氢（HD）      → DonorAcceptor
-否则按自身类型：
-    C / A 之类（不带极性）               → Hydrophobic
-    N                                     → Donor
-    NA                                    → Acceptor
-    OA / SA                               → Acceptor
-    OS（羟基氧，带极性氢）                → Donor
-    HD                                    → Other（只是标记）
-    其他                                  → Other
+先算两个标志：
+    donates = 键连了一个显式极性氢（HD）  或  自身类型 ∈ {ND, NDA, OD, ODA}
+    accepts = 自身类型 ∈ {NA, NDA, OA, ODA}
+再按同一套优先级归类：
+    donates ∧ accepts  → DonorAcceptor
+    donates            → Donor
+    accepts            → Acceptor
+    都不成立，且自身类型 ∈ {C, A, F, Cl, Br, I} → Hydrophobic
+    其他               → Other
 ```
+
+**这张表曾经把 `N`、`SA`、`OS` 写错，本轮按代码改正。** 之前写的是
+`N → Donor`、`SA → Acceptor`、`OS → Donor`，三行都与实现不符：
+
+| token | `donates` | `accepts` | 旧文档写的 | 实际 | 后果 |
+|---|---|---|---|---|---|
+| `N` | ✗ | ✗ | Donor | **Other** | 该原子既不供也不受氢键 |
+| `SA` | ✗ | ✗ | Acceptor | **Other** | 硫醚/硫醇硫不参与氢键项 |
+| `OS` | ✗ | ✗ | Donor | **Other** | 羟基氧若没写显式 `HD`，不供氢键 |
+
+实测（`Ligand.from_pdbqt_str`，每种 token 一个孤立原子，间距 2.5 Å，无键）：
+
+```
+C A F FA Cl Br I   -> hydrophobic
+NA OA              -> acceptor
+ND OD              -> donor
+N NS O OS S SA P    -> other
+MG HD Xx           -> donor / other / other
+OA + 显式 HD       -> donoracceptor   （供受体都成立，故为 DonorAcceptor）
+```
+
+前一行「键连了显式 HD → DonorAcceptor」也不准确：只有当该原子**本身也是受体**
+（`NA / NDA / OA / ODA`）时才是 `DonorAcceptor`；`OS` 键连了 `HD` 但自身不是受体，
+得到的是 `Donor`。代码自己的注释（`types.rs:653-655`）举的例子是
+「羧基羟基氧：带 `HD` 故供，受体因为是 `OA`」，两半缺一不可。
+
+**`NDA` 和 `ODA` 从 PDBQT 文件里读不到。** 类型列在 `pdbqt.rs:284` 只取
+第 78–79 两列，写出时 `pdbqt.rs:601` 的 `fit(token, 2, false)` 又把 token
+截成 2 字符，所以三字符类型在往返中必然丢失：`NDA` 读成 `ND`（Donor 而非
+DonorAcceptor）。分类器实现了 `NDA`/`ODA` 分支，但公开入口到不了。
+实践中 `DonorAcceptor` 只由「`OA`/`NA` 类重原子 + 显式 `HD`」产生，
+这也正是 `prepare_ligand` 写出的形式。<!-- DEFECT -->
 
 **一个曾经存在、并被测试钉死的真实 bug。** 早期实现用的是
 "若所有邻居都无极性则判为 Hydrophobic"。羧基氧和酯氧只连碳，

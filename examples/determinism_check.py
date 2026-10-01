@@ -2,15 +2,25 @@
 
 Two claims are worth checking because nothing else would catch a violation:
 
-1. **Grid precalculation is independent of the thread count.** The parallel
-   loop hands each worker a mutable slice of the same `Vec`, so a slicing
-   mistake would corrupt the map — silently, since every lookup still returns
-   a finite number. Comparing the maps byte-for-byte across thread counts is
-   the only way to see it.
+1. **Grid precalculation is reproducible.** The parallel loop hands each worker
+   a mutable slice of the same `Vec`, so a slicing mistake would corrupt the map
+   — silently, since every lookup still returns a finite number. Comparing the
+   maps byte-for-byte between two calls is the way to see that.
+
+   *What this script cannot check, and used to imply that it did:* independence
+   of the **thread count**. The engine chooses its own thread count and exposes
+   no knob for it, so there is nothing here to vary — the two calls below are
+   the same call twice. A genuine thread-count test needs either an engine
+   setting or a separate process per count, and neither exists today. The
+   heading this used to print claimed thread-count independence, which no
+   measurement here supports; `scripts/examples_check.py` fails if that wording
+   comes back.
 
 2. **A fixed seed reproduces a run exactly.** Search trajectories derive their
    own seeds from the main one, so if that derivation is not per-trajectory the
    parallel arms end up correlated, and results change with the thread count.
+   That second half is also untested here for the same reason; what is tested is
+   that one fixed seed reproduces one fixed run.
 """
 
 from __future__ import annotations
@@ -40,7 +50,7 @@ def main() -> int:
     here = Path(__file__).resolve().parent
     receptor_path = here / "rec_prep.pdbqt"
     ligand_path = here / "ligands" / "ibuprofen.pdbqt"
-    if not receptor_path.exists():
+    if not receptor_path.exists() or not ligand_path.exists():
         print("run from the examples directory after preparing the sample data")
         return 2
 
@@ -48,11 +58,12 @@ def main() -> int:
     ligand = opendocking.Ligand.from_pdbqt(ligand_path)
     box = opendocking.GridBox.from_center_size((0.0, 0.0, 0.0), (20.0, 20.0, 20.0))
 
-    print("grid precalculation is independent of the thread count")
-    # 0 means "all cores"; 1 is the serial reference.
+    print("grid precalculation is reproducible")
+    # The same call twice, NOT two thread counts: the engine decides threads
+    # internally and exposes no knob, so a heading claiming thread-count
+    # independence here would be claiming something this cannot measure. The
+    # docstring says so at length; this line says it in six words.
     serial = receptor.precalculate(box, scoring="vina", spacing=0.375)
-    # The engine decides threads internally, so drive determinism through
-    # repeated runs and through a different scoring function's own map set.
     again = receptor.precalculate(box, scoring="vina", spacing=0.375)
     check(
         "two identical calls agree",

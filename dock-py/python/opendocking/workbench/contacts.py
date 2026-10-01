@@ -319,7 +319,27 @@ def find_contacts(
 
     contacts: list[Contact] = _hbonds(a, b, False, hbond_max, hbond_min_angle)
     contacts += _hbonds(b, a, True, hbond_max, hbond_min_angle)
-    hb_sites = {(c.self_index, c.partner_index) for c in contacts}
+    # The heavy-atom pair each hydrogen bond *implies*: its donor and its
+    # acceptor. That is the pair the close-contact search below finds on its
+    # own, and suppressing it is what `find_contacts` promises.
+    #
+    # It used to record the *hydrogen* and the acceptor instead. The
+    # close-contact search skips hydrogens on both sides, so a key containing
+    # one could never match, the suppression was a no-op in both directions, and
+    # every hydrogen bond came back twice -- once as the bond and again as a
+    # close contact between the same two heavy atoms, 1.0 A further out. None of
+    # the 39 checks in `scripts/contacts_check.py` noticed, because the two rows
+    # are different index pairs and every one of them is individually true; the
+    # visible cost was that `residue_summary` counted each hydrogen bond twice,
+    # in the number a user reads.
+    hb_sites: set[tuple[int, int]] = set()
+    for c in contacts:
+        if c.kind != "hbond":
+            continue
+        if c.self_element == "H" and c.self_index in a.donor_of:
+            hb_sites.add((a.donor_of[c.self_index], c.partner_index))
+        elif c.partner_element == "H" and c.partner_index in b.donor_of:
+            hb_sites.add((c.self_index, b.donor_of[c.partner_index]))
 
     # Close contacts, skipping hydrogens: an H sits 1 A from its own heavy atom
     # and would otherwise report every C-H as a contact with whatever is near.

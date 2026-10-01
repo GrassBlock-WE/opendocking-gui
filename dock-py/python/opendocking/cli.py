@@ -223,6 +223,24 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="remove ions and cofactors (they are kept by default)",
     )
+    p.add_argument(
+        "--keep-chain",
+        default=None,
+        metavar="ID",
+        help=(
+            "keep this PDB chain instead of the largest component; a chain that "
+            "is not in the file is an error, not a silent fallback"
+        ),
+    )
+    p.add_argument(
+        "--report",
+        action="store_true",
+        help=(
+            "print the full preparation report: chains in and kept, components, "
+            "atoms dropped and why. Without it, a line is printed only when "
+            "something was actually dropped."
+        ),
+    )
     p.set_defaults(func=_cmd_prep_receptor)
 
     # --- prep-ligand ------------------------------------------------------
@@ -331,18 +349,106 @@ def build_parser() -> argparse.ArgumentParser:
 # ---------------------------------------------------------------------------
 
 
-def _cmd_prep_receptor(args: argparse.Namespace) -> int:
-    from .prep import prepare_receptor
+def _chain_list(ids) -> str:
+    """``B`` or ``A, B``, with a blank chain id spelled out."""
+    return ", ".join(c if c != " " else "(blank)" for c in ids)
 
-    text = prepare_receptor(
-        args.receptor,
-        keep_waters=args.keep_waters,
-        keep_heterogens=not args.drop_heterogens,
-    )
+
+def _fail(message: str, code: int = 1) -> int:
+    """Say what went wrong on stderr, and return the exit code.
+
+    One function rather than a `print(..., file=sys.stderr)` per call site,
+    because the stream and the code are the two things a script reads and they
+    had drifted apart in both directions: `odcli workbench` put its diagnostic
+    on stdout (the workbench's own `launch`, not this file), and `split`
+    exited 1 having written a success-shaped line to stdout and nothing at all
+    to stderr. A diagnostic on stdout is indistinguishable from a result, and
+    a script that captures only stderr then sees nothing whatsoever.
+
+    The `error: ` prefix is added here rather than at the call sites so the two
+    cannot be spelled differently either.
+    """
+    print(f"error: {message}", file=sys.stderr)
+    return code
+
+
+def _prep_report_line(report) -> str:
+    """One line, for when something was dropped and nobody asked for detail.
+
+    Deliberately says *which chain* went missing. The 1HVR benchmark measured a
+    two-chain structure against a 621-atom single chain for a week because a
+    warning that counted fragments and atoms never once said a chain was gone.
+    """
+    bits = [
+        f"kept {report.chains_kept} of {report.chains_in} chains"
+        f" ({_chain_list(report.chain_ids_kept)})",
+        f"{report.atoms_kept} of {report.atoms_in} atoms",
+    ]
+    if report.atoms_dropped:
+        bits.append(
+            f"{report.atoms_dropped} dropped ({report.water_atoms_removed} water, "
+            f"{report.ion_atoms_removed} ion, {report.other_atoms_removed} other)"
+        )
+    if report.chain_ids_dropped:
+        bits.append(f"dropped chain(s) {_chain_list(report.chain_ids_dropped)}")
+    return "; ".join(bits) + "; --report for the full breakdown"
+
+
+def _prep_report_lines(report) -> list[str]:
+    """The full breakdown, in the two-column style `prep-ligand` already uses."""
+    rows = [
+        ("source", report.source),
+        ("components", f"{report.fragments_kept} of {report.fragments_in} kept "
+                       f"({report.selection})"),
+        ("chains", f"{report.chains_kept} of {report.chains_in} kept: "
+                   f"{_chain_list(report.chain_ids_kept)}"),
+        ("chains dropped", _chain_list(report.chain_ids_dropped) or "none"),
+        ("atoms", f"{report.atoms_kept} of {report.atoms_in} kept, "
+                  f"{report.atoms_dropped} dropped"),
+        ("removed", f"{report.water_atoms_removed} water, "
+                    f"{report.ion_atoms_removed} ion, "
+                    f"{report.other_atoms_removed} other"),
+        ("polar hydrogens", f"{report.polar_hydrogens_added} added"),
+        ("components equal chains", "yes" if report.fragments_equal_chains else "no"),
+    ]
+    width = max(len(label) for label, _ in rows)
+    return [f"  {label:<{width}}  {value}" for label, value in rows]
+
+
+#: Matches the component-loss warning, and only that one, so `prep-receptor` can
+#: print the same fact in its own format instead of both. Every other warning
+#: still reaches the terminal: the "dropped a polar hydrogen" one in particular
+#: is per-atom and appears in no report, and silencing it would be hiding data.
+#: It is matched by prefix because `warnings` compares this regex against the
+#: start of the message.
+_COMPONENT_WARNING_RE = r".*: kept .*"
+
+
+def _cmd_prep_receptor(args: argparse.Namespace) -> int:
+    import warnings
+
+    from .prep import prepare_receptor_with_report
+
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message=_COMPONENT_WARNING_RE)
+        text, report = prepare_receptor_with_report(
+            args.receptor,
+            keep_waters=args.keep_waters,
+            keep_heterogens=not args.drop_heterogens,
+            keep_chain=args.keep_chain,
+        )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(text, encoding="utf-8")
     n_atoms = sum(1 for line in text.splitlines() if line.startswith(("ATOM", "HETATM")))
     print(f"wrote {args.output} ({n_atoms} atoms)")
+    # A preparation step that always speaks is a preparation step people learn
+    # to skip, so the loss is reported when there is one and not otherwise.
+    # `--report` is an explicit request and is always answered.
+    if args.report:
+        for line in _prep_report_lines(report):
+            print(line)
+    elif report.is_lossy:
+        print(f"  {_prep_report_line(report)}")
     return 0
 
 
@@ -376,8 +482,37 @@ def _cmd_prep_ligand(args: argparse.Namespace) -> int:
     return 0
 
 
+def _scoring_description(name: str) -> str:
+    """The engine's own description of one scoring function, looked up by name.
+
+    `scoring_descriptions()` is a list of ``"<name>: <terms>"`` strings in the
+    engine's order, and that order is not a contract -- it is whatever
+    `scoring_functions()` happens to return. Indexing it by position is how
+    `rec-grid --scoring vinardo` came to print *nothing at all* rather than
+    the wrong thing: the line was guarded by `if args.scoring == "vina"` and
+    no other name had a line to print. So a vinardo run wrote 40 `.map` files
+    with names identical to a vina run's, 5 of which differed in content and 35
+    of which were byte-identical, and the output said nothing about which
+    scoring function produced them.
+
+    Raised rather than defaulted: a scoring function the engine does not
+    offer is `argparse`'s business (it already restricts the choices), so
+    reaching here means the two lists have gone out of step and saying so beats
+    printing a plausible wrong sentence.
+    """
+    from .core import scoring_descriptions
+
+    for description in scoring_descriptions():
+        if description.split(":", 1)[0].strip() == name:
+            return description
+    raise ValueError(
+        f"the engine offers no scoring function called {name!r}; "
+        f"it has {', '.join(d.split(':', 1)[0].strip() for d in scoring_descriptions())}"
+    )
+
+
 def _cmd_rec_grid(args: argparse.Namespace) -> int:
-    from .core import Receptor, scoring_descriptions
+    from .core import Receptor
 
     box_ = _resolve_box(args, args.receptor)
     receptor = Receptor.from_pdbqt(args.receptor)
@@ -386,8 +521,10 @@ def _cmd_rec_grid(args: argparse.Namespace) -> int:
           f"{receptor.num_polar_hydrogens} polar hydrogens")
     print(f"box: centre {box_.center}, size {box_.size}")
     print(f"estimated maps: {est:.1f} MB")
-    if args.scoring == "vina":
-        print("scoring: " + scoring_descriptions()[0])
+    # Named for whichever function was asked for. This line used to be inside
+    # `if args.scoring == "vina"`, so a vinardo run printed no scoring line at
+    # all and a directory of .map files could not be attributed to anything.
+    print(f"scoring: {_scoring_description(args.scoring)}")
 
     start = time.time()
     maps = receptor.precalculate(box_, args.scoring, args.spacing)
@@ -401,12 +538,55 @@ def _cmd_rec_grid(args: argparse.Namespace) -> int:
     return 0
 
 
+def _box_volume(size) -> float:
+    """Volume of a ``(x, y, z)`` size tuple, Å³."""
+    return float(size[0]) * float(size[1]) * float(size[2])
+
+
+def _budget_report(pocket, padding: float) -> dict:
+    """What a size budget would cost this site's box, as a plain dict.
+
+    The budget is not applied to the box `sites` prints -- that one is what
+    `--auto-box N` will actually build, and quietly handing back a capped box
+    here would make the list describe a search that never happens. It is
+    reported, so that a site whose box is too big to be a sensible search is
+    visible as such instead of being an ordinary-looking 39 A edge. An empty
+    `note` is a positive claim, not an absence: it means nothing was capped and
+    the box still holds every point of the site.
+
+    The ceiling is passed in rather than left to the default so the report can
+    name the number it used. A caller who tightens the ceiling then knows
+    which one produced the coverage figure, instead of having to assume.
+    """
+    from .workbench.pockets import DEFAULT_BOX_MAX_SIDE
+
+    budget = pocket.box_with_budget(padding, max_side=DEFAULT_BOX_MAX_SIDE)
+    return {
+        "max_side": float(DEFAULT_BOX_MAX_SIDE),
+        "capped": bool(budget.capped),
+        "coverage": budget.coverage,
+        "volume": budget.volume,
+        "requested_volume": budget.requested_volume,
+        "note": budget.note,
+    }
+
+
 def _cmd_sites(args: argparse.Namespace) -> int:
     """Print the candidate sites, so the box can be chosen before docking.
 
     Exists because `--auto-box 3` is otherwise a number with nothing behind it
     visible to the user. Reporting the residues lining each site is the part
     that makes the list checkable by eye.
+
+    A volume is reported for both the site and its box, because the two
+    disagree by a lot and the difference is the whole point: `Pocket.volume` is
+    `voxels * spacing ** 3`, the space actually enclosed, while the box is the
+    bounding cuboid around it. The HIV protease site in 1HVR is the case the
+    library documents -- an 8008 A³ box around 544 A³ of real space -- and a
+    list that gave only the box number would make a winding cleft look like the
+    best site in the file. `spacing` comes out with the volume because a volume
+    in A³ is not interpretable without the pitch it was measured on, and a
+    caller who searched finer than the default has to be told so.
     """
     from .workbench import pockets as P
 
@@ -421,8 +601,12 @@ def _cmd_sites(args: argparse.Namespace) -> int:
                         "kind": p.kind,
                         "center": [float(v) for v in p.center],
                         "size": [float(v) for v in p.size],
+                        "volume": float(p.volume),
+                        "spacing": float(p.spacing),
                         "box_center": [float(v) for v in p.box_center_and_size(padding)[0]],
                         "box_size": [float(v) for v in p.box_center_and_size(padding)[1]],
+                        "box_volume": _box_volume(p.box_center_and_size(padding)[1]),
+                        "box_budget": _budget_report(p, padding),
                         "voxels": p.voxels,
                         "burial": p.burial,
                         "lining": [{"residue": r, "atoms": n} for r, n in p.lining],
@@ -445,10 +629,15 @@ def _cmd_sites(args: argparse.Namespace) -> int:
         print(f"{i + 1}. {P.kind_label(p.kind)}  score {p.rank_score:.2f}  "
               f"{p.voxels} grid points  buried on {p.burial:.1f}/3 axes")
         print(f"   site  {p.size[0]:5.1f} x {p.size[1]:5.1f} x {p.size[2]:5.1f} A at "
-              f"({p.center[0]:7.2f}, {p.center[1]:7.2f}, {p.center[2]:7.2f})")
+              f"({p.center[0]:7.2f}, {p.center[1]:7.2f}, {p.center[2]:7.2f})  "
+              f"{p.volume:.1f} A3 at {p.spacing:g} A pitch")
+        budget = _budget_report(p, padding)
+        cap = f", {_box_volume(size):.0f} A3"
+        if budget["note"]:
+            cap += f"; {budget['note']}"
         print(f"   box   {size[0]:5.1f} x {size[1]:5.1f} x {size[2]:5.1f} A at "
               f"({centre[0]:7.2f}, {centre[1]:7.2f}, {centre[2]:7.2f})  "
-              f"(+{padding:g} A padding each side)")
+              f"(+{padding:g} A padding each side{cap})")
         print(f"   lined by {lining}\n")
 
     # "No sealed cavity" is not a statement about the protein, it is a
@@ -491,8 +680,7 @@ def _cmd_dock(args: argparse.Namespace) -> int:
 
     ligands = _collect_ligands(args.ligand)
     if not ligands:
-        print(f"error: no ligands found at {args.ligand}", file=sys.stderr)
-        return 2
+        return _fail(f"no ligands found at {args.ligand}", 2)
 
     # The ligands are collected before the box is resolved, because the box a
     # site produces may be too small for the ligand and the floor is the
@@ -597,6 +785,15 @@ def _cmd_dock(args: argparse.Namespace) -> int:
         )
         if not args.json:
             print(f"\n{path.name}  ({ligand.num_torsions} torsions)")
+            # The table itself is `DockingResult.summary()`, which prints the
+            # column name `affinity` and the number and nothing else. The unit
+            # was documented on the property that produces it and appeared
+            # nowhere in the output, so a reader of the table -- or of the JSON,
+            # which has the same gap -- had no way to tell kcal/mol from any
+            # other score without going and looking. Stated here rather than by
+            # rewriting the header, so the library and the CLI cannot each grow
+            # their own idea of what that column is.
+            print("affinity and inter are kcal/mol, rmsd is A from the best pose")
             print(result.summary())
             if dest is not None:
                 print(f"  -> {dest}")
@@ -623,8 +820,19 @@ def _cmd_split(args: argparse.Namespace) -> int:
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     written = split_pdbqt_models(args.input, args.output_dir)
+    if not written:
+        # Used to print "wrote 0 pose file(s) to <dir>" on stdout and return 1:
+        # a non-zero exit whose only output looked like a successful run, with
+        # stderr empty. A script capturing stderr saw nothing at all, and a
+        # script reading stdout saw a count of zero written into a directory
+        # that was indeed empty -- true, and no help whatsoever.
+        return _fail(
+            f"no poses found in {args.input.name}, so nothing was written to "
+            f"{args.output_dir}. A pose file needs at least one "
+            "'MODEL ... ENDMDL' block; a single-model ligand PDBQT has none."
+        )
     print(f"wrote {len(written)} pose file(s) to {args.output_dir}")
-    return 0 if written else 1
+    return 0
 
 
 def _cmd_info(args: argparse.Namespace) -> int:
@@ -655,15 +863,17 @@ def _cmd_info(args: argparse.Namespace) -> int:
 
 
 def _cmd_workbench(args: argparse.Namespace) -> int:
-    try:
-        from .workbench import launch
-    except ImportError as exc:
-        print(
-            f"error: the workbench needs PyQt6 and moderngl ({exc}).\n"
-            "Install them with:  pip install PyQt6 moderngl numpy-stl",
-            file=sys.stderr,
-        )
-        return 3
+    # No preflight of its own, deliberately. There used to be an
+    # `except ImportError` here, and it could never run: `opendocking.workbench`
+    # imports only the standard library plus numpy at module scope and defers
+    # the GUI import to a call inside `launch`, so `from .workbench import
+    # launch` cannot raise. The two entry points therefore produced the *same*
+    # message from the same place, and this copy of it -- the one carrying the
+    # ImportError's own text and a `pip install` hint -- was dead weight that
+    # read as if it were the handler. `launch` now owns the check, the message,
+    # the stream and the exit code, for `odcli` and `odgui` alike.
+    from .workbench import launch
+
     return launch(args.receptor, args.ligand, args.poses)
 
 

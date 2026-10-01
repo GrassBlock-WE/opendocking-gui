@@ -64,6 +64,30 @@ REFERENCE_BOX_SIDE = 20.0
 EXHAUSTIVENESS_LADDER = (8, 16, 32, 64, 128)
 
 
+def _as_bounded_int(value: Any, name: str, low: int, high: int) -> int:
+    """Return ``value`` as an int, or refuse it with a ``ValueError``.
+
+    The engine converts these arguments to unsigned integers, and that
+    conversion is where the mistake used to surface: too large, negative, NaN
+    and infinite all came back as ``OverflowError`` or ``ValueError`` from
+    *inside* Rust, with no mention of which argument was wrong. Catching the
+    conversion here means one exception type and one message that names the
+    parameter, which is the only thing a caller can act on.
+
+    The bounds are half-open, ``low <= result < high``, and are the engine's
+    own: a seed is a u64, and ``steps`` must leave room for at least one.
+    """
+    try:
+        as_int = int(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(
+            f"{name} must be an integer in [{low}, {high}), got {value!r}"
+        ) from exc
+    if not low <= as_int < high:
+        raise ValueError(f"{name} must be an integer in [{low}, {high}), got {value!r}")
+    return as_int
+
+
 def exhaustiveness_for_box(size) -> int:
     """A sensible number of search walks for a box of this size.
 
@@ -89,12 +113,38 @@ def exhaustiveness_for_box(size) -> int:
     whole number, it is on the conservative side of the one number we have,
     and "8 walks per 8000 A^3" is a thing you can hold in your head.
 
+    **The result saturates at the top rung and the linear rule does not.** A
+    60 A cube is 216,000 A^3 and the rule asks for 216 walks; this returns 128.
+    A 200 A cube asks for 8000 and gets 128, a 62x under-estimate reported as
+    a default. The cap is deliberate -- the ladder is a ladder, and something
+    has to be at the top -- but it was nowhere in this docstring, so a caller
+    reading "linear in the box's volume" and getting 128 for a 200 A box had no
+    way to know which sentence was wrong. Callers that need the real figure
+    should ask for it rather than read a default as a recommendation.
+
+    A non-finite or wrongly-shaped ``size`` is refused rather than answered.
+    A NaN volume compared `>=` against every rung is False for all of them, so
+    the loop fell through and returned the *top* rung: 128 walks, the most
+    expensive answer, for a box the engine cannot even build. A two-element
+    size was read as a 2-D volume and answered without complaint.
+
     This is a *default*, and callers are free to ignore it. The one thing not
     free is pretending the two are the same claim: "1.2 A found in a 41,000 A^3
     box at 64" and "1.2 A found in a 3,000 A^3 box at 8" are different results,
     and a report that prints both as "1.2 A" is hiding the difference.
     """
-    volume = float(np.prod(np.asarray(tuple(size), np.float64)))
+    sides = tuple(float(v) for v in size)
+    if len(sides) != 3:
+        raise ValueError(
+            f"size must have 3 values, got {len(sides)}; a box is "
+            "three-dimensional and a two-value size is not a smaller box"
+        )
+    volume = float(np.prod(np.asarray(sides, np.float64)))
+    if not np.isfinite(volume):
+        raise ValueError(
+            f"size must be finite, got {sides}; the engine rejects a box with a "
+            "NaN or infinite edge too, so no number of walks can help"
+        )
     reference = REFERENCE_BOX_SIDE ** 3
     want = EXHAUSTIVENESS_LADDER[0] * (volume / reference)
     for rung in EXHAUSTIVENESS_LADDER:
@@ -142,14 +192,29 @@ class GridBox:
         cls, center: Sequence[float], size: Sequence[float]
     ) -> "GridBox":
         """Build a box of the given size centred on ``center``."""
-        return cls.__new_from(  # type: ignore[attr-defined]
+        return cls._from_raw(
             _core.GridBox.from_center_size(
                 tuple(float(v) for v in center), tuple(float(v) for v in size)
             )
         )
 
     @classmethod
-    def __new_from(cls, raw: Any) -> "GridBox":
+    def _from_raw(cls, raw: Any) -> "GridBox":
+        """Wrap an engine-side box.
+
+        Single underscore on purpose. This was `__new_from`, and a name with
+        two leading underscores is mangled per *class that uses it*: written
+        inside `GridBox` as `cls.__new_from` it becomes
+        `cls._GridBox__new_from` and works, but written inside `GridMaps` as
+        `GridBox.__new_from` it becomes `GridBox._GridMaps__new_from`, which
+        does not exist. So `GridMaps.box` raised
+        `AttributeError: type object 'GridBox' has no attribute
+        '_GridMaps__new_from'` on every single call, for its whole life, and
+        nothing noticed: no caller in the repository reads it, and the one
+        meta-test that inspects this file checks the *Rust* attribute names,
+        not the Python ones. A cross-class helper needs a name that is not
+        mangled.
+        """
         obj = object.__new__(cls)
         obj._box = raw
         return obj
@@ -175,8 +240,20 @@ class GridBox:
         return tuple(self._box.size)
 
     def contains(self, point: Sequence[float]) -> bool:
-        """Return whether ``point`` lies inside the box."""
+        """Return whether ``point`` lies inside the box.
+
+        Lower corner inclusive, upper corner exclusive, matching the corner
+        convention in the class docstring. ``point`` must have three values:
+        with two it raised ``IndexError`` from inside the generator, and with
+        four the extra values were read past and ignored, so both answered
+        about a point the caller had not described.
+        """
         p = tuple(float(v) for v in point)
+        if len(p) != 3:
+            raise ValueError(
+                f"point must have 3 values, got {len(p)}; a box is "
+                "three-dimensional and a two-value point is not half a point"
+            )
         lo, hi = self.min_corner, self.max_corner
         return all(lo[k] <= p[k] < hi[k] for k in range(3))
 
@@ -240,8 +317,31 @@ class Receptor:
         return tuple(lo), tuple(hi)
 
     def estimate_memory_mb(self, box_: GridBox, spacing: float = 0.375) -> float:
-        """Estimate the memory the maps for ``box_`` will need, in megabytes."""
-        return self._rec.estimate_memory_mb(box_._box, float(spacing))
+        """Estimate the memory the maps for ``box_`` will need, in megabytes.
+
+        Answers for exactly the calls `precalculate` will accept, because the
+        point of asking first is to decide whether to attempt the tabulation.
+        It did not. A negative, infinite or NaN ``spacing`` was quietly
+        replaced by the default, so a caller was told "9.1 MB, go ahead" for a
+        call that `precalculate` then rejected with `ValueError` -- and for a
+        NaN spacing it returned 0.0012 MB, a number for no grid at all.
+
+        ``spacing=0`` means "use the default" here, which is what the engine
+        does with it. That convention is the engine's and was not written down
+        on either Python signature; it is now.
+        """
+        spacing = float(spacing)
+        if not np.isfinite(spacing) or spacing < 0.0:
+            # `not isfinite` rather than the `spacing != spacing` NaN test: an
+            # infinite spacing got past that one and came back as 0.0012 MB,
+            # "a number for no grid at all", for a call `precalculate` refuses.
+            # An estimator that answers for a call which will crash is worse
+            # than no estimator, because the answer is a reason to try.
+            raise ValueError(
+                f"spacing must be zero (meaning the default) or a positive "
+                f"value, got {spacing}; precalculate rejects the same value"
+            )
+        return self._rec.estimate_memory_mb(box_._box, spacing)
 
     def precalculate(
         self, box_: GridBox, scoring: str = "vina", spacing: float = 0.375
@@ -257,9 +357,15 @@ class Receptor:
         scoring:
             ``"vina"`` or ``"vinardo"``. The maps are specific to this choice —
             reusing them under a different scoring function gives wrong answers.
+            Nothing enforces it: `dock` will score these maps with the other
+            function and report a plausible number. The maps do not remember
+            what built them, so the obligation stays the caller's.
         spacing:
             Grid resolution in Ångström. 0.375 is the AutoDock default; halving
             it quarters the interpolation discontinuity at 8× the memory.
+            ``0`` means "use the default" -- the engine's convention, and now
+            written down on both signatures. Negative and non-finite values are
+            rejected, and `estimate_memory_mb` rejects the same ones.
         """
         return GridMaps(
             self._rec.precalculate(box_._box, scoring, float(spacing))
@@ -309,8 +415,14 @@ class GridMaps:
 
     @property
     def box(self) -> GridBox:
-        """The box these maps cover."""
-        return GridBox.__new_from(self._maps.box_)
+        """The box these maps cover.
+
+        Equal to the box that was passed to `Receptor.precalculate`, not a
+        recomputation of it: the engine stores the one it tabulated, and a
+        caller comparing the two is asking whether the maps went where they
+        think.
+        """
+        return GridBox._from_raw(self._maps.box_)
 
     def write_map_files(self, directory: str | Path) -> None:
         """Write AutoDock-compatible ``.map`` files into ``directory``."""
@@ -352,15 +464,43 @@ class Ligand:
         This is the path the RDKit front-end uses: RDKit resolves aromaticity,
         protonation and Gasteiger charges, then hands over a table, so the
         engine never re-derives chemistry it would only get wrong.
+
+        ``coords``, ``charges`` and ``elements`` must agree in length and be
+        finite. The engine checks the lengths and the elements; it did not
+        check the numbers. A table with a NaN coordinate produced a ligand
+        whose ``reference_coords`` were all NaN and whose ``radius`` was
+        ``0.0`` -- a confident answer about a molecule with no position, which
+        then poisons every energy computed from it.
         """
         arr = np.ascontiguousarray(coords, dtype=np.float64)
         if arr.ndim != 2 or arr.shape[1] != 3:
             raise ValueError(f"coords must have shape (n, 3), got {arr.shape}")
+        charge_list = [float(c) for c in charges]
+        if not np.isfinite(arr).all():
+            bad = int(np.argmax(~np.isfinite(arr).all(axis=1)))
+            raise ValueError(
+                f"coords must be finite; atom {bad} has "
+                f"{arr[bad].tolist()}"
+            )
+        if not np.isfinite(charge_list).all():
+            bad = int(np.argmax(~np.isfinite(np.asarray(charge_list))))
+            raise ValueError(
+                f"charges must be finite; charge {bad} is {charge_list[bad]}"
+            )
         bond_list = [tuple(int(i) for i in b) for b in bonds] if bonds else None
+        if bond_list is not None:
+            n = arr.shape[0]
+            for bond in bond_list:
+                for i in bond:
+                    if not 0 <= i < n:
+                        raise ValueError(
+                            f"bond {bond} refers to atom {i}, and this molecule "
+                            f"has {n} atoms"
+                        )
         return cls(
             _core.Ligand.from_arrays(
                 list(elements),
-                [float(c) for c in charges],
+                charge_list,
                 arr,
                 bond_list,
                 list(atom_names) if atom_names else None,
@@ -461,8 +601,14 @@ class DockingResult:
         return self._res.scoring_function
 
     def pose_coords(self, index: int = 0) -> np.ndarray:
-        """Coordinates of pose ``index``, shape ``(n_atoms, 3)``, float64."""
-        return self._res.pose_coords(index)
+        """Coordinates of pose ``index``, shape ``(n_atoms, 3)``, float64.
+
+        ``index`` must be a pose that exists. A negative index raised
+        ``OverflowError`` from the engine's unsigned conversion while an
+        out-of-range one raised ``ValueError`` -- the same mistake, two
+        exception types, and the type is the only thing a caller branches on.
+        """
+        return self._res.pose_coords(self._checked_index(index))
 
     def pose_conformation(self, index: int = 0) -> np.ndarray:
         """The degree-of-freedom vector of pose ``index``.
@@ -472,7 +618,17 @@ class DockingResult:
         for a vanishing analytic gradient, or used as the start of a further
         optimisation.
         """
-        return np.asarray(self._res.pose_conformation(index), dtype=np.float64)
+        return np.asarray(self._res.pose_conformation(self._checked_index(index)), dtype=np.float64)
+
+    def _checked_index(self, index: int) -> int:
+        """Turn a pose index into one the engine will accept, or explain why not."""
+        idx = int(index)
+        if not 0 <= idx < self.num_poses:
+            raise ValueError(
+                f"pose index {idx} out of range: this result has "
+                f"{self.num_poses} pose(s)"
+            )
+        return idx
 
     def all_pose_coords(self) -> np.ndarray:
         """Every pose stacked, shape ``(n_poses, n_atoms, 3)``, float64."""
@@ -547,7 +703,9 @@ def dock(
         ``"mc"`` for iterated local search, ``"lga"`` for the island genetic
         algorithm, or ``"both"``.
     steps:
-        Local-search steps per walk. Leave unset unless tuning.
+        Local-search steps per walk. Leave unset unless tuning. Must be at
+        least 1 if given; a negative one raised ``OverflowError`` from the
+        engine's unsigned conversion while ``steps=0`` raised ``ValueError``.
     """
     if exhaustiveness < 1:
         raise ValueError("exhaustiveness must be at least 1")
@@ -555,6 +713,22 @@ def dock(
         raise ValueError("num_modes must be at least 1")
     if rmsd_cutoff <= 0:
         raise ValueError("rmsd_cutoff must be positive")
+    if steps is not None:
+        # `steps=0` is refused by the engine with a ValueError, so the bound is
+        # drawn where the engine draws it; a negative value never got that far
+        # and came back as OverflowError instead.
+        _as_bounded_int(steps, "steps", 1, 2 ** 63)
+    if seed is not None:
+        # The engine takes a u64, so an out-of-range seed used to raise
+        # OverflowError from the conversion -- ArithmeticError, not ValueError,
+        # so a caller with `except ValueError` around the three documented
+        # guards above did not catch it. Same class of mistake, different
+        # exception type, and the type is the only thing a caller branches on.
+        #
+        # The conversion lives inside the helper because `int(float("inf"))`
+        # raises OverflowError as well: writing the test as `int(seed) < 0`
+        # only moved the leak rather than closing it.
+        _as_bounded_int(seed, "seed", 0, 2 ** 64)
     return DockingResult(
         _core.dock(
             ligand._lig,
@@ -680,7 +854,7 @@ def available_backends() -> list[str]:
 
 
 def auto_box(
-    receptor: Receptor, ligand: Ligand, padding: float = 4.0
+    receptor: Receptor, ligand: Ligand | None = None, padding: float = 4.0
 ) -> GridBox:
     """Build a box that encloses the whole receptor, padded by ``padding``.
 
@@ -694,6 +868,15 @@ def auto_box(
     :func:`opendocking.workbench.pockets.find_pockets`. This function is *not*
     that — it is the whole-receptor box this paragraph is warning about, kept
     because a test needs something trivial and honest to compare against.
+
+    ``ligand`` is accepted and **never read**. The box comes from the
+    receptor's bounds alone, so the name says "box for this receptor" and the
+    signature used to say "box for this receptor and this ligand". Nothing in
+    the repository calls this function at all; it is exported, so it is part of
+    the public surface, and the parameter is left in place rather than removed
+    because dropping it is a breaking change for whoever is calling it with a
+    ligand in hand and expecting it to matter. It is now documented instead of
+    merely present.
     """
     (lo, hi) = receptor.bounds
     return GridBox(

@@ -24,6 +24,7 @@ results are delivered through a Qt signal, so the window never freezes.
 from __future__ import annotations
 
 import math
+import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -35,7 +36,15 @@ __all__ = ["launch", "Workbench", "MoleculeView", "Camera"]
 
 
 def _require_gui():
-    """Import the GUI stack, with a clear message when it is missing."""
+    """Import the GUI stack, with a clear message when it is missing.
+
+    The one place the GUI stack is tested, for every entry point. `odcli
+    workbench` and `odgui` both reach this through `launch`, so a user who
+    cannot import PyQt6 gets the same sentence whichever command they typed --
+    which was not true before: `odcli` had its own, unreachable, copy of this
+    message, and `workbench.launcher._preflight` tested the wrong import (it
+    imported `launch`, which never needs Qt) and so never reported anything.
+    """
     try:
         from PyQt6 import QtCore, QtGui, QtOpenGLWidgets, QtWidgets  # noqa: F401
         import moderngl  # noqa: F401
@@ -398,14 +407,30 @@ class MoleculeView:
         not a named residue", and they get ``""`` -- naming a ligand
         ``"UNL 1"`` in one panel and nothing in another is worse than a blank.
 
-        Crystal waters and the other things a structure file carries that are
-        not a residue get ``""`` as well. Measured across six proteins, a
-        pocket listing ``lined by HOH 180A, HEM 155A, ASN 12A`` is answering a
-        different question than the one asked: a water is a lattice artefact
-        and a cofactor is a ligand someone put there on purpose, and neither is
-        a wall of the protein. Worse, on streptavidin waters outnumbered real
-        residues in the lining list outright, so the useful part of the answer
-        was buried under its own noise.
+        Crystal waters and the buffer additives in
+        `NON_RESIDUE_LABELS` get ``""`` as well. Measured across six
+        proteins, streptavidin's top site listed ``lined by HOH 354A, HOH
+        361A`` alongside two real residues: a water is a lattice artefact, it
+        says nothing about the shape of the protein, and on that structure
+        the waters outnumbered the residues in the lining list outright, so
+        the useful part of the answer was buried under its own noise.
+
+        **A cofactor is a different case and is kept.** ``HEM 155A`` comes
+        back as a label, deliberately. A water is where the crystal happened
+        to put a solvent molecule; a cofactor is real chemistry that is part
+        of the receptor a drug has to deal with, and "this pocket is lined by
+        the haem" is an answer worth having. Writing the exclusion as one
+        flat list would have thrown both away.
+
+        That distinction used to be documented here by using ``HEM 155A`` as
+        an example of the noise being removed -- in a sentence that also
+        called a cofactor "a ligand someone put there on purpose, and not a
+        wall of the protein". The code never did that, ``pockets_check.py``
+        asserts the opposite on purpose, and a docstring that argues against
+        its own function is worse than one that says nothing: it is the part
+        a reader trusts. So the example is HOH because that is what the list
+        actually removes, and the cofactor case is stated as the deliberate
+        exception it is.
         """
         structure = self.structure
         atoms = getattr(structure, "atoms", None) if structure is not None else None
@@ -556,11 +581,26 @@ def launch(
     """Open the workbench window.
 
     Returns the Qt exit code, or 3 if the GUI dependencies are missing.
+
+    The diagnostic goes to **stderr**. It is a diagnostic, and a diagnostic on
+    stdout is indistinguishable from a result: `odcli workbench > out.txt` would
+    otherwise capture the failure as if it were the command's output. Every
+    other `odcli` failure already went to stderr, and `odgui` reached this same
+    branch, so this one line made the two entry points disagree about the same
+    event.
+
+    The *wording* comes from `launcher._describe_missing` rather than from here,
+    so `odcli workbench`, `odgui` and `odgui --check` produce one sentence for
+    one event instead of three. The import is inside the `except` block on
+    purpose: `launcher` is the console script for this package and importing it
+    at module scope would make the two modules circular.
     """
     try:
         _require_gui()
     except ImportError as exc:
-        print(f"error: {exc}")
+        from .launcher import _describe_missing
+
+        print(_describe_missing(exc), file=sys.stderr)
         return 3
     from .app import run
 

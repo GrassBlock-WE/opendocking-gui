@@ -1,7 +1,8 @@
-"""Is the clash a scoring-function preference or a search failure?
+"""Is a clash a scoring-function preference or a search failure?
 
-Docking into a real protein returned poses with every ligand atom inside the
-receptor's van der Waals volume, at minimum separations down to 0.22 A. Two
+**A historical measurement, kept because it is the evidence.** Docking into a
+real protein once returned poses with every ligand atom inside the receptor's
+van der Waals volume, at minimum heavy-atom separations down to 0.22 A. Two
 very different problems produce that symptom:
 
 * the *scoring function* genuinely prefers buried, clashing poses, because
@@ -9,8 +10,23 @@ very different problems produce that symptom:
 * clash-free poses score just as well, but the *search* never finds them.
 
 They need different fixes, and the symptom alone does not distinguish them. So
-sample the landscape directly: draw many random placements, score each, and
-compare the best clash-free placement with the best placement overall.
+this samples the landscape directly: draw many random placements, score each,
+and compare the best clash-free placement with the best placement overall.
+
+That 0.22 A was measured with `Element::interaction_radius()` returning 0.4 A
+for *every* heavy atom, so 0.4 was subtracted from a real separation and the
+hydrogen-bond term peaked at a spacing no two atoms can occupy. The radii are
+per-element now (C 1.9 / N 1.75 / O 1.6 A) and the defect is repaired, which
+this script's own output is the evidence for: it now reports the best
+clash-free placement and the best placement overall as the *same* placement,
+at E = -0.815 for both, where the broken engine preferred a clashing placement
+by 0.99 kcal/mol.
+
+So the symptom in the first paragraph is history, not a description of this
+system, and the script is no longer a probe for a live bug. It is a regression
+guard for the fix, and it only became one once something ran it:
+`scripts/examples_check.py` does, and fails if the best placement ever starts
+winning by more than floating-point noise.
 """
 
 from __future__ import annotations
@@ -101,6 +117,11 @@ def main(receptor_path: str, ligand_path: str, centre, size: float, n: int) -> i
 
 
 def _coords_for(lig, conf):
+    """Unused. Left in place deliberately: nothing calls it and nothing should.
+
+    It raises rather than returning a plausible-looking array, because a stub
+    that returned coordinates would be worse than one that refuses.
+    """
     raise NotImplementedError
 
 

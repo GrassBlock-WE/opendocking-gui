@@ -270,6 +270,38 @@ def catmull_rom(points: np.ndarray, per_segment: int = 8) -> np.ndarray:
     return np.asarray(out)
 
 
+def _perpendicular(tangent: np.ndarray, seed: np.ndarray) -> np.ndarray:
+    """A unit vector perpendicular to ``tangent``, preferring ``seed``.
+
+    The seed is projected into the tangent's plane and used when that
+    projection is a real vector. When it is not -- the seed runs parallel or
+    antiparallel to the tangent, so the projection is exactly zero -- a short
+    list of world axes is tried in turn and the first that survives the
+    projection is used instead. The result is therefore *always* a genuine unit
+    vector perpendicular to the tangent, which is the property the ribbon's
+    parallel transport depends on.
+
+    This exists because the code it replaced got that wrong in a way that
+    produced no error at all. It projected the seed, and when the projection
+    came back zero it projected a ``(0, 0, 1)`` fallback **onto the same
+    tangent** -- which is zero again for a z-aligned trace -- and then
+    normalised the zero vector by ``max(norm, 1e-9)``. The cross-section
+    collapsed, every triangle had zero area, and the ribbon simply drew
+    nothing: measured, 0 of 160 triangles with any area and 44 of 84 vertices
+    carrying a zero normal. A viewer renders that as an absent ribbon, which
+    reads as "no secondary structure here" rather than as a bug.
+    """
+    for candidate in (seed, (0.0, 0.0, 1.0), (0.0, 1.0, 0.0), (1.0, 0.0, 0.0)):
+        vec = np.asarray(candidate, dtype=np.float64)
+        projected = vec - tangent * float(vec @ tangent)
+        norm = float(np.linalg.norm(projected))
+        if norm > 1e-6:
+            return projected / norm
+    # Unreachable for a unit tangent: at most one of the three world axes can
+    # be parallel to it. Kept so the function returns rather than raises.
+    return np.array([0.0, 0.0, 1.0])  # pragma: no cover
+
+
 def ribbon(
     trace: np.ndarray,
     side_vectors: np.ndarray,
@@ -330,18 +362,12 @@ def ribbon(
     # is re-projected onto the new tangent's plane, which is the smallest
     # rotation that satisfies the new tangent, so no twist accumulates.
     tangent0 = _tangent_at(dense, 0, n)
-    side = seed_side[0] - tangent0 * float(seed_side[0] @ tangent0)
-    if np.linalg.norm(side) < 1e-6:
-        fallback = np.array([0.0, 0.0, 1.0])
-        side = fallback - tangent0 * float(fallback @ tangent0)
-    side = side / max(float(np.linalg.norm(side)), 1e-9)
+    side = _perpendicular(tangent0, seed_side[0])
 
     for i in range(n):
         tangent = _tangent_at(dense, i, n)
         if i > 0:
-            side = side - tangent * float(side @ tangent)
-            norm = np.linalg.norm(side)
-            side = np.array([0.0, 0.0, 1.0]) if norm < 1e-6 else side / norm
+            side = _perpendicular(tangent, side)
         across = np.cross(tangent, side)
 
         state = dense_state[i]

@@ -98,6 +98,18 @@ def run_in_subprocess(label: str, code: str) -> None:
         )
     else:
         detail = (stderr.strip().splitlines() or ["(no stderr)"])[-1]
+        if proc.returncode == 0 and not stderr.strip():
+            # The child accepted the input. That satisfies the requirement as
+            # written -- never a dead process -- but a reader scanning a column
+            # of `ok` lines would assume a catchable error was raised, and for
+            # these two cases none was. Say which happened; a one-atom molecule
+            # and a self-intersecting torsion set are both things the engine
+            # takes today, and the distinction is the interesting part.
+            print(
+                f"  ok   {label:<34} -> exit 0, (no stderr); accepted rather "
+                f"than rejected"
+            )
+            return
         print(f"  ok   {label:<34} -> exit {proc.returncode}, {detail[:60]}")
 
 

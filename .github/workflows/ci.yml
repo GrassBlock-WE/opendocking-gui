@@ -204,6 +204,14 @@ jobs:
           # machine, where a check that nobody else can run is a note, not a
           # gate. The check skips with a reason if it is ever missing.
           python -m pip install rdkit
+          # Meeko is the same tool that produced the shipped examples/*.pdbqt,
+          # and -- unlike this project's own reader, which is whitespace-based
+          # and would accept anything -- it parses by column and rejects a
+          # mis-columned line. That makes it a genuine third-party oracle for
+          # the file format, and the one that would have caught the dropped
+          # REMARK found this round. Its absence must be a CI failure, not a
+          # silent reduction in what is checked.
+          python -m pip install meeko
 
       - name: GUI stack check (no display needed)
         run: odgui --check
@@ -211,11 +219,36 @@ jobs:
       - name: OpenGL context probe
         run: xvfb-run -a -s "-screen 0 1280x1024x24" python scripts/qt_gl_probe.py
 
-      - name: Layout, interaction and behaviour (135 checks)
+      - name: Layout, interaction and behaviour
         env:
           LIBGL_ALWAYS_SOFTWARE: "1"
           QT_QPA_PLATFORM: xcb
         run: xvfb-run -a -s "-screen 0 1280x1024x24" python scripts/workbench_interaction_check.py
+
+      - name: What the benchmarks report
+        # pocket_benchmark.py and redock_benchmark.py are not gates and never
+        # will be -- a corpus result has no ground truth, and gating it would be
+        # asserting the internet. What *is* gateable is that every number each
+        # one prints is the number its own line says it is, which is exactly
+        # what was wrong: the pocket benchmark's "cost per 1000 atoms" was
+        # milliseconds per *atom*, so a 17.6 s search over 4779 atoms printed
+        # "4HHB 4 ms".
+        # Offline in about a second: `urlopen` is stubbed, so no case may touch
+        # the network. Deliberately gates no corpus number, and says so.
+        run: python scripts/benchmark_check.py
+
+      - name: Engine binding surface
+        # 38 pytest cases covered this module, and between them they missed a
+        # public property that raised AttributeError on every single call: its
+        # helper was named with two leading underscores, so calling it from a
+        # second class mangled it to a name that did not exist. Both pytest
+        # meta-tests look at this module from outside -- one checks that wrapper
+        # attributes are names the Rust extension exports, the other uses
+        # hasattr and only over DockingResult -- and the defect lived in the seam
+        # between two Python classes, where neither can see.
+        # This one walks every public member of every wrapper on a real
+        # instance and reverse-asserts that none was left unchecked.
+        run: python scripts/core_check.py
 
       - name: Pose/receptor interaction criteria
         # No display needed, and it has to be a gate rather than a note: the
@@ -238,6 +271,66 @@ jobs:
         run: |
           python scripts/structure_bond_check.py
           python scripts/representation_geometry_check.py
+
+      - name: Receptor preparation reports what it dropped
+        # Also a gate, and it needs no display. `prepare_receptor` keeps one
+        # component of its input and discards the rest, which is usually right,
+        # but until now the only record was a RuntimeWarning -- and a warning is
+        # a string that GUI code and CLI code routinely drop on the floor. On
+        # 1HVR, a homodimer, the redocking benchmark searched a two-chain
+        # 1826-atom structure while docking against a 621-atom single chain, and
+        # every RMSD it produced was meaningless. This script pins the report,
+        # pins that the warning is generated *from* the report so the two cannot
+        # disagree, and pins the `prepare_receptor() -> str` contract.
+        run: python scripts/prep_check.py
+
+      - name: Ligand preparation
+        # `prepare_ligand` had no check at all while `prepare_receptor` had one,
+        # and it is the path a first run actually goes through. It also covers
+        # the two dead-and-broken paths this found: a water/ion filter that
+        # called RemoveAtom on a Chem.Mol (which has no such method, so it had
+        # never removed anything), and a PathToSubmol call that takes a
+        # traversal path rather than a set of atoms.
+        run: python scripts/ligand_check.py
+
+      - name: odcli reports what preparation dropped
+        # Runs the installed console script, not an import, because exit codes
+        # and argument parsing are exactly what a CLI gets wrong.
+        run: python scripts/cli_prep_check.py
+
+      - name: The other seven odcli subcommands
+        # `odcli` has eight subcommands and until now exactly one had been
+        # run. Exit codes are taken from the code, not guessed -- two are
+        # unintuitive: `dock` returns 2 for an empty ligand directory, and
+        # `workbench` returns 3 for a missing GUI stack. Every one of the
+        # eleven failure paths asserts that the diagnostic is present *and*
+        # that no Python traceback is.
+        # A coverage guard compares the subcommand table from `odcli --help`
+        # against the set this script actually ran, demanding set equality, so
+        # adding a command without a section fails the build.
+        # ~21 s over 36 subprocesses; the engine time is 0.26-0.40 s per
+        # docking run and the rest is interpreter cold start.
+        run: python scripts/cli_check.py
+
+      - name: The diagnostics in examples/
+        # Five scripts that were not in CI, not in the reproduce list, and not
+        # covered by any other check -- which makes them the only diagnostics
+        # this project has, and a diagnostic nobody runs rots against a system
+        # that has since changed. `diagnose_clash.py` in particular was written
+        # to investigate a scoring function that no longer exists.
+        # Judged on what each one *printed*, not on its exit code: a script
+        # whose checks quietly stopped running still exits zero.
+        run: python scripts/examples_check.py
+
+      - name: PDBQT file format
+        # A round trip through this project's own writer and reader only proves
+        # they agree, and they can share a bug: `read_pdbqt_models` is a
+        # MODEL/ENDMDL splitter that never reads a column, and the Rust
+        # `Ligand.from_pdbqt` is whitespace-based, so it accepts a line with a
+        # space deleted at column 31. Meeko parses by column and refuses that.
+        # The three claims -- third-party parser, shipped third-party files,
+        # own readers -- are asserted separately on purpose.
+        run: python scripts/pdbqt_check.py
 
       - name: X11 window lookup parses each tool's real output
         # No display needed: this stubs the helpers with the formats they

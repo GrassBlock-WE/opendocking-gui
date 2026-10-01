@@ -68,7 +68,7 @@ What it still does not do, measured rather than assumed:
   simply no longer doing that job by accident.
 * a site is judged by the box it builds, not by how near its centre is. The
   trypsin site in 3PTB is 12.8 Å from the benzamidine's centre of mass and
-  still holds all nine of its atoms, because the site is a 22 x 17 x 28 Å
+  still holds all nine of its atoms, because the site is a 31 x 18 x 33 Å
   cleft and its centroid is nowhere near where the ligand sits. Ranking or
   filtering on centre distance would throw that one away.
 * crambin has **no sealed cavity at all** at a 1.4 Å probe; every site it
@@ -79,6 +79,126 @@ What it still does not do, measured rather than assumed:
   **ARG 17, THR 2, PHE 13, ARG 10, ASN 14 and GLU 23**, and an independent
   count of every receptor atom within 4.5 Å of that same pose names seven
   residues, six of which are exactly those.
+
+# When the site is bigger than a good search box
+
+`box_center_and_size` reports a site's full extent, so a site that is a long
+winding cleft gets the large box it genuinely is. Measured on the two
+complexes where that is the problem, from `scripts/redock_benchmark.py`:
+
+| site                        | site extent, so its box at 4 A padding | RMSD at its effort |
+|-----------------------------|-------------------------------------|--------------------|
+| 3PTB benzamidine, rank 1 of 39 | 31 x 18 x 33 A -> **39 x 26 x 41 A**, 41,574 A3 | 1.26 A at 64, 12.88 A at 16 |
+| 1HVR HIV protease XK2, rank 1 of 47 | 22 x 30 x 24 A -> **30 x 38 x 32 A**, 36,480 A3 | 21.24 A at 64, 10.53 A at 128 |
+
+The 3PTB cleft's extent was written here as 22 x 17 x 28 A for as long as this
+file existed, and it was **wrong**. At 4 A padding a 22 x 17 x 28 A site produces
+a 30 x 25 x 36 A box, not the 39 x 26 x 41 A the benchmark reports -- and no
+uniform padding reconciles them, since the three axes would need 8.5, 4.5 and
+6.5 A, so it was not a padding-convention difference either. The real extent is
+**31 x 18 x 33 A**, and it follows from the box by the one rule in the table
+above: the box is the site's size plus twice the padding. The benchmark calls
+`box_center_and_size` with no padding argument, so it prints the raw padded
+box, and an independent rerun reproduced 39 x 26 x 41 A, rank 1 of 39, 9 of 9
+bound-ligand atoms inside, 12.88 A RMSD at exhaustiveness 16 and 1.26 A at 64.
+
+Worth saying why that survived so long, because the cause is not carelessness.
+**Nothing in the project recomputes one of these numbers from the other.** The
+benchmark prints a box, the docstring quotes an extent, and the two are related
+by a rule that only a reader knows, so a wrong number in prose can sit in a
+release next to a right number in a table and nothing notices -- the check
+script can only assert what the code computes, never what a comment claims. So
+the arithmetic now has somewhere to be wrong *instead of* hiding in prose:
+`pockets_check.py` asserts `box == size + 2 * DEFAULT_PADDING` on every axis,
+for the real sites and for the synthetic fixtures. That cannot catch a wrong
+docstring. It pins the relationship the docstrings are derived from, which is
+the part that was actually load-bearing.
+
+41,574 A3 is not a binding site, it is most of a small protein, and the
+interface puts it in three spin boxes with nothing to say that anything is
+unusual. So `box_with_budget` is the other door into the same
+geometry: ask for a ceiling and get the box, whether or not the ceiling bit,
+plus a note that names what was capped and what the box now leaves out. A
+caller that does not ask keeps the uncapped 2-tuple, unchanged, because an
+unasked-for cap would be the same silent substitution this exists to stop.
+
+Three things that measurement settles, and that a cleverer formula would not:
+
+* **A cap is not a fix.** 3PTB's own box does find the pose, but only at
+  exhaustiveness 64, and 1HVR's does not find it at 64 or 128. There is no
+  single box that both holds a nine-atom ligand somewhere along a winding
+  28 A cleft and stays small. That is a limit of one box per site, every
+  pocket finder has it, and the useful thing to do about it is say so.
+* **A cap does not have to move the centre.** The box stays on the site's own
+  centroid. The bounding-box middle of a curved cleft lands in the wall, and
+  that is the defect the `box_center_and_size` docstring already records as
+  fixed; re-centring on a cap would bring it back.
+* **A box does not even always contain its own site.** Because that centre is
+  the centroid and not the middle of the bounds, a site that curves back on
+  itself sticks out. On the synthetic dogleg cleft in the checks the default
+  4 A padded box holds 1937 of 1985 of the site's own points, 97.6%, and at
+  zero padding 1649 of them, 83.1%. So `BudgetedBox.coverage` counts points
+  rather than trusting the size, and a note is produced for a box that leaks
+  even when no budget was applied -- an empty note means the box is the site's
+  own *and* holds all of it.
+
+# Asking a site whether it fits a particular ligand
+
+The shortlist is ranked by the space a ligand **leaves**, so a site that fits
+its ligand snugly is a site with almost no free space, and it lands late. On
+crambin with ibuprofen docked into it, the site that holds all sixteen ligand
+atoms is **8th of 12** and **below the median volume** of the list. That is not
+a bug that a better coefficient would fix: the quantity being ranked does not
+mention the ligand. Retuning was tried and could not move it -- three mutations
+of `rank_score`, two parameter changes, a 42-cell sweep of `max_volume` x
+`min_burial` x `min_voxels`, and fifteen alternative ranking formulas all left
+that site between 8th and 11th of 12. **The rank is stable because the ranking
+cannot see the ligand.**
+
+So the caller supplies one. `Pocket.fit_to(coords, radii)` reports two
+fractions, and the point of reporting two is that **they are not reciprocals**:
+
+| on crambin's pose site (12 A3, 24 voxels), ibuprofen = 16 atoms, 178 A3 of envelope | `ligand_in_site` | `site_filled` |
+|---|---|---|
+| the real ligand | **0.50** | **0.83** |
+| 2x the volume | 0.31 | 0.79 |
+| 8x the volume | 0.19 | 0.58 |
+| half the size | 0.63 | 0.71 |
+| a tenth the size | 0.88 | 0.21 |
+
+Too big for the site and the left column falls while the right one holds.
+Dwarfed by the site and the right column falls while the left one holds. A real
+fit has both up. Print either alone and one of those two failures disappears:
+a ligand twice the site's volume still fills the site completely, and a
+ligand a tenth the size still sits entirely inside it.
+
+On the same protein the reading is close to binary in practice -- the pose site
+reads 0.50/0.83 and **all eleven other sites read exactly 0.00/0.00** -- so it
+is a way of *rejecting* the rows that obviously cannot hold the ligand, not a
+way of ranking the ones that might.
+
+**And 0.50 is not "half a fit".** The pose site is 24 voxels, 12 A³ of them,
+inside a 41 A³ box: the site is a sparse sample of the free space the ligand
+will actually use, so an atom has to be within its own radius of one of just 24
+points to count, and half of a 16-atom ligand is not. Both numbers are for
+**comparing sites against each other or ligands against each other**, not an
+absolute verdict -- a ligand fifteen times the site's volume reads 0.50 here,
+and that is the sample talking, not the fit.
+
+It is geometric compatibility: no field, no desolvation, no torsions. It is not
+a score, and it is deliberately **not** folded into `rank_score`, because that
+would silently move the ranking the benchmark and the README numbers were
+measured against. A ligand can fit a hole's shape perfectly and still be
+undockable there: 1HVR's XK2 sits in its own site and that site still reads
+21.24 A RMSD.
+
+`Pocket.thickness` is the other new reading: the site's own thickness in grid
+layers, the quantity the `min_extent` floor acts on, so a caller can see what
+that floor is about to reject. It runs 2 to 8 layers on crambin. It **does not
+distinguish a sliver from a tight binding site**, and that is measured rather
+than assumed: a 1.2 Å gap between two atom sheets is reported 4 layers thick and
+so is crambin's real binding site, because at 0.8 Å spacing those are the same
+four layers.
 
 # What this is not
 
@@ -113,6 +233,10 @@ __all__ = [
     "kind_label",
     "cavity_sensitivity",
     "DEFAULT_PROBE_SWEEP",
+    "BudgetedBox",
+    "SiteFit",
+    "DEFAULT_BOX_MAX_SIDE",
+    "DEFAULT_LIGAND_RADIUS",
 ]
 
 #: Van der Waals radii, ångström. Pockets are about where a solvent can and
@@ -214,14 +338,57 @@ def cavity_sensitivity(
 #: site. A heuristic, and labelled as one -- see `max_volume`.
 DEFAULT_MAX_VOLUME = 1500.0
 
-#: How many sites a search returns. Twelve, for a measured reason: on
-#: crambin with ibuprofen docked into it the site the ligand actually
-#: occupies ranks **ninth of sixteen**, and the box it builds holds all
-#: sixteen ligand atoms. An eight-entry shortlist cut it off, which means
-#: the feature silently did not offer a binding site that was sitting in
-#: the ninth slot. The other four measured cases all put theirs first, so
-#: this is crambin talking and not a general demand for a longer list.
+#: How many sites a search returns. **A budget, not a measurement** -- and the
+#: comment this replaces said "for a measured reason", which was one number
+#: wearing a general claim.
+#:
+#: The one fact behind it: on crambin with ibuprofen docked into it, the site
+#: the ligand actually occupies ranks **ninth of sixteen** and the box it
+#: builds holds all sixteen ligand atoms, so an eight-entry shortlist cut off
+#: a real binding site. Twelve is that ninth plus a margin of three. That is
+#: arithmetic on a single data point, and it is stated as such here so nobody
+#: later cites twelve as though a benchmark chose it.
+#:
+#: What stops it being arbitrary is that it is pinned from both sides in
+#: `pockets_check.py`: the default is exactly twelve, and the crambin site
+#: that holds the ligand really is inside that default. A second local
+#: structure to measure a second requirement against is **not available** --
+#: `examples/1crn_prep.pdbqt` is the only real protein fixture in the tree, and
+#: the other four measured complexes (1STP, 3PTB, 2NNQ, 1HVR) all put their
+#: own ligand's site first, so they raise no lower bound. Widening the list is
+#: cheap and mostly noise; the crambin case is the only one in hand that shows
+#: a real cost for being too short.
 DEFAULT_MAX_POCKETS = 12
+
+#: Radius used for a ligand atom when the caller supplies coordinates but no
+#: radii, Å. Carbon's, because carbon is most of a drug-like ligand and because
+#: it is the same number :data:`VDW_RADII` uses for ``"C"``. A caller with
+#: elements can build the per-atom array and do better.
+DEFAULT_LIGAND_RADIUS = 1.7
+
+#: Longest side, Å, of a search box :meth:`Pocket.box_with_budget` will hand
+#: out unless it is told otherwise. A parameter, picked from the two boxes
+#: that were actually measured rather than from taste.
+#:
+#: The 3PTB benzamidine site's box is **39 x 26 x 41 A** -- 41,574 A3, most of
+#: a small protein -- and the 1HVR XK2 site's is **30 x 38 x 32 A**, 36,480 A3.
+#: Those are the two longest sides in the measured set. The largest box on
+#: crambin, the one real protein the checks here can load without a network, is
+#: **14.4 x 18.4 x 24.8 A**, so a 30 A cap leaves every crambin site exactly as
+#: it was: 24.8 A is the longest side anywhere on that protein.
+#:
+#: What the cap buys is *not* a successful redock, and is not claimed to be
+#: one. Measured by `scripts/redock_benchmark.py`: the 3PTB box finds the pose
+#: at **1.26 A RMSD**, but only at exhaustiveness 64 -- 12.88 A at 16, two
+#: seconds either way -- and the 1HVR box does not find it at any effort
+#: tested, **21.24 A at 64** and **10.53 A at 128**. There is no single box
+#: that both holds a nine-atom ligand somewhere along a winding 28 A cleft and
+#: stays small. That is a limit of one box per site and every pocket finder
+#: shares it, so the honest response is to say so instead of picking a cleverer
+#: formula that appears to solve it. What the cap does buy is a search region
+#: whose size the caller chose rather than one they inherited, and a note
+#: saying what it cost.
+DEFAULT_BOX_MAX_SIDE = 30.0
 
 
 @dataclass
@@ -259,6 +426,12 @@ class Pocket:
     #: that check from the numbers alone. Bounded by `max_pockets` and
     #: `min_voxels`, so a few thousand points at most.
     points: np.ndarray = field(default_factory=lambda: np.zeros((0, 3), np.float32))
+    #: Grid pitch this site was found on, Å. Carried because two of the readings
+    #: below are only meaningful against the grid that produced them -- `volume`
+    #: is `voxels * spacing ** 3` and `thickness` is a count of grid layers -- and
+    #: a caller who searched at a finer pitch than the default must not be told
+    #: about it in the wrong units.
+    spacing: float = DEFAULT_SPACING
 
     @property
     def rank_score(self) -> float:
@@ -282,9 +455,362 @@ class Pocket:
         The centre is the site's own centroid, not its bounding-box middle: for
         a curved cleft those differ by several ångström, and the bounding box's
         middle can land in the wall.
+
+        Deliberately uncapped. `size` is the site's full extent, so a winding
+        cleft gets the large box it genuinely has -- 39 x 26 x 41 A for the 3PTB
+        site -- and that is a fact about the site rather than a defect, so
+        nothing here changes it and the return type stays a plain 2-tuple for
+        every existing caller. `box_with_budget` is the same box with a size
+        budget applied and an honest note about what the budget cost; it is a
+        separate call so a caller cannot ask for a capped box and quietly lose
+        the note.
         """
         size = np.asarray(self.size, np.float32) + np.float32(2.0 * padding)
         return tuple(float(v) for v in self.center), tuple(float(v) for v in size)
+
+    def box_with_budget(
+        self,
+        padding: float = DEFAULT_PADDING,
+        *,
+        max_side: float | None = DEFAULT_BOX_MAX_SIDE,
+        max_volume: float | None = None,
+    ) -> BudgetedBox:
+        """The site's box, capped to a size budget, with what that cost said.
+
+        `box_center_and_size` cannot answer this. A site that is bigger than a
+        sensible search box has no small box, only a large one or a wrong one,
+        and a caller who is handed the large one has no way to tell it apart
+        from the large box of a genuinely large pocket. So the budget is asked
+        for explicitly, and the answer carries the bill:
+
+        * ``size`` is the box to use, no longer than `max_side` on any axis and
+          no larger than `max_volume` in total;
+        * ``capped`` says whether either ceiling actually bit;
+        * ``coverage`` is the fraction of the site's **own grid points** the
+          resulting box still contains -- the honest version of "does this box
+          still contain the site", since the site is a set of points and not a
+          box;
+        * ``note`` is a sentence for a person naming what was capped, what the
+          site asked for, where the box still is, and what is now outside it.
+
+        Not a tuple, and not iterable. `centre, size = pocket.box_with_budget()`
+        is meant to be a mistake: the note is the whole point of the call and
+        unpacking past it discards the only part that knows the box is
+        compromised.
+
+        **What the budget means.** `max_side` is a ceiling on the longest side,
+        applied per axis. That is the knob a person can check by hand, because
+        the interface shows three side lengths and nothing else. `max_volume` is
+        a ceiling on the box's volume, applied **after** the side cap and as a
+        **uniform scale** on all three axes, so the box keeps the site's
+        proportions instead of being squeezed into a different shape that looks
+        like the site and is not. Neither subsumes the other: a 30 x 30 x 30 A
+        box is within the side cap and 27,000 A3 over a 20,000 A3 volume
+        budget, while an 8 x 8 x 70 A box is 4480 A3 and still 70 A long. Both
+        shapes occur in the measured set -- the 3PTB box is caught by either
+        ceiling on its own -- so both exist, and the side cap is the default
+        because a volume cap that fires on a legal 30 A cube is a rule a caller
+        cannot predict.
+
+        **The centre never moves.** The box stays on the site's own centroid
+        even when the budget shrinks it, because the bounding-box middle of a
+        curved cleft can land in the wall and that defect is already fixed
+        above; re-centring on a cap would reintroduce it. A cap that moved the
+        centre would have to say so, and this one does not have to, so it says
+        instead that the centre is where it was.
+
+        **What a budget does not do.** It does not make docking work. For 3PTB
+        the site's own box does find the pose (1.26 A RMSD) but only at
+        exhaustiveness 64; for 1HVR it does not (21.24 A at 64, 10.53 A at
+        128). Capping makes the search cheaper and the box defensible. It does
+        not make a winding 28 A cleft containable, and `note` says exactly how
+        much of the site is now out of reach rather than implying the rest is
+        safe.
+        """
+        centre, requested = self.box_center_and_size(padding)
+        # float64 so the cap arithmetic does not inherit the float32 grid's
+        # rounding. It is exact: the float32 values widen without changing
+        # value, so an uncapped box is the *same* floats, not nearly the same.
+        size = np.asarray(requested, np.float64).copy()
+        spent: list[str] = []
+
+        if max_side is not None and float(max_side) > 0.0:
+            if bool((size > float(max_side)).any()):
+                size = np.minimum(size, float(max_side))
+                spent.append(f"a {float(max_side):g} A side budget")
+        if max_volume is not None and float(max_volume) > 0.0:
+            now = float(np.prod(size))
+            if now > float(max_volume):
+                size = size * (float(max_volume) / now) ** (1.0 / 3.0)
+                spent.append(f"a {float(max_volume):.0f} A3 volume budget")
+
+        kept, total = self._points_inside(centre, size)
+        return BudgetedBox(
+            center=centre,
+            size=tuple(float(v) for v in size),
+            requested_size=requested,
+            capped=bool(spent),
+            coverage=(kept / total) if total else None,
+            note=_budget_note(self.size, requested, size, spent, kept, total),
+        )
+
+    @property
+    def thickness(self) -> float:
+        """How many grid layers thick this site is at its thinnest, in voxels.
+
+        The smallest of the three extents divided by the grid pitch -- the same
+        quantity the `min_extent` floor acts on, so a caller can see what that
+        floor is about to reject instead of guessing. On crambin the sites run
+        from 2 layers to 8.
+
+        **It does not tell a sliver from a tight binding site, and that is a
+        measured result rather than a caveat.** Two atom sheets with a 1.2 Å
+        gap between them are reported as a site **4 voxels** thick, and so is
+        crambin's own site that holds the docked ibuprofen: at 0.8 Å spacing a
+        1.2 Å gap and a 3.2 Å gap are the same four layers, and nothing built on
+        thickness can separate them. Eroding the free space does not help
+        either, and points the wrong way -- the 1.2 Å gap survives two erosions
+        with 128 voxels, the real site with **1**. A number that cannot tell
+        those two apart is reported here because it is cheap and true, and the
+        docstring says what it is not rather than letting a user read it as a
+        verdict on whether the site is real.
+        """
+        spacing = float(self.spacing) or DEFAULT_SPACING
+        return float(np.min(np.asarray(self.size, np.float64))) / spacing
+
+    def fit_to(self, coords, radii=None) -> SiteFit:
+        """How well this site's free space fits a ligand's envelope.
+
+        **Geometric compatibility only.** Not affinity, not a score, not a
+        ranking: it says nothing about electrostatics, desolvation or torsions,
+        and `rank_score` is deliberately left alone, because folding this into
+        it would silently move the ranking the benchmark and the README numbers
+        were measured against. It is an additional, opt-in reading of one site,
+        like `BudgetedBox.coverage`.
+
+        The motivation is measured. The search ranks by ``volume ** (1/3) *
+        burial`` -- the space a ligand **leaves** -- so a site that fits its
+        ligand snugly is a site with almost no free space and lands late: on
+        crambin the site holding the docked ibuprofen is **8th of 12** and below
+        the median volume, and no retuning of the formula could move it (3
+        ranking mutations, 2 parameter changes, a 42-cell parameter sweep and 15
+        alternative formulas all left it between 8th and 11th). The rank is
+        stable because the ranking **cannot see the ligand**. These two
+        fractions can, because the caller supplies one.
+
+        **Two fractions, and the point is that they are not reciprocals.** Each
+        one hides a failure that the other catches:
+
+        * ``ligand_in_site`` -- fraction of the ligand's atoms whose own body
+          reaches this site's free space. Low means **the ligand is too big for
+          the site**: it has atoms that cannot go anywhere near it.
+        * ``site_filled`` -- fraction of the site's voxels inside the ligand's
+          envelope. Low means **the site is bigger than the ligand**: the hole is
+          mostly space the ligand will never use.
+
+        Measured on crambin's pose site (12 Å³ of voxels, 24 of them) with
+        ibuprofen, a 16-atom ligand whose envelope is 178 Å³:
+
+        | ligand          | envelope | `ligand_in_site` | `site_filled` |
+        |-----------------|----------|------------------|---------------|
+        | the real one    | 178 A³   | **0.50**         | **0.83**      |
+        | 2x the volume   | 215 A³   | 0.31             | 0.79          |
+        | 8x the volume   | 288 A³   | 0.19             | 0.58          |
+        | half the size   | 89 A³    | 0.63             | 0.71          |
+        | a tenth         | 30 A³    | 0.88             | 0.21          |
+
+        Too big and the left column falls while the right one holds; dwarfed and
+        the right column falls while the left one holds; a real fit has both up.
+        Printing either one alone is how a failure would be hidden.
+
+        Two limits, both measured. The reading is **close to binary in
+        practice**: on crambin the pose site reads 0.50/0.83 and all eleven
+        other sites read exactly 0.00/0.00, so this rejects the rows that
+        obviously cannot hold the ligand rather than ranking the ones that might.
+        And **0.50 is not "half a fit"** -- the pose site is 24 voxels, 12 A³ of
+        them, inside a 41 A³ box, so the site is a sparse sample of the free
+        space the ligand will actually use, and an atom has to be within its own
+        radius of one of just 24 points to count. A ligand fifteen times the
+        site's volume reads 0.50 here. Both numbers are for comparing sites
+        against each other or ligands against each other, not an absolute
+        verdict.
+
+        `coords` is ``(n, 3)``. `radii` is a per-atom radius, or a single number
+        for all atoms, or ``None`` for :data:`DEFAULT_LIGAND_RADIUS`. Note that
+        `opendocking.core.Ligand` exposes ``reference_coords`` and a **scalar**
+        ``radius`` about the ligand's centroid -- there is no per-atom radius
+        there -- so a caller with a `Ligand` can pass both, and a caller with
+        elements can do better by building the per-atom array out of
+        :data:`VDW_RADII`. That is why `core` is not imported here.
+
+        Returns ``None`` in either fraction when the question cannot be answered
+        -- no ligand, no site voxels, a radius array of the wrong length, a
+        negative radius, a non-finite coordinate -- rather than ``0.0``, so a
+        caller can tell "does not fit" from "was not measured".
+        """
+        pts = np.asarray(self.points, np.float32).reshape(-1, 3)
+        lig = np.asarray(coords, np.float64).reshape(-1, 3)
+        if len(pts) == 0:
+            return SiteFit(None, None,
+                           "this site carries no grid points, so its free space "
+                           "cannot be compared with a ligand")
+        if len(lig) == 0:
+            return SiteFit(None, None, "no ligand coordinates were supplied")
+        if radii is None:
+            rad = np.full(len(lig), DEFAULT_LIGAND_RADIUS, np.float64)
+        else:
+            rad = np.asarray(radii, np.float64).reshape(-1)
+            if rad.size == 1:
+                rad = np.full(len(lig), float(rad[0]), np.float64)
+        if len(rad) != len(lig):
+            return SiteFit(None, None,
+                           f"{len(rad)} radii for {len(lig)} atoms, so the "
+                           f"ligand's envelope is not defined")
+        if not (np.isfinite(lig).all() and np.isfinite(rad).all()):
+            return SiteFit(None, None,
+                           "the ligand has a non-finite coordinate or radius")
+        if bool((rad < 0.0).any()):
+            return SiteFit(None, None, "a negative radius is not an envelope")
+
+        # (atoms, voxels): one distance per pair, used in both directions below.
+        d = np.linalg.norm(lig[:, None, :] - pts[None, :, :].astype(np.float64),
+                           axis=2)
+        return SiteFit(
+            ligand_in_site=float((d.min(axis=1) <= rad).mean()),
+            site_filled=float((d <= rad[:, None]).any(axis=0).mean()),
+            note="",
+        )
+
+    def _points_inside(self, center, size) -> tuple[int, int]:
+        """``(points inside the box, points in the site)`` for this site.
+
+        Counts the site's own grid points rather than testing the site's
+        ``size``, because a size is a claim about a box and a point set is the
+        thing itself. This is also the check that makes the number worth
+        having: the box is centred on the site's *centroid*, not on the middle
+        of its bounds, so for a site that curves back on itself the box does
+        not necessarily contain the site. Measured on the synthetic dogleg
+        cleft below, the default 4 A padded box holds 1937 of 1985 points --
+        97.6% -- and at zero padding only 1649 of them, 83.1%. The gap is the
+        part of a winding cleft that sticks out past its own box, and no
+        bounding box derived from a centroid is going to contain it.
+        """
+        pts = np.asarray(self.points, np.float32).reshape(-1, 3)
+        if len(pts) == 0:
+            return 0, 0
+        half = np.asarray(size, np.float64) / 2.0
+        mid = np.asarray(center, np.float64)
+        inside = ((pts >= (mid - half)) & (pts <= (mid + half))).all(axis=1)
+        return int(inside.sum()), int(len(pts))
+
+
+@dataclass(frozen=True)
+class BudgetedBox:
+    """A search box for a `Pocket`, and what the size budget cost.
+
+    Frozen and non-iterable on purpose. The fields are the answer; turning
+    the object into a bare ``(center, size)`` would make the note unreachable
+    and put the current silent behaviour back with a new name.
+    """
+
+    #: Where to centre the box. The site's own centroid; a budget never moves it.
+    center: tuple[float, ...]
+    #: The box to use, in Å. Within `max_side` per axis and `max_volume` in total.
+    size: tuple[float, ...]
+    #: What the site asked for: `size` before the budget, padding included.
+    requested_size: tuple[float, ...]
+    #: Whether either ceiling actually bit. `False` means `size == requested_size`.
+    capped: bool
+    #: Fraction of the site's own grid points that `size` still contains, or
+    #: ``None`` for a site that carries no points and so cannot be measured.
+    coverage: float | None
+    #: A sentence for a person. Empty only when the box is the site's own and
+    #: holds every point of it, so an empty note is a positive claim.
+    note: str
+
+    @property
+    def volume(self) -> float:
+        """Volume of the box handed back, Å³."""
+        return float(np.prod(np.asarray(self.size, np.float64)))
+
+    @property
+    def requested_volume(self) -> float:
+        """Volume of the box the site asked for, Å³."""
+        return float(np.prod(np.asarray(self.requested_size, np.float64)))
+
+
+@dataclass(frozen=True)
+class SiteFit:
+    """How much of a ligand this site can hold, in each direction.
+
+    Two fractions that are **not** reciprocals, and the reason both are here is
+    that either one alone hides a failure: a ligand too big for the site reads
+    well on `site_filled` and badly on `ligand_in_site`, and a ligand dwarfed by
+    the site is the other way round. See :meth:`Pocket.fit_to` for the
+    measured numbers.
+
+    This is geometric compatibility, not a score and not a ranking. It is not
+    folded into `Pocket.rank_score`.
+    """
+
+    #: Fraction of the ligand's atoms whose own body reaches the site's free
+    #: space. Low means the ligand is too big. ``None`` when not measured.
+    ligand_in_site: float | None
+    #: Fraction of the site's voxels inside the ligand's envelope. Low means the
+    #: site is bigger than the ligand. ``None`` when not measured.
+    site_filled: float | None
+    #: Why a fraction is ``None``, or ``""`` when both were measured.
+    note: str
+
+    @property
+    def measured(self) -> bool:
+        """Whether both fractions could be computed."""
+        return self.ligand_in_site is not None and self.site_filled is not None
+
+
+def _fmt_box(size) -> str:
+    """A size as a person reads it: ``"39.0 x 26.0 x 41.0"``."""
+    return " x ".join(f"{float(v):.1f}" for v in np.asarray(size).reshape(3))
+
+
+def _budget_note(site_size, requested, size, spent, kept, total) -> str:
+    """The sentence `box_with_budget` attaches, or ``""`` when there is none.
+
+    Empty is a claim, not an absence: it is returned only when nothing was
+    capped **and** the box still holds every point of the site. A site that
+    leaks out of its own box therefore gets a note too, because that is exactly
+    the situation where a number in a spin box is misleading on its own.
+    """
+    if total and kept == total and not spent:
+        return ""
+    pct = f"{100.0 * kept / total:.1f}%" if total else "an unknown share"
+    lost = f"; the other {total - kept} are outside the search region, so a " \
+           f"ligand sitting there is not reachable from this box" if total \
+           and kept < total else ""
+    if not total:
+        held = "this site carries no grid points, so how much of it the box " \
+               "holds cannot be measured here"
+    elif kept == total:
+        held = f"it still holds all {total} of the site's points"
+    else:
+        held = (f"it still holds {kept} of the site's {total} points ({pct})"
+                f"{lost}")
+    if spent:
+        return (
+            f"the site spans {_fmt_box(site_size)} A, which pads to a "
+            f"{_fmt_box(requested)} A box ({float(np.prod(requested)):.0f} A3); "
+            f"{' and '.join(spent)} gives {_fmt_box(size)} A "
+            f"({float(np.prod(size)):.0f} A3) on the same centre -- the site's "
+            f"own centroid, which a cap does not move -- and {held}"
+        )
+    return (
+        f"no budget was applied, so this is the site's own padded box, "
+        f"{_fmt_box(requested)} A ({float(np.prod(requested)):.0f} A3), and "
+        f"{held} -- the box is centred on the site's centroid rather than on "
+        f"the middle of its bounds, so a site that curves back on itself sticks "
+        f"out of it. Add padding, or place the box by hand."
+    )
+
 
 
 def _grid_for(coords: np.ndarray, spacing: float, margin: float):
@@ -601,6 +1127,7 @@ def find_pockets(
                     burial=float(score[comp[:, 0], comp[:, 1], comp[:, 2]].mean()),
                     lining=_lining(pts, res, comp, spacing, lo, LINING_MAX),
                     points=world.astype(np.float32),
+                    spacing=float(spacing),
                 )
             )
 

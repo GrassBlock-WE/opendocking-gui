@@ -169,6 +169,11 @@ def main(
         # fixed absolute threshold would sit below the arithmetic it is meant
         # to check. The floor keeps near-zero scores from demanding a relative
         # accuracy the hardware cannot give.
+        #
+        # 1e-5 is a guard against single-precision drift, not a fitted value:
+        # it was not measured, and the measured gap on the five poses below is
+        # exactly 0.0 in every column. It is loose on purpose — the failure it
+        # exists to catch is a real disagreement, not a rounding artefact.
         gpu_rel = gpu_gap / max(1.0, float(np.max(np.abs(e_cpu))))
 
         flags = []

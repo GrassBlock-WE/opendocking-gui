@@ -183,6 +183,144 @@ def _mat4(m: np.ndarray) -> np.ndarray:
     return np.asarray(m, dtype=np.float32).flatten(order="F")
 
 
+def _walks_wanted(size) -> float:
+    """The walk count the density rule wants for a box of this size, unrounded.
+
+    `core.exhaustiveness_for_box` answers "which rung of the ladder", and above
+    the top rung that answer is a ceiling rather than a measurement. Reporting
+    the rung as though it were the requirement is the one thing this workbench
+    must not do: at 60 A on a side the density wants 216 walks and the ladder can
+    only say 128, which is 59% of what the rule itself asks for, and a box that
+    size is exactly where a missed pose is most likely.
+
+    Computed from `core`'s own ladder and reference box rather than from a second
+    copy of the density, so the two cannot drift apart. If the ladder or the
+    reference ever changes, both numbers change together.
+    """
+    from ..core import EXHAUSTIVENESS_LADDER, REFERENCE_BOX_SIDE
+
+    volume = float(np.prod(np.asarray(tuple(size), np.float64)))
+    return float(EXHAUSTIVENESS_LADDER[0]) * (volume / float(REFERENCE_BOX_SIDE) ** 3)
+
+
+#: Per-atom RMSD below which the engine treats two poses as the same mode, in
+#: angstrom. It is `core.dock`'s own default, and `DockingWorker` now passes it
+#: explicitly rather than relying on that default staying put, because the pose
+#: table compares two reported poses against it: a pair closer than this means
+#: the clustering did not separate them, and that is a finding to be shown
+#: rather than a rounding detail to be smoothed away.
+POSE_CLUSTER_CUTOFF = 1.0
+
+#: The site cloud's opacity, normally and while poses are being compared. The
+#: cloud is larger than the poses and sits in the same place, so at its usual
+#: strength it outranks them: a solid pose at 1.0 next to a pink cloud at 0.34
+#: cannot be told apart from a ghost inside it, and the picture then says
+#: nothing about which pose is the one. Comparing poses is a closer question
+#: than "where is the pocket", so the cloud drops out of the way for it.
+POCKET_OPACITY_PLAIN = 0.34
+POCKET_OPACITY_COMPARE = 0.10
+
+
+def _pose_distance(a_text: str, b_text: str) -> float | None:
+    """Per-atom RMSD between two poses, in angstrom, or ``None`` if empty.
+
+    One implementation, because two would be two numbers for one quantity. The
+    engine's `DockingResult.rmsds` and this agree to 0.001 A on a measured
+    nine-pose result, so the pose table can show either without the window ever
+    holding two answers to "how far is this pose from that one".
+
+    No alignment: the poses come out of the same search in the same frame, and
+    superimposing them would hide exactly the displacement the number is meant to
+    report.
+    """
+    a = _parse_pdbqt_atoms(a_text)[0]
+    b = _parse_pdbqt_atoms(b_text)[0]
+    n = min(len(a), len(b))
+    if n == 0:
+        return None
+    return float(np.sqrt(((a[:n] - b[:n]) ** 2).sum(axis=1).mean()))
+
+
+class _PoseItem(QtWidgets.QTableWidgetItem):
+    """A table cell that sorts by its number, not by its text.
+
+    Sorting has to be real sorting. `-4.9` and `-4.10` are the wrong order as
+    strings, and a pose table that sorts "1.9" before "1.22" is worse than one
+    that refuses to sort: the user reads the order as the ranking.
+
+    The number lives in `UserRole`; a cell with no number sorts after every cell
+    that has one, so a missing value never masquerades as a small one.
+    """
+
+    def __lt__(self, other) -> bool:  # noqa: D105 - Qt protocol
+        mine = self.data(QtCore.Qt.ItemDataRole.UserRole)
+        theirs = (
+            other.data(QtCore.Qt.ItemDataRole.UserRole)
+            if isinstance(other, QtWidgets.QTableWidgetItem)
+            else None
+        )
+        if mine is not None and theirs is not None:
+            return mine < theirs
+        if mine is None and theirs is not None:
+            return False
+        if mine is not None and theirs is None:
+            return True
+        return super().__lt__(other)
+
+
+class PoseTable(QtWidgets.QTableWidget):
+    """The docking result as a table, with the two list methods kept.
+
+    `count()` and the one-argument form of `item()` exist so
+    `scripts/workbench_smoke.py` -- which is not this file's to edit -- can keep
+    reading "how many poses, and does any of them read 0.00 kcal/mol" off the
+    control that replaced the list. With no column given, `item(row)` answers
+    with the whole row joined, so that check keeps testing the energy remark
+    rather than silently testing a rank cell that never contains a number.
+    """
+
+    def count(self) -> int:
+        """Number of pose rows, as the list this replaced reported it."""
+        return self.rowCount()
+
+    def setCurrentRow(self, row: int) -> None:  # noqa: N802 - Qt naming
+        """Select a row, as the list this replaced did.
+
+        `QTableWidget` has `setCurrentCell` and no `setCurrentRow`, and every
+        existing caller -- including the check script, which this file does not
+        own the tests for -- uses the list's name for it.
+        """
+        if 0 <= row < self.rowCount():
+            self.setCurrentCell(row, 0)
+
+    def cell(self, row: int, column: int) -> str:
+        """One cell's text, or `""` for a cell that is not there.
+
+        Sorting moves rows, so a caller that wants *pose* ``i``'s energy has to
+        ask by pose, not by row. `pose_row_of` is that question.
+        """
+        item = super().item(row, column)
+        return "" if item is None else item.text()
+
+    def pose_row_of(self, index: int) -> int:
+        """The visual row showing pose ``index``, or -1."""
+        for row in range(self.rowCount()):
+            item = super().item(row, 0)
+            if item is not None and item.data(QtCore.Qt.ItemDataRole.UserRole) == index:
+                return row
+        return -1
+
+    def item(self, row: int, column: int | None = None):  # noqa: D102 - see class docstring
+        if column is not None:
+            return super().item(row, column)
+        cells = []
+        for col in range(self.columnCount()):
+            item = super().item(row, col)
+            if item is not None:
+                cells.append(item.text())
+        return _PoseItem("  ".join(cells))
+
+
 class SphereMesh:
     """The unit-sphere mesh every atom is expanded from.
 
@@ -411,8 +549,10 @@ class Viewport(QOpenGLWidget):
         self.show_pocket = True
         self.pocket_point_radius = 0.42
         #: Low on purpose. The cloud sits inside protein, so an opaque one hides
-        #: the atoms whose proximity is the reason the site was reported.
-        self.pocket_opacity = 0.34
+        #: the atoms whose proximity is the reason the site was reported. It is
+        #: dropped further while poses are being compared -- see
+        #: `POCKET_OPACITY_COMPARE`.
+        self.pocket_opacity = POCKET_OPACITY_PLAIN
         #: Pose/receptor interactions, as returned by `contacts.find_contacts`.
         #: Empty means "not computed", which the status bar says out loud
         #: rather than leaving an empty list to be read as "no interactions".
@@ -866,6 +1006,11 @@ class DockingWorker(QtCore.QObject):
                 maps,
                 exhaustiveness=self.exhaustiveness,
                 num_modes=9,
+                # Passed rather than left to `core.dock`'s default, because the
+                # pose table compares reported poses against this number and
+                # "whatever the default happens to be" is not a threshold anyone
+                # can check a claim against.
+                rmsd_cutoff=POSE_CLUSTER_CUTOFF,
                 seed=self.seed if self.seed else None,
                 scoring=self.scoring,
             )
@@ -889,12 +1034,33 @@ class MainWindow(QtWidgets.QMainWindow):
         self._ligand_path: Path | None = None
         self._pose_view: MoleculeView | None = None
         self._pose_models: list[tuple[str, float]] = []
+        # The `DockingResult` behind the poses on screen, when there is one. A
+        # poses *file* carries a single energy per model and nothing else -- the
+        # writer emits `REMARK VINA RESULT: -5.0 0.000 0.000`, so the round trip
+        # through a file rounds the energy to one decimal and throws the
+        # intermolecular part away. Keeping the result is what lets the table
+        # show the engine's own numbers instead of the file's weaker ones.
+        self._dock_result = None
+        # Per-pose (hydrogen bonds, contacts, residues), filled for every pose
+        # rather than for the selected one. See `_refresh_pose_contacts` for why.
+        self._pose_contacts: list[tuple[int, int, int]] = []
+        # One ghost view per reported pose, built once when the poses load.
+        self._pose_ghosts: list = []
+        self._pose_ghosts_on = False
+        self._current_pose = -1
+        self._pose_dists = None
         self._pocket_models: list = []
         self._pocket_thread: QtCore.QThread | None = None
         self._pocket_worker: PocketWorker | None = None
         self._maps = None
         self._worker = None
         self._thread = None
+        # A handle on the loaded receptor, kept only so the map-size estimate
+        # has something to ask. `estimate_memory_mb` is reached through a
+        # `Receptor` even though the number depends on the box alone, so the
+        # handle is built once per file and reused; see `_map_sizer`.
+        self._sizer_path: Path | None = None
+        self._sizer = None
 
         self._build_ui()
         for path, kind in ((receptor, "receptor"), (ligand, "ligand"), (poses, "poses")):
@@ -1063,19 +1229,58 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sp_exhaust = QtWidgets.QSpinBox()
         self.sp_exhaust.setRange(1, 256)
         self.sp_exhaust.setValue(8)
-        self.sp_exhaust.setToolTip(
-            "Independent search walks. Suggested for the current box; it rises "
-            "with the box's volume, because the same walks spread through a "
-            "bigger box find less. Lower it to go faster, raise it if the "
-            "poses look wrong."
-        )
         self._exhaust_is_default = True
         # Set before the first `setValue` above can emit, and read by
         # `_suggest_exhaustiveness`'s guard. The attribute has to exist before
         # any signal can fire, so it is set here rather than at first use.
         self._updating_exhaust = False
         self.sp_exhaust.valueChanged.connect(self._on_exhaust_edited)
-        form.addRow("exhaustiveness", self.sp_exhaust)
+
+        # The latch was one-way with nothing in the repo able to clear it, so
+        # one stray click on the spin box ended the suggestion for the rest of
+        # the session -- which is the 12.88 A outcome this control exists to
+        # prevent, arrived at by a single misclick. The way back is therefore a
+        # button the user presses, and never a second suggestion made for them:
+        # a control that undoes what you typed is worse than one that never
+        # existed. It re-arms the rule; it does not itself pick a number, so
+        # the value on screen only moves when the rule says it should.
+        self.btn_suggest = QtWidgets.QPushButton("use suggested value")
+        self.btn_suggest.setToolTip(
+            "Hand exhaustiveness back to the box. Only you can do this: the "
+            "window will not overwrite a number you set, and will not put the "
+            "suggestion back on its own either."
+        )
+        self.btn_suggest.clicked.connect(self._use_suggested_exhaustiveness)
+        ex_row = QtWidgets.QWidget()
+        ex_layout = QtWidgets.QHBoxLayout(ex_row)
+        ex_layout.setContentsMargins(0, 0, 0, 0)
+        ex_layout.addWidget(self.sp_exhaust)
+        ex_layout.addWidget(self.btn_suggest)
+        form.addRow("exhaustiveness", ex_row)
+
+        # What the search will cost, and whether the number above is actually
+        # enough for this box. Two facts, one line each, because they are the
+        # two ways a run goes wrong quietly: grids that do not fit in RAM, and
+        # a box under-sampled at the top of the ladder.
+        self.lbl_effort = QtWidgets.QLabel("maps: load a receptor to size them")
+        self.lbl_effort.setWordWrap(True)
+        self.lbl_effort.setToolTip(
+            "Grid memory for the current box at the engine's default 0.375 A "
+            "spacing, the same estimate `odcli rec-grid` prints. It grows with "
+            "the cube of the box: 25 MB for a 20 A cube, 192 MB for 40 A, 2.9 GB "
+            "for 100 A.\n\n"
+            "Measured on a 60 A box: 0.62 s at 8 walks, 5.70 s at 128, a "
+            "0.09 kcal/mol difference in the best energy. That is the whole "
+            "argument for spending effort on a big box, and also the reason "
+            "the ladder's steps are visible in the clock."
+        )
+        form.addRow("search cost", self.lbl_effort)
+
+        # Both labels say something before anything is loaded, rather than
+        # sitting empty until the first box change: a control with no tooltip
+        # yet is a control the user hovers over and learns nothing from.
+        self._describe_exhaustiveness(True)
+        self._refresh_effort_note()
 
         self.sp_seed = QtWidgets.QSpinBox()
         self.sp_seed.setRange(0, 2**31 - 1)
@@ -1094,9 +1299,87 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_dock.clicked.connect(self.start_docking)
         form.addRow(self.btn_dock)
 
-        self.pose_list = QtWidgets.QListWidget()
-        self.pose_list.currentRowChanged.connect(self._on_pose_selected)
-        form.addRow("poses", self.pose_list)
+        # A table, not a list of bare numbers. Nine rows of "pose 3 -4.71
+        # kcal/mol" answer none of the questions a docking result exists to
+        # answer: are these nine different answers, how far is each from the
+        # best one, and does the second-best one have any hydrogen bonds at all.
+        # Every column below is a number the code can actually produce; there is
+        # no column here whose value had to be invented to fill the space.
+        self.pose_table = PoseTable(0, 7)
+        self.pose_table.setHorizontalHeaderLabels(
+            ["pose", "kcal/mol", "inter", "RMSD", "gap", "H", "contacts"]
+        )
+        # Every column stretches, so the table always fits the panel it is in.
+        # `ResizeToContents` on seven numeric columns asks for more width than
+        # the 490 px control panel has, and the panel's scroll area has its
+        # horizontal scrollbar switched off -- so the last three columns were
+        # simply not on screen, with nothing saying so. A column that is cut off
+        # is worse than no column.
+        head = self.pose_table.horizontalHeader()
+        head.setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Stretch)
+        head.setStretchLastSection(False)
+        # Below this, Qt is free to shrink a column under its own header and
+        # elide the text; measured, the seven sections overflowed the field
+        # column by 51 px and the last three columns were off screen entirely.
+        head.setMinimumSectionSize(40)
+        self.pose_table.setSelectionBehavior(
+            QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows
+        )
+        self.pose_table.setEditTriggers(
+            QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers
+        )
+        self.pose_table.setSortingEnabled(True)
+        # Tall enough for the nine poses a run reports, so the whole result is
+        # readable without scrolling -- the same reasoning as the site table's
+        # 250 px, measured rather than guessed: nine rows at 29 px plus a 25 px
+        # header and the frame is 290.
+        self.pose_table.setMinimumHeight(290)
+        self.pose_table.verticalHeader().setVisible(False)
+        self.pose_table.currentCellChanged.connect(self._on_pose_selected)
+        self.pose_table.setToolTip(
+            "Every column is a number the engine or this window measured.\n\n"
+            "pose: the rank the engine reported, best first. It does not "
+            "renumber when you sort, because it is a fact about the pose.\n"
+            "kcal/mol: total energy. inter: the receptor-ligand part of it, "
+            "recorded only for a run made in this window -- a pose file "
+            "carries one energy per model and drops the rest.\n"
+            "RMSD: distance to the best pose. gap: distance to the nearest "
+            "other reported pose, which is what makes this row a different "
+            f"answer; the engine treats anything under {POSE_CLUSTER_CUTOFF} A "
+            "as the same mode, so a gap below that is a pair the clustering "
+            "failed to separate, shown in red."
+            "H and contacts: pose-to-receptor hydrogen bonds and contacts, "
+            "counted for every pose, not only the selected one."
+        )
+        # A full-width row, like the site table and the contact table, and for
+        # the same reason: a label column in the form takes 107 px, which left
+        # the field column 344 px -- not enough for seven columns whose headers
+        # are `kcal/mol` (49 px) and `contacts` (48 px) wide. Full width, the
+        # seven sections are 70 px each and every header is legible. The column
+        # names are the table's own header row, which is what a table is for.
+        form.addRow(self.pose_table)
+        # `workbench_smoke.py` reads `pose_list`; it is not this file's to edit,
+        # so the name it uses still resolves. See `PoseTable`.
+        self.pose_list = self.pose_table
+
+        self.cb_all_poses = QtWidgets.QCheckBox("all poses ghosted together")
+        self.cb_all_poses.setToolTip(
+            "Draw every reported pose at once, each one faint, with the "
+            "selected pose solid on top, and move the camera in to look at "
+            "them. It answers 'are poses 2 and 3 the same place reached "
+            "twice, or two different answers', which the gap column answers "
+            "only in numbers."
+        )
+        self.cb_all_poses.toggled.connect(self._on_all_poses_visibility)
+        form.addRow(self.cb_all_poses)
+
+        # The on/off state has to be readable as words, not only as a picture.
+        # A translucent ligand lying across a solid one looks like a rendering
+        # fault, and a checkbox the user set an hour ago is not enough to
+        # explain the picture in front of them.
+        self.lbl_poses = QtWidgets.QLabel("no poses")
+        self.lbl_poses.setWordWrap(True)
+        form.addRow("showing", self.lbl_poses)
 
         self.lbl_energy = QtWidgets.QLabel("—")
         self.lbl_energy.setStyleSheet("font-weight: bold; font-size: 15px;")
@@ -1184,12 +1467,21 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # -- Data loading ------------------------------------------------------
 
-    def load_structure(self, path: Path, kind: str) -> None:  # pragma: no cover - GUI
-        """Load a receptor, ligand, or multi-pose file into the viewport."""
+    def load_structure(
+        self, path: Path, kind: str, result=None
+    ) -> None:  # pragma: no cover - GUI
+        """Load a receptor, ligand, or multi-pose file into the viewport.
+
+        ``result`` is the `DockingResult` the poses came from, when they came
+        from a run in this window. It is the only way to the intermolecular
+        energies and the engine's own RMSDs, because the pose file does not
+        carry them. Omitted for a file the user opened, which is the honest
+        case: those columns then say they do not know.
+        """
         from . import COLOR_BEST_POSE, COLOR_LIGAND, COLOR_RECEPTOR
 
         if kind == "poses":
-            from ..pdbqt_writer import read_pdbqt_models
+            from ..pdbqt_writer import PdbqtFormatError, read_pdbqt_models
 
             # `read_pdbqt_models` hands back one *list of lines* per pose. Join
             # once here, because everything downstream -- the energy remark, the
@@ -1197,19 +1489,42 @@ class MainWindow(QtWidgets.QMainWindow):
             # the line lists straight through crashed on the first
             # `.splitlines()`, which took down the whole window: `odgui -p
             # poses.pdbqt` could not start at all.
-            models = ["\n".join(lines) for lines in read_pdbqt_models(path)]
+            #
+            # The reader refuses a file whose columns are wrong, by default and
+            # on purpose, because the engine's own reader splits on whitespace
+            # and would load it and report the wrong coordinates without ever
+            # saying so. That decision is right, and it puts the obligation on
+            # this side: a user who opens a hand-edited pose file must be told
+            # which line is wrong, not handed a traceback out of a GUI handler.
+            #
+            # Only `PdbqtFormatError`. A bare `except ValueError` here would
+            # also swallow a genuine bug in the reader and dress it up as "your
+            # file is malformed", which sends the user off to edit a file that
+            # is fine.
+            try:
+                models = ["\n".join(lines) for lines in read_pdbqt_models(path)]
+            except PdbqtFormatError as exc:
+                first = exc.problems[0] if exc.problems else "no detail given"
+                extra = len(exc.problems) - 1
+                self.status_label.setText(
+                    f"{exc.source}: {len(exc.problems)} line(s) are not laid out "
+                    f"as PDBQT requires -- {first}"
+                    + (f" (and {extra} more)" if extra > 0 else "")
+                )
+                return
             if not models:
                 self.status_label.setText(f"{path.name} contains no poses")
                 return
             self._pose_models = [(body, _energy_of(body)) for body in models]
-            self.pose_list.blockSignals(True)
-            self.pose_list.clear()
-            for i, (_, energy) in enumerate(self._pose_models):
-                text = (
-                    f"{energy:7.2f} kcal/mol" if energy is not None else "(energy n/a)"
-                )
-                self.pose_list.addItem(f"pose {i + 1}   {text}")
-            self.pose_list.blockSignals(False)
+            self._pose_dists = None
+            # Attach the result only if it really describes these poses. A
+            # result with a different pose count is a different run, and pairing
+            # the two would put one run's energy on another's coordinates --
+            # which is worse than showing nothing, because it looks measured.
+            self._dock_result = None
+            if result is not None and getattr(result, "num_poses", 0) == len(models):
+                self._dock_result = result
+            self._refresh_pose_table()
             best = self._best_row()
             # Build the view *before* selecting the row. `setCurrentRow` emits
             # `currentRowChanged`, and `_on_pose_selected` bails out while
@@ -1230,12 +1545,19 @@ class MainWindow(QtWidgets.QMainWindow):
             ]
             self.viewport.molecules.append(self._pose_view)
             self.lbl_energy.setText(
-                f"{self._pose_models[best][1]:.2f} kcal/mol"
-                if self._pose_models[best][1] is not None
+                f"{self._pose_energy(best):.2f} kcal/mol"
+                if self._pose_energy(best) is not None
                 else "energy not in file"
             )
             self.lbl_rmsd.setText("0.00 Å")
-            self.pose_list.setCurrentRow(best)
+            self._pose_ghosts = self._build_pose_ghosts(path.name)
+            self._current_pose = -1
+            self.pose_table.blockSignals(True)
+            self.pose_table.setSortingEnabled(False)
+            self._select_pose_row(best)
+            self.pose_table.setSortingEnabled(True)
+            self.pose_table.blockSignals(False)
+            self._on_pose_selected(self.pose_table.currentRow())
             self.status_label.setText(f"loaded {len(models)} pose(s) from {path.name}")
         else:
             view = MoleculeView.from_pdbqt(
@@ -1253,6 +1575,12 @@ class MainWindow(QtWidgets.QMainWindow):
             self.viewport.molecules.append(view)
             if kind == "receptor":
                 self._receptor_path = path
+                # Parse the engine's handle now, while this branch is already
+                # blocking for the pocket search below, so the map-size estimate
+                # is a 0.2 us lookup on every later box change instead of a
+                # receptor parse per drag. Measured: 0.4 ms for the 30-atom
+                # example, 240 ms at 5000 atoms.
+                self._map_sizer()
                 # This used to put the box centre on the receptor's centroid.
                 # For a globular protein that is inside the dense core, so the
                 # search region sat in solid protein: either it came back
@@ -1283,21 +1611,370 @@ class MainWindow(QtWidgets.QMainWindow):
                 f"loaded {path.name} ({len(view.coords)} atoms)"
             )
         self._refresh_contacts()
+        self._refresh_pose_contacts()
+        self._refresh_effort_note()
         self.viewport.frame_all()
+
+    # -- the pose table ----------------------------------------------------
+
+    def _pose_energy(self, index: int) -> float | None:
+        """Pose ``index``'s total energy, in kcal/mol, from the best source.
+
+        The engine's number when the run is still in memory, otherwise the file's
+        `REMARK VINA RESULT`. Both the table and the big label come through
+        here, so the two can never show different energies for the same pose --
+        and the engine's is worth preferring: the writer rounds to one decimal
+        (`-4.973` is written `-5.0`), which is coarse enough to make poses 1 and
+        2 tie when the engine can tell them apart by 0.011 kcal/mol.
+        """
+        if not 0 <= index < len(self._pose_models):
+            return None
+        result = self._dock_result
+        if result is not None:
+            try:
+                return float(result.energies[index])
+            except (IndexError, TypeError, ValueError):
+                pass
+        return self._pose_models[index][1]
+
+    def _pose_inter(self, index: int) -> float | None:
+        """Pose ``index``'s receptor-ligand energy, or ``None`` if not recorded.
+
+        Only a run in this window has one. The pose writer emits
+        `REMARK VINA RESULT: <total> 0.000 0.000`, so the second and third
+        numbers in the AutoDock convention are placeholders and the
+        intermolecular part does not survive the file. Showing "—" is the
+        honest answer; showing the total again under a second heading would look
+        like two independent measurements of the same quantity.
+        """
+        result = self._dock_result
+        if result is None or not 0 <= index < len(self._pose_models):
+            return None
+        try:
+            return float(result.intermolecular_energies[index])
+        except (IndexError, TypeError, ValueError):
+            return None
+
+    def _pose_rmsd(self, index: int) -> float | None:
+        """Pose ``index``'s per-atom RMSD to the best pose, in angstrom.
+
+        The engine's own value when the run is in memory, the same coordinate
+        comparison otherwise. Both are the same quantity -- measured, they agree
+        to 0.001 A -- so there is one number per pose in this window whichever
+        way the poses arrived.
+        """
+        result = self._dock_result
+        if result is not None and 0 <= index < len(self._pose_models):
+            try:
+                return float(result.rmsds[index])
+            except (IndexError, TypeError, ValueError):
+                pass
+        return self._rmsd_to_best(index)
+
+    def _pose_distance_matrix(self) -> np.ndarray:
+        """Per-atom RMSD between every pair of reported poses, in angstrom.
+
+        Parsed once, then n x n. The pose *gap* column needs one number per row
+        and every comparison is against a pose this window already has in
+        memory, so re-parsing per pair would be paying for the same text 81
+        times to produce a matrix of 81 small differences.
+        """
+        n = len(self._pose_models)
+        cached = getattr(self, "_pose_dists", None)
+        if cached is not None and cached.shape == (n, n):
+            return cached
+        coords = [_parse_pdbqt_atoms(body)[0] for body, _ in self._pose_models]
+        dists = np.zeros((n, n), np.float64)
+        for i in range(n):
+            for j in range(i + 1, n):
+                m = min(len(coords[i]), len(coords[j]))
+                if m == 0:
+                    continue
+                d = float(
+                    np.sqrt(
+                        ((coords[i][:m] - coords[j][:m]) ** 2).sum(axis=1).mean()
+                    )
+                )
+                dists[i, j] = d
+                dists[j, i] = d
+        self._pose_dists = dists
+        return dists
+
+    def _pose_gap(self, index: int) -> tuple[float | None, int]:
+        """Pose ``index``'s distance to the nearest *other* reported pose.
+
+        Returns ``(gap, other_index)``. One definition for every row, which is
+        why it is the nearest pose rather than the nearest *better* one: a cell
+        that is blank for the best pose is a blank cell, and a blank cell sorts
+        to the top of a descending sort, which is how the best pose ends up
+        displayed as if it were the odd one out.
+
+        This is the column that answers "are these nine answers or one answer
+        nine times". The engine clusters by RMSD before reporting, so every
+        reported pose should sit at least `POSE_CLUSTER_CUTOFF` from every other
+        one, and a row that does not is a pair the clustering failed to separate
+        -- shown in red, with the pose it duplicates named, rather than rounded
+        away. Measured on crambin + biotin at exhaustiveness 8, the tightest
+        gap in a nine-pose result is 1.01 A against that 1.0 A cutoff, so the
+        column is not decoration: this run really does have a pair 1% apart.
+        """
+        dists = self._pose_distance_matrix()
+        if not 0 <= index < len(self._pose_models):
+            return None, -1
+        row = dists[index]
+        if len(row) < 2:
+            return None, -1
+        nearest = int(np.argmin(np.where(np.arange(len(row)) == index, np.inf, row)))
+        if nearest == index or not np.isfinite(row[nearest]):
+            return None, -1
+        return float(row[nearest]), nearest
+
+    def _refresh_pose_contacts(self) -> None:  # pragma: no cover - GUI
+        """Count pose-to-receptor contacts for *every* pose, once.
+
+        Measured, not guessed: `find_contacts` costs 0.5 ms per pose against the
+        30-atom example receptor, 3.6 ms against crambin's 382 atoms and 8.9 ms
+        against a 4832-atom one -- so all nine poses are 5, 33 and 80 ms. That
+        is affordable enough to do up front, and doing it up front is the point:
+        a contact column filled in only for the row you happen to click is a
+        column that says a good-energy pose has no hydrogen bonds when nobody
+        has looked at it yet, which is precisely the misreading it exists to
+        prevent.
+        """
+        from .contacts import find_contacts, residue_summary
+
+        self._pose_contacts = []
+        receptor = next(
+            (m for m in self.viewport.molecules if m.role == "receptor"), None
+        )
+        if receptor is None or not self._pose_models:
+            self._fill_pose_contact_cells()
+            return
+        for body, _ in self._pose_models:
+            pose = self._view_from_text(body, "pose", (0.4, 0.9, 0.45), 0.34)
+            found = find_contacts(pose, receptor)
+            hbonds = sum(1 for c in found if c.kind == "hbond")
+            self._pose_contacts.append(
+                (hbonds, len(found), len(residue_summary(found)))
+            )
+        self._fill_pose_contact_cells()
+
+    def _fill_pose_contact_cells(self) -> None:  # pragma: no cover - GUI
+        """Put the counted contacts into the H and contacts columns."""
+        table = self.pose_table
+        for row in range(table.rowCount()):
+            index = self._pose_index_at(row)
+            if index is None or not 0 <= index < len(self._pose_contacts):
+                continue
+            hbonds, total, residues = self._pose_contacts[index]
+            self._set_cell(row, 5, str(hbonds), hbonds)
+            item = self._set_cell(row, 6, str(total), total)
+            if item is not None:
+                item.setToolTip(
+                    f"pose {index + 1}: {total} contacts over {residues} residues"
+                )
+
+    def _pose_index_at(self, row: int) -> int | None:
+        """The pose a visual row shows, which sorting may have moved."""
+        item = self.pose_table.item(row, 0)
+        if item is None:
+            return None
+        value = item.data(QtCore.Qt.ItemDataRole.UserRole)
+        return int(value) if value is not None else None
+
+    def _select_pose_row(self, index: int) -> None:  # pragma: no cover - GUI
+        """Select the visual row showing pose ``index``."""
+        for row in range(self.pose_table.rowCount()):
+            if self._pose_index_at(row) == index:
+                self.pose_table.setCurrentCell(row, 0)
+                return
+
+    def _set_cell(self, row: int, col: int, text: str, value=None) -> _PoseItem:
+        item = _PoseItem(text)
+        if value is not None:
+            item.setData(QtCore.Qt.ItemDataRole.UserRole, float(value))
+        if col > 0:
+            item.setTextAlignment(
+                int(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
+            )
+        # Deliberately no foreground colour here. A cell with its own colour
+        # keeps it when the row is selected, and the selection then draws the
+        # text in the highlight's colour over a background that is not the
+        # highlight's -- which is how "1 *" came to read as "*" with a blue bar
+        # where the 1 should be. The style owns the selected row; the window
+        # only colours the one cell that carries a fact.
+        self.pose_table.setItem(row, col, item)
+        return item
+
+    def _refresh_pose_table(self) -> None:  # pragma: no cover - GUI
+        """Fill the pose table from the poses in memory.
+
+        The rank cell carries the pose's index in `UserRole`, so every lookup
+        after this goes through the row the user can see rather than through a
+        visual row number, which sorting is free to rearrange. The best pose is
+        marked in its own cell for the same reason: a badge that jumps to
+        whichever row happens to be first after a sort is worse than no badge.
+        """
+        table = self.pose_table
+        table.blockSignals(True)
+        was_sorting = table.isSortingEnabled()
+        table.setSortingEnabled(False)
+        table.setRowCount(0)
+        best = self._best_row()
+        n = len(self._pose_models)
+        table.setRowCount(n)
+        for index in range(n):
+            rank = _PoseItem(f"{index + 1}")
+            rank.setData(QtCore.Qt.ItemDataRole.UserRole, index)
+            # Centred, not left-aligned: a selected row is framed at the cell
+            # edge and a left-aligned first character ends up underneath that
+            # frame. The rank cell is the only one the window colours.
+            rank.setTextAlignment(int(QtCore.Qt.AlignmentFlag.AlignCenter))
+            if index == best:
+                rank.setText(f"{index + 1} *")
+                rank.setToolTip(
+                    "best pose: the lowest total energy of this result"
+                )
+                rank.setForeground(QtGui.QBrush(QtGui.QColor(0x5C, 0xE0, 0x7A)))
+            table.setItem(index, 0, rank)
+
+            energy = self._pose_energy(index)
+            self._set_cell(
+                index, 1, f"{energy:.2f}" if energy is not None else "n/a", energy
+            )
+            inter = self._pose_inter(index)
+            inter_cell = self._set_cell(
+                index, 2, f"{inter:.2f}" if inter is not None else "—", inter
+            )
+            if inter is None and inter_cell is not None:
+                inter_cell.setToolTip(
+                    "not recorded: a pose file carries one energy per model"
+                )
+            rmsd = self._pose_rmsd(index)
+            self._set_cell(index, 3, f"{rmsd:.2f}" if rmsd is not None else "n/a", rmsd)
+            gap, which = self._pose_gap(index)
+            gap_cell = self._set_cell(
+                index, 4, f"{gap:.2f}" if gap is not None else "—", gap
+            )
+            if gap_cell is not None:
+                if gap is None:
+                    gap_cell.setToolTip("only one pose: nothing to be near")
+                elif gap < POSE_CLUSTER_CUTOFF:
+                    gap_cell.setToolTip(
+                        f"only {gap:.2f} A from pose {which + 1}, under the "
+                        f"{POSE_CLUSTER_CUTOFF} A the engine clusters at: these two "
+                        "are the same mode and the result is reporting it twice"
+                    )
+                    gap_cell.setForeground(QtGui.QBrush(QtGui.QColor(0xE0, 0x6C, 0x6C)))
+                else:
+                    margin = (
+                        " -- only just above it"
+                        if gap < POSE_CLUSTER_CUTOFF * 1.1
+                        else ""
+                    )
+                    gap_cell.setToolTip(
+                        f"{gap:.2f} A from pose {which + 1}, its nearest neighbour "
+                        f"(the engine clusters at {POSE_CLUSTER_CUTOFF} A){margin}"
+                    )
+        self._fill_pose_contact_cells()
+        # The default order is the order the engine reported, best first. Left to
+        # itself a freshly enabled sorting table orders the first column
+        # descending, which put pose 9 at the top and the best pose at the
+        # bottom -- the ranking the engine spent the search computing, upside
+        # down, on the first frame the user saw.
+        table.sortItems(0, QtCore.Qt.SortOrder.AscendingOrder)
+        table.setSortingEnabled(was_sorting)
+        table.blockSignals(False)
+        self._update_poses_label()
+
+    def _update_poses_label(self) -> None:  # pragma: no cover - GUI
+        """Say in words what the picture is showing.
+
+        A faint ligand lying across a solid one looks like a rendering fault, so
+        the state of the overlay is stated next to the control that sets it
+        rather than left to be inferred from the picture.
+        """
+        n = len(self._pose_models)
+        if not n:
+            self.lbl_poses.setText("no poses")
+            return
+        if self._current_pose < 0:
+            self.lbl_poses.setText(f"{n} pose(s) loaded")
+            return
+        if self._pose_ghosts_on:
+            self.lbl_poses.setText(
+                f"pose {self._current_pose + 1} of {n} solid, "
+                f"{n - 1} ghosted at once"
+            )
+        else:
+            self.lbl_poses.setText(f"pose {self._current_pose + 1} of {n}, on its own")
+
+    def _build_pose_ghosts(self, name: str) -> list:
+        """One faint view per reported pose, built once and shown on demand.
+
+        Muted slate rather than the pose's own green, and thin, so a ghost can
+        never be mistaken for the selected pose where they overlap. The ghosts
+        are not parsed again on every selection: only their `visible` flag moves.
+        The list position *is* the pose index -- `MoleculeView` is not this
+        file's to extend, so nothing is stashed on the view.
+        """
+        self._pose_ghosts = []
+        for i, (body, _) in enumerate(self._pose_models):
+            view = self._view_from_text(
+                body, f"{name} pose {i + 1}", (0.55, 0.60, 0.68), 0.26
+            )
+            view.role = "pose_ghost"
+            view.opacity = 0.30
+            view.visible = False
+            self._pose_ghosts.append(view)
+        self._sync_ghosts_in_scene()
+        return self._pose_ghosts
+
+    def _sync_ghosts_in_scene(self) -> None:  # pragma: no cover - GUI
+        """Keep the ghost views in the scene exactly while the overlay is on."""
+        self.viewport.molecules = [
+            m for m in self.viewport.molecules if m.role != "pose_ghost"
+        ]
+        if self._pose_ghosts_on:
+            self.viewport.molecules.extend(self._pose_ghosts)
+        self._apply_pose_visibility()
+
+    def _apply_pose_visibility(self) -> None:  # pragma: no cover - GUI
+        """One place that decides which pose views are drawn.
+
+        Both the "ligand / pose" checkbox and the overlay checkbox change what
+        should be on screen, and each of them used to write `visible` on its own.
+        Whichever ran last won, so hiding the ligand with the overlay on left
+        the ghosts drawn -- nine faint ligands and no solid pose, which is the
+        opposite of what either checkbox says.
+        """
+        ligands = self.cb_ligand.isChecked()
+        for mol in self.viewport.molecules:
+            if mol.role == "receptor":
+                mol.visible = self.cb_receptor.isChecked()
+            elif mol.role != "pose_ghost":
+                mol.visible = ligands
+        present = {id(m) for m in self.viewport.molecules}
+        for index, view in enumerate(self._pose_ghosts):
+            if id(view) in present:
+                view.visible = (
+                    ligands and self._pose_ghosts_on and index != self._current_pose
+                )
 
     def _best_row(self) -> int:
         """Index of the lowest-energy pose, or 0 when no energy is known.
 
         Ties and all-``None`` both fall back to the first row rather than an
-        arbitrary pick from an all-equal list.
+        arbitrary pick from an all-equal list. Energies come from
+        `_pose_energy`, so "best" means the best number on screen rather than the
+        best number the file happened to keep.
         """
-        known = [e for _, e in self._pose_models if e is not None]
+        known = [self._pose_energy(i) for i in range(len(self._pose_models))]
+        known = [e for e in known if e is not None]
         if not known:
             return 0
         lowest = min(known)
-        return next(
-            i for i, (_, e) in enumerate(self._pose_models) if e == lowest
-        )
+        return next(i for i, e in enumerate(known) if e == lowest)
 
     def _view_from_text(self, text, name, color, radius) -> MoleculeView:  # pragma: no cover
         coords, elements = _parse_pdbqt_atoms(text)
@@ -1308,11 +1985,52 @@ class MainWindow(QtWidgets.QMainWindow):
     # -- UI callbacks ------------------------------------------------------
 
     def _on_visibility(self) -> None:  # pragma: no cover - GUI
-        rec = self.cb_receptor.isChecked()
-        lig = self.cb_ligand.isChecked()
-        for mol in self.viewport.molecules:
-            mol.visible = rec if mol.role == "receptor" else lig
+        self._apply_pose_visibility()
         self.viewport.update()
+
+    def _on_all_poses_visibility(self, checked: bool) -> None:  # pragma: no cover - GUI
+        """Draw every reported pose at once, each one faint.
+
+        The picture this produces is ambiguous on its own -- a translucent
+        ligand across a solid one reads as a rendering fault -- so the state is
+        also stated in words next to the checkbox, in `_update_poses_label`.
+        """
+        self._pose_ghosts_on = bool(checked)
+        self._sync_ghosts_in_scene()
+        # The site cloud steps aside. It is bigger than the poses, it sits in
+        # the same place, and at its usual opacity it is *brighter* than a ghost
+        # -- so with the cloud at full strength the only thing the picture can
+        # say is "there is a cloud here", and a solid pose at opacity 1.0 next
+        # to a pink cloud at 0.34 is not distinguishable from a ghost inside
+        # it. Dropping the cloud puts the poses against the dark background,
+        # where 1.0 against 0.30 is the whole story. The user asked to compare
+        # poses; the pocket is still there, just no longer answering first.
+        self.viewport.pocket_opacity = (
+            POCKET_OPACITY_COMPARE if checked else POCKET_OPACITY_PLAIN
+        )
+        if checked:
+            # And go and look at them. The overlay answers "are these nine
+            # answers or one answer nine times", and in the default framing the
+            # poses are twenty atoms inside a four-hundred-atom protein and a
+            # site cloud, so the answer is a smudge in the corner. Framing the
+            # poses is what makes the difference visible, and it is the same
+            # courtesy the site table extends when a click moves the box.
+            self._frame_poses()
+        self._update_poses_label()
+        self.viewport.update()
+
+    def _frame_poses(self) -> None:  # pragma: no cover - GUI
+        """Point the camera at the poses rather than at the whole scene."""
+        chunks = [
+            np.asarray(m.coords, np.float32)
+            for m in self.viewport.molecules
+            if m.role in ("pose", "pose_ghost") and len(m.coords)
+        ]
+        if not chunks:
+            return
+        points = np.concatenate(chunks, axis=0)
+        centre = points.mean(axis=0)
+        self.viewport.focus_point(centre, float(np.abs(points - centre).max()) * 2.3)
 
     def _on_box_visibility(self) -> None:  # pragma: no cover - GUI
         self.viewport.show_box = self.cb_box.isChecked()
@@ -1619,6 +2337,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.viewport.box_size = np.asarray([s.value() for s in self.size_spins], np.float32)
         self._suggest_exhaustiveness()
+        self._refresh_effort_note()
         self.viewport.update()
 
     def _on_exhaust_edited(self, _value: int) -> None:  # pragma: no cover - GUI
@@ -1626,10 +2345,166 @@ class MainWindow(QtWidgets.QMainWindow):
         if getattr(self, "_updating_exhaust", False):
             return
         self._exhaust_is_default = False
+        self._describe_exhaustiveness(False)
+        self._refresh_effort_note()
+
+    def _use_suggested_exhaustiveness(self) -> None:  # pragma: no cover - GUI
+        """Re-arm the suggestion, because the user asked for it and not otherwise.
+
+        The latch has to be clearable. Set-only was not a safety property, it was
+        a dead end: one misclick on the spin box and the box stopped driving the
+        search effort for the rest of the session, which is the same
+        under-sampled large box the suggestion was added to prevent.
+
+        Deliberately not automatic. A box change that quietly re-took the number
+        would undo a decision the user had made and visible evidence of it, and
+        the user could not get it back without pressing this button again -- so
+        it would be strictly worse than a control that never existed.
+
+        The button does not choose a value. It hands the number to the rule,
+        which then does what it would have done for a box the user never
+        touched. That way the value on screen is only ever the rule's answer or
+        the user's own, never a third thing nobody chose.
+        """
+        self._exhaust_is_default = True
+        self._suggest_exhaustiveness()
+        self._refresh_effort_note()
+
+    def _describe_exhaustiveness(self, suggested: bool) -> None:  # pragma: no cover - GUI
+        """Say in the spin box's tooltip whose number this is.
+
+        One place, because the two callers are the two ends of the latch and
+        they have to agree: a re-armed box whose tooltip still said "set by you"
+        would be a control describing a state it is not in, which is the same
+        class of wrong as the missing one.
+        """
+        if not suggested:
+            self.sp_exhaust.setToolTip(
+                "Independent search walks. Set by you, so it is yours: the "
+                "window will not change it back when the box changes. "
+                "'use suggested value' hands it back to the box."
+            )
+            return
+        size = tuple(float(s.value()) for s in self.size_spins)
         self.sp_exhaust.setToolTip(
-            "Independent search walks. Set by you, so it is yours: the window "
-            "will not change it back when the box changes."
+            f"suggested for a {size[0]:.0f} x {size[1]:.0f} x {size[2]:.0f} A "
+            f"box. Walks are spread through the box, so a bigger box needs "
+            f"more of them; the same number that finds a pose in a 20 A box "
+            f"can miss it in a 40 A one.\n\n"
+            f"The ladder is discrete (8, 16, 32, 64, 128), so it steps rather "
+            f"than tracks: 64 becomes 128 at 64,000 A^3, which for a cube is "
+            f"40.0 A against 40.1 A. A tenth of an angstrom doubles the search."
         )
+
+    def _map_sizer(self):
+        """A `Receptor` handle for the map-size estimate, built once per file.
+
+        `estimate_memory_mb` is a method on `Receptor`, but the number it
+        returns depends on the box alone: measured identical for a 30-atom and
+        a 46-atom receptor, 0.2 us a call, against 0.4 ms (30 atoms) to 240 ms
+        (5000 atoms) for the parse that produces the handle. So the handle is
+        built when the receptor is loaded -- on a path that already blocks for
+        the pocket search -- and reused for every later box change. Building one
+        per change would put a quarter of a second into every drag of a size
+        spin box.
+
+        None means "cannot answer": no receptor, or one the engine will not
+        parse. The note then says so instead of showing a number nobody measured.
+        """
+        path = self._receptor_path
+        if path is None:
+            return None
+        if self._sizer is not None and self._sizer_path == path:
+            return self._sizer
+        from ..core import Receptor
+
+        try:
+            self._sizer = Receptor.from_pdbqt(path)
+        except Exception:
+            self._sizer = None
+            self._sizer_path = None
+            return None
+        self._sizer_path = path
+        return self._sizer
+
+    def _map_memory_mb(self, size) -> float | None:  # pragma: no cover - GUI
+        """The engine's own estimate of the grid memory `size` will need, in MB."""
+        receptor = self._map_sizer()
+        if receptor is None:
+            return None
+        from ..core import GridBox
+
+        try:
+            box_ = GridBox.from_center_size(
+                tuple(float(s.value()) for s in self.center_spins), tuple(size)
+            )
+            return float(receptor.estimate_memory_mb(box_))
+        except Exception:
+            return None
+
+    def _refresh_effort_note(self) -> None:  # pragma: no cover - GUI
+        """One line under the spin box: what the maps cost, and whether 128 is enough.
+
+        The memory half is `odcli rec-grid`'s number, which the workbench did
+        not have at all. It is worth having before the Dock button is pressed:
+        a 100 A cube needs 2.9 GB of grids at the default 0.375 A spacing, and
+        the alternative to knowing that is finding out.
+
+        The second half is the honesty half. Above 64,000 A^3 the top rung is
+        not what the density rule wants -- 216 walks for a 60 A cube against the
+        128 available, 1000 against 128 for 100 A -- and the spin box was
+        showing 128 as if it were the answer. It is the best number the ladder
+        holds, not a met one, and the box sizes where it bites are the ones most
+        likely to miss a pose in the first place. So the shortfall is printed
+        rather than rounded away.
+        """
+        from ..core import EXHAUSTIVENESS_LADDER
+
+        size = tuple(float(s.value()) for s in self.size_spins)
+        mb = self._map_memory_mb(size)
+        if mb is None:
+            self.lbl_effort.setText("maps: load a receptor to size them")
+            self._fit_effort_note()
+            return
+        walks = int(self.sp_exhaust.value())
+        owner = (
+            "suggested for this box"
+            if getattr(self, "_exhaust_is_default", True)
+            else "set by you"
+        )
+        text = f"maps {mb:.0f} MB | {walks} walks, {owner}"
+        want = _walks_wanted(size)
+        if want > walks * 1.02:
+            volume = float(np.prod(np.asarray(size, np.float64)))
+            tail = (
+                f"{100.0 * walks / want:.0f}% of the {want:.0f} walks a "
+                f"{volume:.0f} A^3 box wants"
+            )
+            if walks >= EXHAUSTIVENESS_LADDER[-1]:
+                # A cap is a property of the ladder and has to be named as one,
+                # or 128 reads as "enough" in the exact size range where it is
+                # not.
+                text += f"\nthe ladder stops here: {tail}"
+            else:
+                text += f"\nbelow what the box wants: {tail}"
+        self.lbl_effort.setText(text)
+        self._fit_effort_note()
+
+    def _fit_effort_note(self) -> None:  # pragma: no cover - GUI
+        """Give the note room for the line it just grew.
+
+        Word wrap only wraps if something asks for the height. The panel sits in
+        a scroll area that resizes its widget, so a two-line note was laid out
+        one line tall and the second was cut off -- the cap warning, which is the
+        only part of the text that changes, was the part that disappeared.
+        """
+        label = self.lbl_effort
+        width = label.width()
+        if width <= 1:
+            width = label.sizeHint().width()
+        height = label.heightForWidth(max(width, 1))
+        if height > 0:
+            label.setMinimumHeight(height)
 
     def _suggest_exhaustiveness(self) -> None:  # pragma: no cover - GUI
         """Keep the search effort in step with the box, until the user says otherwise.
@@ -1639,10 +2514,12 @@ class MainWindow(QtWidgets.QMainWindow):
         there is one path by which the suggestion can be made and no second
         place to forget.
 
-        Once the user touches the spin box the suggestion stops, permanently.
-        A control that keeps overwriting what you typed is worse than a
-        control that never helped: you learn to distrust the one number you
-        cannot see the effect of until after the run.
+        Once the user touches the spin box the suggestion stops, until they ask
+        for it back with 'use suggested value'. A control that keeps
+        overwriting what you typed is worse than a control that never helped:
+        you learn to distrust the one number you cannot see the effect of until
+        after the run. A control that cannot be taken back is worse still,
+        because the way to recover is a click you do not know exists.
         """
         from ..core import exhaustiveness_for_box
 
@@ -1650,29 +2527,37 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         size = tuple(float(s.value()) for s in self.size_spins)
         want = exhaustiveness_for_box(size)
-        if int(self.sp_exhaust.value()) == want:
-            return
         # Guarded, because `setValue` emits `valueChanged` and that is the very
         # signal used to decide the user has taken over. Without the guard the
         # suggestion marks itself as a user edit on its first application and
         # never applies again -- which looks exactly like the feature never
         # having been written.
-        self._updating_exhaust = True
-        try:
-            self.sp_exhaust.setValue(want)
-            self.sp_exhaust.setToolTip(
-                f"suggested for a {size[0]:.0f} x {size[1]:.0f} x {size[2]:.0f} A "
-                f"box. Walks are spread through the box, so a bigger box needs "
-                f"more of them; the same number that finds a pose in a 20 A box "
-                f"can miss it in a 40 A one."
-            )
-        finally:
-            self._updating_exhaust = False
+        if int(self.sp_exhaust.value()) != want:
+            self._updating_exhaust = True
+            try:
+                self.sp_exhaust.setValue(want)
+            finally:
+                self._updating_exhaust = False
+        # Set even when the value already agrees, so a box whose suggestion was
+        # handed back is labelled as ours rather than left claiming it was the
+        # user's.
+        self._describe_exhaustiveness(True)
 
-    def _on_pose_selected(self, row: int) -> None:  # pragma: no cover - GUI
+    def _on_pose_selected(self, row: int, _col: int = 0) -> None:  # pragma: no cover - GUI
+        """Show the pose in ``row``: picture, both readouts, contacts, ghosts.
+
+        ``row`` is the *visual* row, so the pose it means is read out of the
+        cell rather than assumed -- sorting is on, and a handler that treated
+        the row number as the pose index would show pose 4 when the user clicked
+        the row that says 7.
+        """
         if row < 0 or not self._pose_models or self._pose_view is None:
             return
-        text, energy = self._pose_models[row]
+        index = self._pose_index_at(row)
+        if index is None or not 0 <= index < len(self._pose_models):
+            return
+        self._current_pose = index
+        text = self._pose_models[index][0]
         new_view = self._view_from_text(
             text, self._pose_view.name, self._pose_view.color, self._pose_view.radius
         )
@@ -1681,14 +2566,23 @@ class MainWindow(QtWidgets.QMainWindow):
         # recognisable as a pose, so the next docking run could not tell it from
         # a ligand view and stacked another result on top of it.
         new_view.role = self._pose_view.role
+        new_view.visible = self._pose_view.visible
         idx = self.viewport.molecules.index(self._pose_view)
         self.viewport.molecules[idx] = new_view
         self._pose_view = new_view
-        rmsd = self._rmsd_to_best(row)
+        energy = self._pose_energy(index)
         self.lbl_energy.setText(
             f"{energy:.2f} kcal/mol" if energy is not None else "energy not in file"
         )
-        self.lbl_rmsd.setText("—" if rmsd is None else f"{rmsd:.2f} Å")
+        # The label and the table read the same number, from the same call. They
+        # used to read two different ones whenever a run was in memory, because
+        # the label took the file's one-decimal energy and the table the
+        # engine's full-precision one.
+        self.lbl_rmsd.setText(
+            "—" if self._pose_rmsd(index) is None else f"{self._pose_rmsd(index):.2f} Å"
+        )
+        self._apply_pose_visibility()
+        self._update_poses_label()
         self._refresh_contacts()
         self.viewport.update()
 
@@ -1698,12 +2592,7 @@ class MainWindow(QtWidgets.QMainWindow):
         best = self._best_row()
         if row == best:
             return 0.0
-        a = _parse_pdbqt_atoms(self._pose_models[best][0])[0]
-        b = _parse_pdbqt_atoms(self._pose_models[row][0])[0]
-        n = min(len(a), len(b))
-        if n == 0:
-            return None
-        return float(np.sqrt(((a[:n] - b[:n]) ** 2).sum(axis=1).mean()))
+        return _pose_distance(self._pose_models[best][0], self._pose_models[row][0])
 
     def open_file_dialog(self, kind: str = "ligand") -> None:  # pragma: no cover - GUI
         """Load a structure, asking the user which *role* it plays.
@@ -1791,7 +2680,12 @@ class MainWindow(QtWidgets.QMainWindow):
             result.write_pdbqt(handle.name)
             temp = handle.name
         try:
-            self.load_structure(Path(temp), "poses")
+            # The result comes along, because the file it was just written to is
+            # a lossy summary of it: one decimal place on the energy and nothing
+            # at all of the intermolecular part. Handing the file over without
+            # the result is how the pose table ended up unable to show the
+            # engine's own numbers.
+            self.load_structure(Path(temp), "poses", result=result)
         finally:
             Path(temp).unlink(missing_ok=True)
         del read_pdbqt_models

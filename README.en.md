@@ -255,7 +255,7 @@ A large receptor takes a while, but the window stays usable.
   column carries the volume the ranking is built from, which is why the order is
   not simply "biggest first".
 - **A long winding cleft gets a long box, and a long box is a hard box.** 3PTB's
-  site is a 22 × 17 × 28 Å cleft and its box is 39 × 26 × 41 Å. No single box
+  site is a 31 × 18 × 33 Å cleft and its box is 39 × 26 × 41 Å. No single box
   both contains a 9-atom ligand somewhere in a winding cleft and stays small;
   this is a real limit of "one box per site" and every pocket code has it. What
   helps is sampling effort proportional to volume: the same box reads 12.88 Å
