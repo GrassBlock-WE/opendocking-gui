@@ -425,6 +425,35 @@ def parse_structure(text: str, name: str = "") -> Structure:
                         break
             prev_serial = serial
 
+    # Serial order, not file order.
+    #
+    # The atoms above were appended in the order the lines appear, and for a
+    # pose file that is not the ligand's order: the writer emits the rigid
+    # `ROOT` cluster first and the flexible `BRANCH` clusters after it, so the
+    # serials of `examples/poses.pdbqt` read 5, 6, 7, 8, 9, 10, 4, 11, 12, 1,
+    # 2, 3, ... Reading them in file order therefore gives a structure whose
+    # atom i is not the ligand's atom i, and every index-based consumer --
+    # bond_pairs, the residue lists, the templates -- is silently answering
+    # about a different atom than the one it names. This is the same defect the
+    # engine-side reader had: it read the serial column and then ignored it.
+    #
+    # Sorting here is the fix, and it is why the pairs and the residue indices
+    # are remapped rather than merely reordered: they were built against
+    # file-order positions, and a permutation of `atoms` alone would leave every
+    # one of them pointing at the wrong atom. `sorted` is stable and the key
+    # carries the old index, so duplicate serials keep their file order instead
+    # of being silently shuffled -- a file that reuses a serial is reported
+    # nowhere, so it must at least be read deterministically.
+    order = sorted(range(len(atoms)), key=lambda i: (atoms[i].serial, i))
+    if order != list(range(len(atoms))):
+        remap = [0] * len(atoms)
+        for new_index, old_index in enumerate(order):
+            remap[old_index] = new_index
+        atoms = [atoms[old_index] for old_index in order]
+        declared_pairs = [(remap[i], remap[j]) for i, j in declared_pairs]
+        for residue in residues:
+            residue.atoms = [remap[i] for i in residue.atoms]
+
     st = Structure(name=name, atoms=atoms, residues=residues, declared=saw_branch_records)
 
     if saw_branch_records:

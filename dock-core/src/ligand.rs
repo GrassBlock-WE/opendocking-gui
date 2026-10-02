@@ -56,12 +56,41 @@ impl Ligand {
     /// `declared_torsions` should carry the `TORSION` records from the input
     /// file when present, so the ligand docks with exactly the torsions its
     /// preparer intended.
+    ///
+    /// # Why this repeats the coordinate check [`Molecule::from_atoms`] makes
+    ///
+    /// Because this is the last gate before a ligand can be docked, so it is
+    /// where the rule belongs even though it is now the second place it is
+    /// written. One definition,
+    /// [`crate::types::non_finite_coordinate_refusal`], called from both.
+    ///
+    /// The doors that made the repeat *necessary* are now shut. `Molecule` has
+    /// private fields and no `Default`, so a caller outside this crate cannot
+    /// assemble one without going through a constructor; and its `Deserialize`
+    /// is hand-written rather than derived, so
+    /// `serde_json::from_str::<Molecule>(..)` hands the raw shape to the same
+    /// validator the constructors use instead of building a molecule from
+    /// whatever the file says. What is still open, and named on the `Molecule`
+    /// type, is the crate-internal literals. The check stays anyway, for the
+    /// door that is not shut and for the one case this function is the right
+    /// place for: it is public, so a caller can hand it a molecule that was
+    /// legitimately constructed but is *empty* or has coincident atoms,
+    /// neither of which is this crate's business to have rejected in a
+    /// constructor that does not score.
+    ///
+    /// The claim this function can honestly make is the narrow one: *whatever
+    /// molecule reaches it, an empty one and one with two atoms on the same
+    /// coordinate are refused here.* It is not a claim that the molecule
+    /// reached the search intact.
     pub fn from_molecule_with(
         molecule: Molecule,
         declared_torsions: &[(usize, usize)],
     ) -> Result<Ligand> {
         if molecule.is_empty() {
             return Err(DockError::molecule("ligand contains no atoms"));
+        }
+        if let Some(err) = crate::types::non_finite_coordinate_refusal("ligand", &molecule.atoms) {
+            return Err(err);
         }
         if let Some((i, j, d)) = closest_atom_pair(&molecule) {
             return Err(DockError::molecule(format!(
@@ -105,8 +134,59 @@ impl Ligand {
     /// Prepare a ligand by reading a PDBQT file.
     pub fn from_pdbqt(path: impl AsRef<std::path::Path>) -> Result<Ligand> {
         let parsed: ParsedStructure = read_pdbqt(path)?;
+        Ligand::from_parsed(parsed)
+    }
+
+    /// Prepare a ligand from an already-parsed PDBQT structure.
+    ///
+    /// The one place a parsed file becomes a dockable ligand, so that
+    /// [`Ligand::from_pdbqt`] and a caller holding PDBQT *text* cannot end up
+    /// with different notions of what a valid ligand is.
+    ///
+    /// # Why the declared torsion count is a refusal and not a note
+    ///
+    /// A Meeko-dialect file states its own flexibility in `TORSDOF n`, and
+    /// `TORSION`/`BRANCH` records name the rotatable bonds. The engine builds
+    /// its own tree from the covalent graph and those records, and the two can
+    /// disagree — a `TORSION` line naming an atom the file does not contain is
+    /// dropped silently, and a terminal bond is not rotatable however the
+    /// preparer wrote it. When they disagree the search runs over a different
+    /// number of degrees of freedom than the file asked for, and the caller
+    /// cannot tell: the poses come back finite, ranked, and plausible, and
+    /// nothing in a [`crate::docking::DockingResult`] says the flexibility was
+    /// not the flexibility requested. That is a docking run reporting success
+    /// for work it did not do, and unlike an unrecognised *atom* type — which
+    /// is a graded degradation the caller may legitimately accept, and which
+    /// [`crate::receptor::Receptor::unknown_atom_types`] reports rather than
+    /// refuses — a wrong torsion count is not something a caller can weigh.
+    ///
+    /// The message names both numbers, because "the file is broken" is not
+    /// actionable on its own and "re-export the ligand" is.
+    ///
+    /// Files that declare no `TORSDOF` are unaffected: there is nothing to
+    /// disagree with, and a receptor read through this path has no tree to
+    /// promise.
+    pub fn from_parsed(parsed: ParsedStructure) -> Result<Ligand> {
+        let declared = parsed.torsdof;
         let torsions = parsed.active_torsion_pairs();
-        Ligand::from_molecule_with(parsed.molecule, &torsions)
+        let ligand = Ligand::from_molecule_with(parsed.molecule, &torsions)?;
+        if let Some(declared) = declared {
+            let derived = ligand.num_torsions();
+            if derived != declared {
+                return Err(DockError::molecule(format!(
+                    "the file declares {declared} rotatable bond(s) (TORSDOF) and \
+                     carries {} resolvable torsion record(s), but the ligand prepared \
+                     from it has {derived} rotatable bond(s): the search would run over \
+                     {} degrees of freedom rather than the {} the file asked for, and \
+                     nothing in the returned poses would show that. Re-export the \
+                     ligand from its source structure.",
+                    torsions.len(),
+                    6 + derived,
+                    6 + declared,
+                )));
+            }
+        }
+        Ok(ligand)
     }
 
     /// Number of atoms.
@@ -255,6 +335,60 @@ mod tests {
         .unwrap()
     }
 
+    /// A Meeko-dialect three-carbon file: `TORSDOF` and one `BRANCH` naming a
+    /// bond that is *terminal* (C3 has no further neighbour), so the engine
+    /// builds a zero-torsion tree from it.
+    fn declared_torsion_that_cannot_be_built(declared: usize) -> ParsedStructure {
+        let text = format!(
+            "ROOT\n\
+             ATOM      1  C1  UNL     1       0.000   0.000   0.000  1.00  0.00     0.000 C\n\
+             ATOM      2  C2  UNL     1       1.500   0.000   0.000  1.00  0.00     0.000 C\n\
+             ENDROOT\n\
+             BRANCH   2   3\n\
+             ATOM      3  C3  UNL     1       3.000   1.300   0.000  1.00  0.00     0.000 C\n\
+             ENDBRANCH\n\
+             TORSDOF {declared}\n"
+        );
+        crate::pdbqt::parse_pdbqt(&text).expect("the fixture should parse")
+    }
+
+    #[test]
+    fn a_declared_torsion_the_engine_cannot_build_is_refused() {
+        // The defect this closes. The file says one rotatable bond, the engine
+        // builds none, and before the refusal it docked the rigid body and
+        // returned nine ranked poses with no field anywhere saying the
+        // flexibility was not the flexibility requested.
+        let err = Ligand::from_parsed(declared_torsion_that_cannot_be_built(1))
+            .expect_err("a declared torsion the engine cannot build must be refused");
+        let message = err.to_string();
+        assert!(message.contains("1 rotatable bond"), "message: {message}");
+        assert!(message.contains("0 rotatable bond"), "message: {message}");
+    }
+
+    #[test]
+    fn a_declaration_the_engine_can_honour_is_accepted() {
+        // The other direction, and the one that decides whether the refusal is
+        // a check or a blanket ban: the same file declaring what the engine
+        // actually derives has to go through, or this would be refusing
+        // perfectly good ligands.
+        let lig = Ligand::from_parsed(declared_torsion_that_cannot_be_built(0))
+            .expect("a file whose TORSDOF matches the derived tree must be accepted");
+        assert_eq!(lig.num_torsions(), 0);
+    }
+
+    #[test]
+    fn a_file_that_declares_no_torsdof_is_never_refused_for_it() {
+        // Receptors are read through a molecule path and carry no TORSDOF, and
+        // an AutoDock-4 style file declares torsions only as TORSION records.
+        // Neither has a count to disagree with, so the check must be silent
+        // rather than defaulting either number to zero and inventing a
+        // mismatch.
+        let mut parsed = declared_torsion_that_cannot_be_built(1);
+        parsed.torsdof = None;
+        let lig = Ligand::from_parsed(parsed).expect("no declared count, nothing to refuse");
+        assert_eq!(lig.num_torsions(), 0);
+    }
+
     #[test]
     fn two_atoms_on_the_same_coordinate_are_refused() {
         // Regression: this used to be accepted silently. Because the pair is
@@ -299,6 +433,81 @@ mod tests {
         assert!(tightest > 1.0, "tightest contact is {tightest:.3} Å");
         assert!(closest_atom_pair(&mol).is_none());
         assert!(Ligand::from_molecule(mol).is_ok());
+    }
+
+    #[test]
+    fn a_non_finite_coordinate_is_refused_by_a_ligand_built_in_memory() {
+        // The hole this closes, from the caller's side. `Ligand::from_arrays` is
+        // the documented way to build a ligand from a table of atoms and the
+        // RDKit front-end's route into the engine; before the check in
+        // `Molecule::from_atoms` a NaN here produced a ligand whose
+        // `reference_coords` were NaN, whose bond perception had silently lost
+        // whatever the NaN atom was bonded to -- so the derived torsion count
+        // changed -- and which docked to a result blaming the box.
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut atoms = butane().atoms;
+            atoms[2].coord[2] = bad;
+            // Either gate refusing is the claim: `Molecule::from_atoms` is the
+            // earlier one and says "structure", `Ligand::from_molecule` is the
+            // later one and says "ligand". Which of the two notices is a
+            // separate claim, and it is the wrong one to assert through this
+            // path; `a_molecule_that_skipped_the_constructor_is_still_refused`
+            // below is the one that pins the ligand's own gate.
+            let err = match Molecule::from_atoms(atoms) {
+                Err(e) => e.to_string(),
+                Ok(mol) => match Ligand::from_molecule(mol) {
+                    Ok(_) => panic!("a {bad} coordinate must be refused"),
+                    Err(e) => e.to_string(),
+                },
+            };
+            assert!(err.contains("atom 2"), "message: {err}");
+            assert!(err.contains('z'), "message: {err}");
+            assert!(err.contains("non-finite"), "message: {err}");
+        }
+    }
+
+    #[test]
+    fn a_molecule_that_skipped_the_constructor_is_still_refused() {
+        // The case the constructor check cannot cover, and the reason
+        // `from_molecule_with` repeats it. `Molecule`'s fields are now
+        // `pub(crate)`, so the *external* struct literal is gone -- but a
+        // molecule that was legitimately built and then had a coordinate
+        // written over is a `NaN` in a structure that looks fine, and that is
+        // this crate's own unit-test door rather than a caller's. The rule
+        // belongs at the last gate before docking either way.
+        let mut mol = butane();
+        mol.atoms[1].coord[0] = f64::NAN;
+        let err = match Ligand::from_molecule(mol) {
+            Ok(_) => panic!("a molecule mutated after construction must still be refused"),
+            Err(e) => e.to_string(),
+        };
+        assert!(err.contains("ligand atom 1"), "message: {err}");
+    }
+
+    #[test]
+    fn an_ordinary_in_memory_ligand_is_still_accepted() {
+        // The accept direction for the check that was just added here. Butane
+        // and a structure far from the origin both have to keep working; if the
+        // finiteness rule had become a magnitude limit, this is what would catch
+        // it.
+        assert_eq!(Ligand::from_molecule(butane()).unwrap().num_torsions(), 1);
+        let offset = Molecule {
+            atoms: butane()
+                .atoms
+                .iter()
+                .map(|a| {
+                    Atom::new(
+                        a.serial,
+                        [a.coord[0] + 9000.0, a.coord[1], a.coord[2]],
+                        a.element,
+                        a.atom_type,
+                    )
+                })
+                .collect(),
+            bonds: butane().bonds,
+            neighbors: butane().neighbors,
+        };
+        assert!(Ligand::from_molecule(offset).is_ok());
     }
 
     #[test]
@@ -381,8 +590,15 @@ mod tests {
     #[test]
     fn empty_ligand_is_rejected() {
         // A structure with no atoms is not constructible at all, so build the
-        // error path explicitly.
-        let err = Ligand::from_molecule(Molecule::default()).unwrap_err();
+        // error path explicitly. The literal is in-crate, which is the one
+        // remaining way to make one -- `Molecule::default()` is no longer
+        // public API. See the `Molecule` struct documentation.
+        let empty = Molecule {
+            atoms: Vec::new(),
+            bonds: Vec::new(),
+            neighbors: Vec::new(),
+        };
+        let err = Ligand::from_molecule(empty).unwrap_err();
         assert!(matches!(err, crate::DockError::InvalidMolecule(_)));
         // A single-atom ligand, by contrast, is legal.
         let one = Molecule::from_atoms(vec![Atom::new(

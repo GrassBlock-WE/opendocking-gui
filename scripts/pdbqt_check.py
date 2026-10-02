@@ -45,7 +45,11 @@ real differences are pinned rather than hidden, and they are pinned in the
   every in-tree caller does -- the torsion count and the ``atom_kinds`` come
   back identical. An earlier draft of this file blamed the flat layout for the
   4-to-5; the measurement says otherwise, and the check now pins the
-  attribution to the thing actually responsible.
+  attribution to the thing actually responsible. The engine's reader now
+  **refuses** that name-less file outright rather than returning a 5-torsion
+  ligand for a ``TORSDOF 4`` declaration, so the check pins the refusal and its
+  message; before that refusal landed this file stopped running on the line
+  that read it back, which is why a gate can be red without a check failing.
 
 Run:  python scripts/pdbqt_check.py
 """
@@ -602,15 +606,43 @@ def main() -> int:
           f"cli.py, ligand_check.py and make_data.py all pass `prep` names, "
           f"which always carry a type prefix")
 
+    # Omitting `names` is not a hypothetical: it is the parameter's default, and
+    # the file it produces is a *different molecule* -- every atom typed "C", so
+    # the engine perceives 5 rotatable bonds where the source has 4.
+    #
+    # What this section used to assert is that the reader would hand that file
+    # back as a 5-torsion ligand, and it stopped dead here rather than failing:
+    # the engine's reader now *refuses* it. `Ligand.from_parsed` treats a
+    # declared `TORSDOF` that disagrees with the derived torsion count as a
+    # refusal and not as a note, which is the right way round -- a search over 11
+    # degrees of freedom when the file asked for 10 comes back finite, ranked and
+    # plausible, with nothing in the poses to show that it was the wrong search.
+    # So the engine is right here and the expectation above it was the stale half
+    # of the pair.
+    #
+    # The evidence is therefore taken from the *file* -- where the typing is
+    # visible without a reader at all -- and from the refusal, which is the
+    # consequence, rather than from a ligand the reader no longer returns.
     bare = W.ligand_to_pdbqt(src, coords)
-    bare_back = Ligand.from_pdbqt_str(bare)
-    bare_kinds = bare_back.atom_kinds
+    bare_types = [col(ln, "type").strip()
+                  for ln in bare.splitlines() if ln.startswith("ATOM")]
+    bare_torsdof = next((int(ln.split()[1]) for ln in bare.splitlines()
+                         if ln.startswith("TORSDOF")), None)
+    why = ""
+    try:
+        bare_back = Ligand.from_pdbqt_str(bare)
+    except ValueError as exc:
+        bare_back = None
+        why = str(exc)
     check("and omitting `names` types every atom as carbon, which is measured "
           "rather than assumed",
-          set(bare_kinds) == {"hydrophobic"} and len(set(src.atom_kinds)) > 1,
-          f"without `names` every atom reads back {bare_kinds[0]!r}; the source "
-          f"has {len(set(src.atom_kinds))} distinct kinds. A well-formed file "
-          f"that describes a molecule of pure carbon")
+          set(bare_types) == {"C"} and len(bare_types) == src.num_atoms
+          and bare_torsdof == src.num_torsions and len(set(src.atom_kinds)) > 1,
+          f"without `names` the file types all {len(bare_types)} atoms "
+          f"{bare_types[0]!r} in columns 78-79 while still declaring "
+          f"TORSDOF {bare_torsdof}; the source has {len(set(src.atom_kinds))} "
+          f"distinct kinds. A well-formed file that describes a molecule of pure "
+          f"carbon")
 
     # The 4-in/5-out torsion change is real, and this pins *what causes it*,
     # because the natural explanation is wrong. The flat layout is not the
@@ -625,13 +657,17 @@ def main() -> int:
           f"flat file is innocent")
     check("and the 4-becomes-5 difference belongs to the `names` fallback, not "
           "to the flat file",
-          bare_back.num_torsions != src.num_torsions
+          bare_back is None
+          and f"declares {src.num_torsions} rotatable bond(s) (TORSDOF)" in why
+          and f"rather than the {6 + src.num_torsions}" in why
           and back.num_torsions == src.num_torsions,
-          f"omitting `names` gives {bare_back.num_torsions} rotatable bonds "
-          f"against the source's {src.num_torsions}, because typing every "
-          f"oxygen, nitrogen and sulfur as 'C' makes a different molecule. "
-          f"Attributing this to the file layout would have hidden the real "
-          f"cause, which is a caller that leaves `names` out")
+          f"written with `names`, the engine reads the same {src.num_torsions} "
+          f"rotatable bonds back from the writer's flat file, so the layout is "
+          f"innocent; written without them, typing every oxygen, nitrogen and "
+          f"sulfur as 'C' makes a different molecule and the engine refuses the "
+          f"file rather than docking it over one degree of freedom more than it "
+          f"asked for: {why}. Attributing this to the file layout would have "
+          f"hidden the real cause, which is a caller that leaves `names` out")
 
     tmp = Path(tempfile.mkdtemp(prefix="pdbqt_check_"))
     pose = tmp / "pose.pdbqt"

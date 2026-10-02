@@ -32,7 +32,35 @@ from typing import Sequence
 
 import numpy as np
 
-__all__ = ["launch", "Workbench", "MoleculeView", "Camera"]
+#: The public surface of the workbench package.
+#:
+#: **`Workbench` was here and was removed, and the reason is not tidiness.**
+#: It was listed but neither defined nor imported, so
+#: `from opendocking.workbench import Workbench` raised ImportError and
+#: `from opendocking.workbench import *` raised AttributeError -- a promise
+#: this module made and could not keep. `scripts/unreached_product_check.py`
+#: carried it as a skip for exactly that reason.
+#:
+#: **It could not be added either, and that is the part worth writing down.**
+#: A census of the whole tree found `Workbench` as an *identifier* in three
+#: places and nowhere else: this line, `docs/API.md`'s import example, and the
+#: two gates that report the defect. Every other hit in the repository is the
+#: window *title* "Open Docking Workbench". So there is no caller to wire it
+#: to, and the name has no referent: the window class is `app.MainWindow` and
+#: the entry point is `launch`, a function.
+#:
+#: Making the name real would mean an eager `from .app import MainWindow as
+#: Workbench` here, and that breaks a property `cli.py` states in its own
+#: comment: this package "imports only the standard library plus numpy at
+#: module scope and defers the GUI import to a call inside `launch", so that
+#: `from .workbench import launch` cannot raise. An import of `app` at module
+#: scope would take PyQt6 and moderngl as hard requirements of `odcli sites`,
+#: `odcli info` and `odcli workbench` -- paths that have no window, no event
+#: loop and no slots. Trading a broken promise for a broken CLI is not a fix.
+#:
+#: `docs/API.md` still shows the name in its import line. That file is not this
+#: module's, so the sentence there is left for its owner.
+__all__ = ["launch", "MoleculeView", "Camera"]
 
 
 def _require_gui():
@@ -148,6 +176,75 @@ COLOR_CONTACT = {
     "hydrophobic": (0.82, 0.45, 0.95),
     "close": (0.45, 0.52, 0.62),
 }
+
+#: The selected pair, drawn as one solid rod between the two atoms the pair
+#: table's selected row names.
+#:
+#: A **solid** rod, where every other interaction line is dashed, and a colour
+#: chosen so that it can be told from everything else on screen. Both halves are
+#: load-bearing and they do different jobs: the eye reads the solidity, and the
+#: separation from the palette is what lets an instrument name the marker.
+#:
+#: The palette it has to stay out of is every element colour plus the five
+#: scene colours, and the first attempt at this failed on it -- orange-red was
+#: inside nitrogen's `(0.20, 0.35, 0.95)` and phosphorus's `(0.95, 0.55, 0.20)`
+#: neighbourhood, and a gate counting "orange" pixels would have been counting
+#: atoms. Saturated magenta is what is left: it is the only entry in the
+#: palette whose red and blue are both near full while its green is near zero,
+#: and that is a band nothing else reaches. The nearest neighbour is the
+#: hydrophobic contact's orchid `(0.82, 0.45, 0.95)`, whose green is 115 against
+#: this one's 26 -- which is also why the rod is solid and not dashed.
+#:
+#: **What reaches the framebuffer is not this tuple, and that was measured
+#: rather than assumed.** The rod is drawn with the *line* program, which fogs
+#: like every other line in the viewer, so on 1crn/biotin at the framing `F`
+#: gives -- all six representations, from the marker's own pixels and not from a
+#: colour search -- the colour on screen is BGR **(163, 26, 159)**, not the
+#: nominal `(242, 26, 242)`. The shader's own term predicts it: with the fog
+#: range at 7.6-29.1 A and the pair at 25.2 A, the mix factor is 0.368, and
+#: `mix((242, 26, 242), (25, 28, 33), 0.368)` is `(162, 27, 165)`.
+#:
+#: **The gap is a function of the camera distance, and that is the part worth
+#: carrying.** The fog range is not a constant of the scene: `paintGL` scales it
+#: by `max(camera.distance * 0.55, 8.0)`, so pulling the camera in pulls the fog
+#: in with it and the same rod arrives progressively less blended. Measured on
+#: 1crn/biotin, pose row 0, pair row 0, spheres -- the same marker, the same
+#: tolerance of 30, the same six representations:
+#:
+#: ==================  ==========  ==========================================
+#: camera distance     marker px   pixels within 30 of the nominal colour
+#: ==================  ==========  ==========================================
+#: 24.2-30.6 A (F)      271-425    **0 in all six representations**
+#: 8.125 A              3 722      3 448
+#: 6.0 A                7 155      6 769
+#: ==================  ==========  ==========================================
+#:
+#: So "a purity count reads 0" is a statement about the *framing* the count was
+#: taken at, not about the marker, and it is easy to over-read as the latter.
+#: The count is not a constant zero: it moves by three orders of magnitude
+#: across the camera distances this product actually offers, and on a second
+#: fixture it reads 0 1707-2744 px in five of six representations inside a
+#: *single* cell, because the five re-frame the camera to slightly different
+#: distances. A gate built on it would be red or green according to the zoom.
+#:
+#: Two consequences, and they point opposite ways.
+#:
+#: * A **purity count against the nominal colour cannot see the marker
+#:   reliably at any framing** -- at 24 A it reads 0 on a frame where the marker
+#:   plainly covers 271-425 px, and at 6 A it reads 6 769 on a frame where the
+#:   marker is the same object. The suite measures the marker as a *difference*
+#:   against the same camera with the draw suppressed, and locates it by
+#:   projecting the two atoms; neither depends on this tuple arriving unblended,
+#:   and neither depends on where the camera is.
+#: * The **separation argument survives the fog, and by a margin worth naming.**
+#:   The fog colour's green is 28 against this colour's 26, so fog pulls red
+#:   and blue down together and leaves green exactly where it was -- and green
+#:   is the channel that separates this from the pocket cloud `(0.85, 0.35,
+#:   0.75)`, at 89, and from nitrogen at 153. The neighbour distances quoted
+#:   above are distances between *nominal* colours, so they are the right thing
+#:   to quote for choosing a colour, but the discrimination they rest on is
+#:   carried by the one channel the fog does not touch.
+COLOR_PAIR = (0.95, 0.10, 0.95)
 
 #: The same classes, for the table and the legend.
 CONTACT_LABELS = {

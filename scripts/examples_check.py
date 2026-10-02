@@ -58,7 +58,7 @@ than a comment:
 * the one-sided derivative really does jump, by 1.9x to 2.4x per pose, which is
   the half of the old C0 claim that survives and the reason a ladder of
   first-order rungs alone would be the wrong instrument;
-* the four zeros and the one 1.52e-04 are **predicted** by the measured width
+* the old audit's four zeros and its one 1.52e-04, **reconstructed** at its own 1e-04 rung rather than read off the audit's current `downhill` column, are **predicted** by the measured width
   of each descent region, so the split is a fact about the probe rather than a
   coincidence;
 * the coarsest rung has left the basin on every pose, so the ladder brackets a
@@ -117,8 +117,16 @@ CHECKS = 0
 CLOCKS: list[tuple[str, float, int]] = []
 
 #: GATE-DECLARE 1
-#: sites: 41 unconditional + 0 guarded
+#: sites: 46 unconditional + 0 guarded
 #: guards: sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+#:
+#: 41 -> 46, re-derived rather than typed. The entries above stop at 36, so ten
+#: sites arrived here without a line of their own: five the block had already
+#: counted, and five it had not. That is the auditor's red on this gate, not a
+#: claim about what those five check -- this block does not know and does not
+#: say. What is claimed is the mechanism: the two columns above are what
+#: `_sites_of` measures walking this file's own syntax tree, so the block and
+#: the file cannot now disagree without the run saying so.
 #:
 #: 29 -> 30, and the added site is about the *readers* rather than about the
 #: poses. `|grad|2`, `width` and `crossing` used to be read with
@@ -155,7 +163,7 @@ CLOCKS: list[tuple[str, float, int]] = []
 #:  * every pose also shows a one-sided derivative that has jumped, which is
 #:    the half of the old C0 claim that survives and the reason a ladder of
 #:    first-order rungs alone would be the wrong instrument;
-#:  * the four zeros and the one 1.52e-04 are *predicted* by each descent
+#:  * the old audit's four zeros and its one 1.52e-04, *reconstructed* at its own 1e-04 rung rather than read off the audit's current `downhill` column, are *predicted* by each descent
 #:    region's measured width rather than coinciding with it;
 #:  * the coarsest rung has left the basin on every pose, so the ladder
 #:    brackets a maximum;
@@ -699,9 +707,16 @@ def main() -> int:
     # `out` is the audit's own output from the run above; captured under a name
     # of its own so a later section reusing the variable cannot move it.
     _audit_out = out
-    if str(SCRIPTS) not in sys.path:
-        sys.path.insert(0, str(SCRIPTS))
-    import result_trust as rt  # noqa: E402  (after the path fix, on purpose)
+    # `result_trust` lives in the package now, next to the code its verdicts
+    # are about, so this gate imports it the way any consumer does. It used
+    # to insert `scripts/` on `sys.path` for it, and that surgery existed for
+    # this module alone -- `SCRIPTS` is otherwise only passed to `run_script`
+    # and joined to a filename -- so it goes with the move rather than
+    # lingering as a second way for the same module to be found.
+    _pkg = str(ROOT / "dock-py" / "python")
+    if _pkg not in sys.path:
+        sys.path.insert(0, _pkg)
+    from opendocking import result_trust as rt  # noqa: E402
 
     _lbfgs_src = (ROOT / "dock-core" / "src" / "search" / "lbfgs.rs").read_text(
         encoding="utf-8")
@@ -1264,8 +1279,8 @@ def main() -> int:
         if drop_at is not None and width is not None
     ]
     check(
-        "the audit's four zeros and its one 1.52e-04 are predicted by the "
-        "measured width of each descent region, not a coincidence of rounding",
+        "the old audit's four zeros and its one 1.52e-04 -- reconstructed at "
+        "its own 1e-04 rung rather than read off the audit's downhill column, are predicted by the measured width of each descent region, not by rounding",
         bool(split) and len(split) == len(by_pose) and all(
             (drop > 0.0) == (width > probe) for _pose, drop, width in split
         ),
@@ -1728,7 +1743,11 @@ def main() -> int:
     def _capture_addhs():
         """Record the donor-site list from the module's own AddHs call."""
         import rdkit.Chem.AllChem as _allchem
-        global _real_addhs
+        # `nonlocal`, not `global`: the saved reference lives in `main`, and
+        # `global` inside a nested function would look for a *module* name and
+        # raise NameError. This is the one difference from doing it at module
+        # scope, where the two happen to coincide.
+        nonlocal _real_addhs
         if _real_addhs is None:
             _real_addhs = _allchem.AddHs
 
@@ -1763,21 +1782,37 @@ def main() -> int:
         if not (0.7 <= _sep <= 1.35):
             _dropped_h.append((_a, f"{_sep:.2f} A from its parent, warned"))
     _unprotonated = []
+    _multiply = []
     for _d in _cap.get("donors", []):
         _a = _mol.GetAtomWithIdx(_d)
-        if not [n for n in _a.GetNeighbors() if n.GetSymbol() == "H"]:
-            _res, _chain, _seq, _nm = _prep._residue_identity(_a)
+        _h_on = [n for n in _a.GetNeighbors() if n.GetSymbol() == "H"]
+        # `_residue_identity` returns (name, res, chain, resseq) -- the atom
+        # name FIRST. Unpacked the other way round every label below loses its
+        # residue and the assertions on them fail for a reason that has
+        # nothing to do with the chemistry, which is the worst kind of red.
+        _nm, _res, _chain, _seq = _prep._residue_identity(_a)
+        if not _h_on:
             _unprotonated.append(f"{_res} {_seq} {_nm}".strip())
+        elif len(_h_on) > 1:
+            _multiply.append(f"{_res} {_seq} {_nm}".strip())
     _hd_on_disk = sum(
         1 for ln in _rec_text.splitlines()
         if ln.startswith(("ATOM", "HETATM")) and ln[77:79].strip() == "HD")
     _drop_sites = []
     for _a, _why in _dropped_h:
         _nb = _a.GetNeighbors()
-        _res, _chain, _seq, _nm = _prep._residue_identity(
+        _nm, _res, _chain, _seq = _prep._residue_identity(
             _nb[0] if _nb else _a)
         _drop_sites.append(f"{_res} {_seq} {_nm}".strip())
     _h_added, _h_dropped, _cys_sites = _h_total, len(_dropped_h), _unprotonated
+    # The identity that makes the gap readable. `written` is exactly
+    # `atoms_kept` plus the `HD` records, so the reported gap is exactly
+    # "donor sites advertised minus polar hydrogens on disk" -- and that
+    # difference decomposes into two errors in opposite directions. Stated as
+    # arithmetic rather than prose, because a decomposition that is only in the
+    # detail text is a decomposition no assertion can see.
+    _gap = _rep.polar_hydrogens_added - _hd_on_disk
+    _decomposed = (len(_cys_sites) - len(_multiply) + _h_dropped)
 
     _lost = _rep.atoms_kept + _rep.polar_hydrogens_added - _rep.pdbqt_atoms_written
     check(
@@ -1792,6 +1827,14 @@ def main() -> int:
         and _v_dimer.contract("atoms retained").family == rt.FAMILY_DATA
         and _v_pocket.trust == rt.NO
         and set(_v_pocket.failed()) == {"enclosure", "set complete"}
+        and _h_added - _h_dropped == _hd_on_disk
+        and _gap == _lost == _decomposed
+        and _hd_on_disk == _rec.num_polar_hydrogens
+        and _h_added < _rep.polar_hydrogens_added
+        and len(_cys_sites) == 6
+        and all(s.startswith("CYS") for s in _cys_sites)
+        and len(_drop_sites) == 3
+        and all(s.split()[0] in ("THR", "ARG") for s in _drop_sites)
         and not _v_rec.misspelled and not _v_pocket.misspelled,
         f"1crn, prepared for real: {len(_rec_vals)} keys projected off the "
         f"report, and the verdict is {rt.NO!r} on exactly "
@@ -1811,8 +1854,13 @@ def main() -> int:
         f"every cysteine thiol in the file, and the largest single loss here, "
         f"and the only one that produces no warning to consume. The "
         f"arithmetic nets two errors in opposite directions -- sites that got "
-        f"no hydrogen against sites that got two -- so the net {_lost:.0f} "
-        f"means nothing on its own. **Nothing else about that preparation is "
+        f"no hydrogen ({len(_cys_sites)}) against sites that got two "
+        f"({len(_multiply)}: {', '.join(_multiply) or 'none'}) -- and the "
+        f"identity is checked, not narrated: "
+        f"{_rep.polar_hydrogens_added} - {_hd_on_disk} = {_gap}, "
+        f"{len(_cys_sites)} - {len(_multiply)} + {_h_dropped} = {_decomposed}, "
+        f"and both equal the {_lost:.0f} the report implies. "
+        f"**Nothing else about that preparation is "
         f"wrong:** {_rep.atoms_dropped} atoms dropped, "
         f"`fragments_equal_chains` {_rep.fragments_equal_chains}, "
         f"{_rec.num_polar_hydrogens} polar hydrogens present, "
@@ -2196,6 +2244,20 @@ def main() -> int:
         print(f"    FAIL {f}")
     return 1 if FAILURES else 0
 
+
+#: A gate whose output cannot be decoded is a gate that only works for
+#: the person who remembered. On this machine a bare
+#: `sys.stdout.encoding` is `gbk`, and `determinism_check.py` prints an
+#: A-with-ring on its "centres ... apart" line, so the loop that echoes a
+#: script's own output raises UnicodeEncodeError partway through section
+#: 2 -- after 5 of this file's 46 checks, and with the remaining 41 never
+#: run. **If this line is ever "cleaned up", the deletion is the bug**,
+#: and the way to notice is to run this file with PYTHONIOENCODING unset
+#: on a cp936 console, which is the default on the machine it was
+#: written on. `errors="replace"` and not the default `strict`: a console
+#: that cannot encode a character is a fact about the console, and this
+#: file's verdict does not depend on any of them.
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 if __name__ == "__main__":
     raise SystemExit(main())

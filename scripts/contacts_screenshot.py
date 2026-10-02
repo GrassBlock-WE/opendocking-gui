@@ -38,7 +38,7 @@ ROOT = Path(__file__).resolve().parent.parent
 # Prefer the installed `opendocking`; only fall back to the source tree when the
 # installed one is missing. Putting `dock-py/python` on the path unconditionally
 # shadows the working package with a copy that cannot import, because a clean
-# checkout has no compiled `_dockpy` there. Same note as `contacts_check.py`.
+# checkout has no compiled `_dockpy` there. Same note as `contacts_criteria_check.py`.
 try:  # noqa: SIM105
     import opendocking  # noqa: F401
 except ImportError:  # pragma: no cover - only on an uninstalled checkout

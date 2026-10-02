@@ -75,22 +75,45 @@ pub struct DockingConfig {
     pub min_contact_distance: f64,
     /// Number of worker threads. `0` means "use all cores".
     ///
-    /// **This field does not reach the search.** It is read by the map
-    /// *tabulation* — [`Receptor::precalculate`] and
-    /// [`crate::grid::GridMaps::precalculate`] take their own `n_threads` and
-    /// build a scoped rayon pool from it — and by nothing else. `dock()` never
-    /// reads it, and the search does not build a pool of its own: the walks run
-    /// through `into_par_iter` on rayon's ambient global pool, so the number of
-    /// threads the search uses is the process's `RAYON_NUM_THREADS` or the core
-    /// count, and setting this field changes neither.
+    /// **Nothing reads this field.** An earlier version of this comment said it
+    /// was read by the map *tabulation*, which was wrong on its own logic: the
+    /// sentence that supported it conceded in the same breath that
+    /// [`Receptor::precalculate`] and [`crate::grid::GridMaps::precalculate`]
+    /// take their *own* `n_threads` and build their own scoped pool, and
+    /// `dock()` receives precalculated [`crate::grid::GridMaps`] -- so at
+    /// tabulation time no `DockingConfig` exists to read this from. The census
+    /// in `every_docking_config_field_is_read_except_the_documented_one` is the
+    /// authority and it says this is the one unread field in the struct.
     ///
-    /// The behaviour it names is not a promise the code fails to keep by
-    /// accident; it is a description of a knob that is not wired to the search,
-    /// and it is written here because a dead knob that is documented as dead is
-    /// a fact and a dead knob that is not is a lie. The sentence is pinned by
-    /// `every_docking_config_field_is_read_except_the_documented_one`, which
-    /// fails the moment someone makes this live — at which point this comment
-    /// has to be corrected deliberately rather than left to rot.
+    /// The search runs on rayon's ambient global pool, so the number of threads
+    /// it uses is the process's `RAYON_NUM_THREADS` when that is set and the
+    /// core count when it is not. Measured through the Python binding on one
+    /// machine (release build, crambin x biotin, 18 A box at 0.375 A,
+    /// `exhaustiveness=16`, `num_modes=5`, seed 20260929, best of three):
+    ///
+    /// | `RAYON_NUM_THREADS` | search wall time | best energy |
+    /// |---|---|---|
+    /// | `1` | 8.680 s | -5.169667 |
+    /// | `2` | 4.302 s | -5.169667 |
+    /// | `4` | 1.227 s | -5.169667 |
+    /// | unset (16 cores) | 0.436 s | -5.169667 |
+    ///
+    /// Twenty times the wall time between one thread and sixteen, and
+    /// bit-identical energies: the search is seeded and its result does not
+    /// depend on how many threads run it. So the environment variable is the
+    /// real lever and this field is not, and the one number a Python caller can
+    /// see -- `opendocking.available_backends()`, whose thread count is read
+    /// from the pool for exactly this reason -- moves with the environment
+    /// variable and not with this field.
+    ///
+    /// **The field is kept, deliberately.** Removing it is safe in the sense
+    /// that nothing reads it, but it is a breaking change to a public struct for
+    /// every Rust caller that names it, and the paragraph below is the only
+    /// record in the repository of what making it live would cost. A dead knob
+    /// that is documented as dead is a fact; a dead knob that is not is a lie.
+    /// The sentence is pinned by the census above, which fails the moment
+    /// someone makes this live, at which point this comment has to be corrected
+    /// deliberately rather than left to rot.
     ///
     /// What making it live would cost: a scoped rayon pool per search, built and
     /// installed around the whole search rather than around the tabulation, plus
@@ -199,6 +222,63 @@ pub struct DockingResult {
     /// have — usually a sign that the search box contains solid protein
     /// instead of a pocket.
     pub rejected_pose_count: usize,
+    /// Receptor atoms whose PDBQT type this engine does not recognise, carried
+    /// from the maps this run scored against.
+    ///
+    /// This is the *other* "the search did not do what you asked" count, and it
+    /// sits next to [`DockingResult::rejected_pose_count`] because it answers
+    /// the same question from the other end: not "were the poses impossible"
+    /// but "were the atoms scoreable". An unrecognised type still contributes a
+    /// shape term and silently loses its hydrogen-bond and hydrophobic
+    /// character, so every energy here is an underestimate of what the receptor
+    /// actually offers, and no pose count reveals it.
+    ///
+    /// It is reported and not refused, deliberately and for the reason
+    /// [`crate::receptor::Receptor::unknown_atom_types`] gives: another tool may
+    /// emit type names AutoDock never defined, and a refusal would make the
+    /// engine unusable with it. What was wrong with reporting it *only* on the
+    /// receptor is that the receptor is gone by the time a result exists — the
+    /// caller precalculates, drops the receptor, and holds maps. From there a
+    /// result that says nothing is indistinguishable from a clean one, and
+    /// "silently succeeded on an input it could not handle" is exactly that.
+    pub unknown_atom_types: usize,
+    /// Reported poses with **no atom at all** inside the search box.
+    ///
+    /// This is the third "the search did not do quite what you asked" count and
+    /// the only one of the three that admits no partial credit. A pose with one
+    /// atom inside the box scored a real interaction with the receptor; a pose
+    /// with none scored nothing but the ligand's own internal energy and
+    /// whatever [`crate::search::OUT_OF_BOX_PENALTY`] charged it, and is ranked
+    /// alongside poses that did bind. Counting whole poses rather than
+    /// out-of-box atoms is what makes the number mean one thing: how much of
+    /// this result is not a binding mode.
+    ///
+    /// It is derived, not thresholded. Each pose carries
+    /// [`Pose::atoms_outside_box`], taken by the same loop that charged the
+    /// penalty, and a pose is counted here when that count reaches its own atom
+    /// count — a comparison of two integers the engine already had. No
+    /// tolerance, no distance and no energy is involved, so the number cannot
+    /// be tuned into appearing.
+    ///
+    /// ## Why this is a reported state and not a refusal
+    ///
+    /// A refusal is right for a box that misses the receptor
+    /// ([`crate::grid::precalculate`](crate::grid::GridMaps::precalculate)),
+    /// where every map is identically zero and there is no ranking to mislead
+    /// anyone. It is wrong here. The search ran, the poses are physically
+    /// consistent, and the energies are the engine's honest ones: a pose wholly
+    /// outside the box is charged 1000 kcal/mol per ångström of overhang, so it
+    /// cannot report a small attractive number and the table itself already
+    /// shows the result is worthless. Turning that into an error would also
+    /// throw away a case a caller may want — `min_contact_distance` and a
+    /// deliberately oversized box are legitimate, and a refusal here would make
+    /// the engine refuse to describe what it did.
+    ///
+    /// So it is carried and counted, and the distinct state it names — *this
+    /// search returned poses, and none of them are in the box* — is different
+    /// from both a clean run and from the search having failed. Read it against
+    /// `poses.len()`: equal to it means the result describes no binding mode.
+    pub poses_outside_box_count: usize,
     /// The strategy that ran.
     pub mode: SearchMode,
     /// Name of the scoring function used.
@@ -273,11 +353,20 @@ pub fn dock(
         clashing_reported = poses.len();
     }
 
+    // Counted here, over `poses` as it now stands, and not over `raw` and not
+    // over `clean`: the number exists to describe what the caller is about to
+    // read, so it has to be taken after the clash fallback above has decided
+    // what gets reported. Counting `raw` would make it answer a different
+    // question -- how often the search wandered out of the box, which is a
+    // property of the search and not of the result -- and the two differ
+    // whenever clustering drops a pose.
     Ok(DockingResult {
+        poses_outside_box_count: poses.iter().filter(|p| p.every_atom_outside_box()).count(),
         poses,
         elapsed_seconds: start.elapsed().as_secs_f64(),
         raw_pose_count,
         rejected_pose_count: clashing_reported,
+        unknown_atom_types: maps.unknown_atom_types(),
         mode: config.mode,
         scoring_function: scoring.name().to_string(),
     })
@@ -348,6 +437,11 @@ pub fn cluster_poses(
             // still the gradient of the pose being reported. Dropping it here
             // would leave every reported pose without one.
             gradient: pose.gradient,
+            // For the same reason, and for the same reason it is a count and not
+            // a flag: the count was taken on the pose being reported, so the
+            // `poses_outside_box_count` below is a count of these poses and of
+            // nothing else.
+            atoms_outside_box: pose.atoms_outside_box,
         });
     }
     Ok(kept)
@@ -489,7 +583,7 @@ mod tests {
         }
 
         // The field list, derived from this file's own source.
-        let own = strip_comments(&include_str!("docking.rs"));
+        let own = strip_comments(include_str!("docking.rs"));
         let open = own
             .find("pub struct DockingConfig {")
             .expect("DockingConfig is declared in this file")
@@ -549,8 +643,9 @@ mod tests {
                 if p.is_dir() {
                     stack.push(p);
                 } else if p.extension().and_then(|s| s.to_str()) == Some("rs") {
-                    let text = std::fs::read_to_string(&p)
-                        .unwrap_or_else(|err| panic!("readable source file {}: {err}", p.display()));
+                    let text = std::fs::read_to_string(&p).unwrap_or_else(|err| {
+                        panic!("readable source file {}: {err}", p.display())
+                    });
                     files += 1;
                     code.push_str(&strip_comments(&text));
                     code.push('\n');
@@ -635,9 +730,7 @@ mod tests {
         let receptor = Receptor::from_molecule(rec).unwrap();
         let box_ = crate::grid::GridBox::new([-8.0, -8.0, -8.0], [8.0, 8.0, 8.0]).unwrap();
         let scoring = crate::scoring::VinaScoring::new();
-        let maps = receptor
-            .precalculate(&box_, &scoring, 0.5)
-            .expect("maps");
+        let maps = receptor.precalculate(&box_, &scoring, 0.5).expect("maps");
         (receptor, maps, scoring)
     }
 
@@ -659,6 +752,169 @@ mod tests {
             },
         )
         .expect("the search returns poses on this fixture")
+    }
+
+    #[test]
+    fn a_pose_is_wholly_outside_only_when_every_atom_was_counted_outside() {
+        // The predicate that `poses_outside_box_count` is built from, at its own
+        // edges. It is a comparison of two counts, so the edges are 0, one short
+        // of the atom count, and exactly the atom count -- and the boundary has
+        // to be on the correct side, which is the only thing a `>=` can get
+        // wrong here.
+        let points = [[0.0, 0.0, 0.0], [1.5, 0.0, 0.0], [2.9, 0.0, 0.0]];
+        for (count, want) in [(0usize, false), (1, false), (2, false), (3, true)] {
+            let pose = Pose {
+                atoms_outside_box: count,
+                ..pose_at(&points, -1.0)
+            };
+            assert_eq!(
+                pose.every_atom_outside_box(),
+                want,
+                "a {}-atom pose with {count} atom(s) counted outside is {}wholly \
+                 outside. The count has to reach the atom count and no further short",
+                points.len(),
+                if want { "" } else { "not " }
+            );
+        }
+        // The degenerate shape, and the reason this is not a bare `>=`. A pose
+        // with no coordinates has a count of 0 that is trivially >= 0, so the
+        // comparison alone would report it as wholly outside; "0 of 0 atoms are
+        // outside the box" is not a claim that anything is, and the claim a
+        // caller makes with this predicate is about a pose being in the box.
+        let empty = Pose {
+            atoms_outside_box: 0,
+            ..pose_at(&[], 0.0)
+        };
+        // `assert!`, not `assert_eq!(.., false, ..)`: the workspace denies
+        // warnings and clippy's `bool_assert_comparison` is one of them. The
+        // `assert_eq!` it replaces would have printed `left: true, right: false`
+        // on failure, so the direction the predicate answered is named in the
+        // message instead of being lost with the macro.
+        assert!(
+            !empty.every_atom_outside_box(),
+            "a pose with no coordinates must not be reported as wholly outside, \
+             but the predicate answered true; 0 >= 0 is true and a pose nobody \
+             placed is not a pose in the box"
+        );
+        // And one that claims more outside atoms than it has coordinates is
+        // still "wholly outside" -- the claim is about the atoms, and a count
+        // larger than the coordinate list means every one of them was outside.
+        let over = Pose {
+            atoms_outside_box: 99,
+            ..pose_at(&points, -1.0)
+        };
+        assert!(over.every_atom_outside_box());
+    }
+
+    #[test]
+    fn a_real_search_reports_no_pose_outside_the_box_and_says_so() {
+        // The "goes green on a correct input" half, and the reason this field is
+        // worth carrying at all: a real run on a real box must report zero, and
+        // the zero has to come from the poses rather than from a default.
+        //
+        // This is the direction that is *not* vacuous. The other half -- a run
+        // whose poses are all outside -- is not reachable from `dock()` today,
+        // because the out-of-box penalty is 1000 kcal/mol per angstrom of
+        // overhang and the search therefore walks every pose back in. That is
+        // the mechanism doing its job, and it is also why the count is reported
+        // rather than refused: the engine does not produce the state, it just
+        // cannot *say* whether it did, and a field nobody reads is not a
+        // safeguard against a future where it does.
+        let result = docked_at(42);
+        assert!(!result.poses.is_empty(), "the fixture must dock");
+        let reported = result.poses_outside_box_count;
+        let recount = result
+            .poses
+            .iter()
+            .filter(|p| p.every_atom_outside_box())
+            .count();
+        assert_eq!(
+            reported, recount,
+            "the field is a count of the reported poses and has to be re-derivable \
+             from them, or a consumer reading the field and a consumer walking \
+             `poses` are told different things"
+        );
+        assert_eq!(
+            reported,
+            0,
+            "{} of {} reported poses sit wholly outside the box. The out-of-box \
+             penalty should have walked every one of them in; if this fails, the \
+             count is no longer a number a reader can treat as 'nothing to see'",
+            reported,
+            result.poses.len()
+        );
+        // Per-pose, so a caller can attribute rather than only be warned: the
+        // count agrees with the coordinates of each pose independently.
+        for (i, pose) in result.poses.iter().enumerate() {
+            assert!(
+                pose.atoms_outside_box <= pose.coords.len(),
+                "pose {i} claims {} outside atoms and has {} coordinates",
+                pose.atoms_outside_box,
+                pose.coords.len()
+            );
+        }
+    }
+
+    #[test]
+    fn the_unrecognised_atom_count_reaches_the_result() {
+        // The gap this closes. `Receptor::unknown_atom_types` has always been
+        // readable, and it has always been useless to the caller that matters,
+        // because the receptor is gone the moment maps exist: precalculate,
+        // drop the receptor, hold maps, dock. Nothing on the result said the
+        // search had run against a receptor it could not read, so a run over
+        // four unrecognised atoms returned nine ranked poses and looked exactly
+        // like a clean one.
+        //
+        // Both directions are asserted. The positive one alone would pass on a
+        // constant, and this is the assertion most likely to be quietly broken
+        // later by someone who hardcodes the field to 0.
+        const RECEPTOR: &str = concat!(
+            "ATOM      1  C1  ALA A   1       0.000   0.000   0.000  1.00  0.00     0.000 C\n",
+            "ATOM      2  C2  ALA A   1       3.200   0.000   0.000  1.00  0.00     0.000 C\n",
+            "ATOM      3  C3  ALA A   1       0.000   3.200   0.000  1.00  0.00     0.000 C\n",
+            "ATOM      4  C4  ALA A   1       0.000   0.000   3.200  1.00  0.00     0.000 C\n"
+        );
+        const EXOTIC: &str = concat!(
+            "ATOM      1  C1  ALA A   1       0.000   0.000   0.000  1.00  0.00     0.000 C\n",
+            "ATOM      2  C2  ALA A   1       3.200   0.000   0.000  1.00  0.00     0.000 C\n",
+            "ATOM      3  C3  ALA A   1       0.000   3.200   0.000  1.00  0.00     0.000 C\n",
+            "ATOM      4  X4  ALA A   1       0.000   0.000   3.200  1.00  0.00     0.000 ZZ\n"
+        );
+        let box_ = crate::grid::GridBox::new([-8.0, -8.0, -8.0], [8.0, 8.0, 8.0]).unwrap();
+        let scoring = crate::scoring::VinaScoring::new();
+        let config = DockingConfig {
+            monte_carlo: crate::search::monte_carlo::MonteCarloConfig {
+                exhaustiveness: 2,
+                steps: 10,
+                seed: Some(7),
+                ..Default::default()
+            },
+            num_modes: 2,
+            ..DockingConfig::default()
+        };
+        let run = |text: &str| {
+            let receptor = Receptor::from_pdbqt_str(text).expect("the receptor should parse");
+            let maps = receptor
+                .precalculate(&box_, &scoring, 1.0)
+                .expect("maps should precalculate");
+            let counted = maps.unknown_atom_types();
+            let result = dock(&make_ligand(), &maps, &scoring, &config).expect("should dock");
+            (counted, result)
+        };
+        let (clean_maps, clean) = run(RECEPTOR);
+        assert_eq!(
+            clean_maps, 0,
+            "the clean fixture must report nothing unrecognised, or the positive \
+             assertion below is vacuous"
+        );
+        assert_eq!(clean.unknown_atom_types, 0);
+        let (exotic_maps, exotic) = run(EXOTIC);
+        assert_eq!(exotic_maps, 1, "the maps carry the count");
+        assert_eq!(
+            exotic.unknown_atom_types, 1,
+            "the result has to carry it, because by the time a result exists the \
+             receptor the caller would have to go back and re-read is gone"
+        );
     }
 
     #[test]
@@ -685,7 +941,10 @@ mod tests {
             b.poses.len(),
             "the same seed produced a different number of poses"
         );
-        assert!(!a.poses.is_empty(), "the fixture must actually find something");
+        assert!(
+            !a.poses.is_empty(),
+            "the fixture must actually find something"
+        );
         for (i, (pa, pb)) in a.poses.iter().zip(b.poses.iter()).enumerate() {
             assert_eq!(pa.coords.len(), pb.coords.len(), "pose {i}: atom count");
             for (k, (ca, cb)) in pa.coords.iter().zip(pb.coords.iter()).enumerate() {
@@ -714,7 +973,11 @@ mod tests {
         // perfectly.
         let a = docked_at(42);
         let c = docked_at(43);
-        assert_eq!(a.poses.len(), c.poses.len(), "same fixture, so same pose count");
+        assert_eq!(
+            a.poses.len(),
+            c.poses.len(),
+            "same fixture, so same pose count"
+        );
         let identical = a
             .poses
             .iter()
@@ -758,7 +1021,11 @@ mod tests {
         let first = best.coords[0];
         assert_eq!(
             (first[0].to_bits(), first[1].to_bits(), first[2].to_bits()),
-            (0xc00c_0002_4461_1f27u64, 0xbff8_ebc1_ef2d_af7au64, 0x3ffb_43f0_d2ba_28eeu64),
+            (
+                0xc00c_0002_4461_1f27u64,
+                0xbff8_ebc1_ef2d_af7au64,
+                0x3ffb_43f0_d2ba_28eeu64
+            ),
             "the best pose at seed 42 has its first atom at {first:?}, not at the \
              position this test was written against. Measured energy is {:?}.\n\n\
              What this usually means, in the order worth checking: a `rand` bump \
@@ -801,6 +1068,12 @@ mod tests {
             coords: base.iter().map(|c| [c[0] + shift, c[1], c[2]]).collect(),
             rmsd: None,
             gradient: Vec::new(),
+            // A hand-built fixture was never evaluated against a grid, so it
+            // makes no claim about the box. Zero is the honest value: it claims
+            // that no atom was found outside, which for a fixture is the same
+            // as saying the field is not populated, and it is why
+            // `every_atom_outside_box` is false for it.
+            atoms_outside_box: 0,
         }
     }
 
@@ -963,6 +1236,7 @@ mod tests {
             rmsd: None,
             // A hand-built fixture measures nothing, and says so.
             gradient: Vec::new(),
+            atoms_outside_box: 0,
         }
     }
 

@@ -1105,7 +1105,23 @@ if seen and close_mechanism == "none":
         else f"FAIL — {outcome or 'odgui exited on its own before a window was found'}",
     )
     _summarise()
-    raise SystemExit(EXIT_OK if partial_ok else EXIT_FAILED)
+    # EXIT_INCOMPLETE, not EXIT_OK. This branch used to exit 0, which meant the
+    # step named "Real launch, then close" reported success for a run in which
+    # the close was never attempted: the two lines above it say exactly that, and
+    # then the exit code said the opposite. The three branches above this one
+    # already treat "the machine cannot tell me" as EXIT_INCOMPLETE rather than
+    # folding it into a verdict -- that is what the comment at the `env_blocked`
+    # branch is about -- and this is the same shape of gap arriving by a
+    # different route. A step is allowed to say it did not finish; it is not
+    # allowed to say it passed.
+    #
+    # The step has no `continue-on-error`, so a runner whose window comes up but
+    # which has no xdotool/wmctrl will now fail here. That is the honest
+    # outcome: the earlier apt step already warns when those are unavailable, and
+    # `x11_window_parse_check.py` is a gate of its own for the close logic. If
+    # the maintainers would rather this not block, the fix belongs in the
+    # workflow step, not in the verdict.
+    raise SystemExit(EXIT_INCOMPLETE if partial_ok else EXIT_FAILED)
 
 window_ok = seen and rc == 0
 print(f"\nclosed via: {close_mechanism}")

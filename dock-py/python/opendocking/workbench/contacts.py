@@ -29,6 +29,77 @@ drawing program makes, and it is reported as a filter rather than as chemistry.
 The angles and distances are returned on every contact so a caller can tighten
 the cut-offs instead of trusting them.
 
+# The residue table and the pair table
+
+Two tables, one list. `residue_summary` answers "which residues is this pose
+against", which is the question a pose table's contact column asks. `pair_rows`
+answers "which two atoms, and how far", which is the question a chemist asks
+when a residue name is not enough -- a glutamine can hydrogen-bond through its
+backbone amide or through its side-chain nitrogen, and those are two different
+interactions with two different consequences.
+
+They are built from the *same* `find_contacts` call, and `Pair.contact_index` is
+the position in that list, so a row in the pair table and a dashed line in the
+viewport are one object seen twice. Two calls would be two searches, and the
+second could disagree with the first about what is touching; a table whose rows
+and whose lines name different atoms is worse than no table.
+
+# The term column, and why most of it is empty
+
+`TERM_BY_KIND` maps only the two kinds whose *stated subject* is the test that
+found the pair, and `PAIR_TERM_NOTE` is the sentence the panel prints under the
+table. The reasoning is on the table itself. The short version: the engine sums
+`g1`, `g2` and `rep` over every atom pair in a pose and reports one number each,
+so there is no per-pair share to print, and a cell with a number in it would be a
+number nobody computed.
+
+# A limit, recorded because it was measured rather than assumed
+
+**The residue table does not keep its selected row across a pose change, and the
+first version of this paragraph said it did.** It was wrong, and it was wrong in
+a way worth keeping: the reasoning underneath it was sound and the premise was
+not. `QTableWidget.setRowCount` really does only drop a selection that falls
+outside the new row count -- measured on Qt 6.11, row 0 selected: 7->9 rows
+keeps it, 9->4 keeps it, 9->0 drops it. But `_refresh_contacts` does not go from
+one count to another. It goes to **zero** first, because it empties both tables
+and refills them from one `find_contacts` call, and the empty pass is where the
+residue selection dies. Row 0 of the new pose is not left selected; nothing is.
+
+So the hazard this file was asked to record is not a live defect, and saying
+otherwise would have been a comment of the kind this module exists to argue
+against. What is real is narrower and is stated as a constraint on the next
+change rather than as a reassurance about this one:
+
+* **The selection is dropped by the zeroing, not by a rule.** Nothing in the
+  residue path clears it, clears the current cell, or otherwise reasons about
+  it. A refactor that stopped zeroing the residue table -- refilling in place,
+  say, to keep a scroll position -- would silently start retaining rows, and it
+  would look like it worked.
+* **That is the day a retained row becomes a lie.** Today a selected residue
+  only flies the camera and claims nothing about the picture, so there is no
+  second thing for a stale row to contradict. The moment the residue selection
+  grows a highlighting behaviour the way the pair selection did -- a line, a
+  marker, a dimming of everything else -- a retained row stops being a table
+  detail and becomes a claim about the picture, and the claim is about the
+  previous pose. The pair table is already safe: `_refresh_contacts` clears it
+  explicitly, and one call above the residue table, so the fix for the residue
+  table is to do what that one does.
+* **The order is load-bearing.** `setRowCount(0)` before the refill is what
+  makes both tables end up consistent with the pose on screen. Restoring the
+  selection afterwards would undo the point, and the check below is what would
+  say so.
+
+It is pinned rather than left to this paragraph: section 14 of
+`scripts/workbench_interaction_check.py` measures the selection across a pose
+change on every run, reports which way it went, and asserts the half that is
+load-bearing -- **the residue path touches no highlight state at all**, so there
+is nothing on the screen for a row to be wrong about. If a residue highlight is
+ever added, that assertion goes red and names this limit rather than leaving the
+next reader to find a stale row in a picture that now claims something. The
+selection half is reported and not asserted, because it is Qt's and the
+zeroing's business rather than this module's promise: a Qt that preserved it
+would be a correct implementation of the same code.
+
 # Why it needs the polar hydrogens
 
 Both criteria are stated on the hydrogen, so a receptor prepared without polar
@@ -46,11 +117,15 @@ import numpy as np
 
 __all__ = [
     "Contact",
+    "Pair",
     "find_contacts",
+    "pair_rows",
     "residue_summary",
     "HBOND_MAX",
     "HBOND_MIN_ANGLE",
     "CLOSE_MAX",
+    "TERM_BY_KIND",
+    "PAIR_TERM_NOTE",
 ]
 
 #: H···acceptor distance, Å.
@@ -114,6 +189,122 @@ class Contact:
             f" {self.distance:5.2f} A"
             + (f"  {self.angle:5.1f} deg" if self.kind == "hbond" else "")
         )
+
+
+#: The engine's term keys, and which contact kinds can be attributed to one
+#: without a guess.
+#:
+#: `energy_terms.TERM_ROWS` is the authority for what each term *measures*, and
+#: these two entries are the cases where the term's stated subject is the same
+#: test that produced the row: `hb` is "donor-acceptor attraction", and a
+#: `hbond` row exists only because the pair passed a donor-H-acceptor distance
+#: and angle; `hyd` is "attraction between two non-polar atoms", and a
+#: `hydrophobic` row exists only because both atoms were apolar. For those two
+#: the mapping is not an inference, it is a restatement.
+#:
+#: The other two kinds are the opposite case and are deliberately absent. The
+#: remaining terms -- `g1` for a contact of about the right size, `g2` for one
+#: that is merely not clashing, `rep` for the wall -- are summed over every atom
+#: pair in the pose, and `score_conformation_terms` returns the sum. Nothing
+#: Python can see carries a per-pair share of them: the engine reports no
+#: per-pair surface distance either (see `NEVER_SUPPLIED` in
+#: `workbench/pose_trust.py`, which is the same fact about the same module).
+#: Which of the three a given close contact belongs to depends on the engine's
+#: own distance ramps, which are not exposed, so the row names no term at all
+#: rather than the most likely one.
+TERM_BY_KIND = {"hbond": "hb", "hydrophobic": "hyd"}
+
+#: What the panel prints under the pair table, so the empty cells are a fact
+#: rather than a gap.
+PAIR_TERM_NOTE = (
+    "`hb` and `hyd` are the engine's own term keys for the two kinds whose "
+    "subject is the test that found the row. The other contacts belong to `g1`, "
+    "`g2` and `rep`, which the engine sums over every atom pair in the pose and "
+    "reports as one number each -- it exposes no per-pair share, so this column "
+    "names a term only where the mapping is the test itself and leaves the cell "
+    "empty rather than dividing a pose's total by its pairs."
+)
+
+
+@dataclass(frozen=True)
+class Pair:
+    """One interaction, with both sides named and its term attributed.
+
+    `contact_index` is the row's position in the list `find_contacts` returned,
+    and it is what ties this row to one dashed line in the viewport: the line is
+    drawn from `contacts[contact_index]`, so selecting a row cannot highlight a
+    pair the picture is not showing.
+
+    The two sides are always **pose** (`self_*`) and **receptor** (`partner_*`),
+    including for a hydrogen bond -- `find_contacts` guarantees the pose is the
+    `self` side, and for a bond one of the two is the hydrogen the 2.6 A
+    criterion is stated on. `pose_atom` and `receptor_atom` print the donor's
+    heavy atom in place of that hydrogen, because `GLY 12 N` is the atom a
+    reader looks up and `GLY 12 H` is not; `measured_to_hydrogen` says so, and
+    `tooltip` says it with the angle.
+    """
+
+    contact_index: int
+    kind: str
+    self_residue: str
+    self_name: str
+    self_element: str
+    partner_residue: str
+    partner_name: str
+    partner_element: str
+    donor_name: str
+    distance: float
+    angle: float
+    term: str
+
+    @property
+    def measured_to_hydrogen(self) -> bool:
+        """Whether ``distance`` is the H···acceptor distance of a bond."""
+        return self.self_element == "H" or self.partner_element == "H"
+
+    @property
+    def pose_atom(self) -> str:
+        return self._atom(self.self_residue, self.self_name, self.self_element)
+
+    @property
+    def receptor_atom(self) -> str:
+        return self._atom(self.partner_residue, self.partner_name,
+                          self.partner_element)
+
+    def _atom(self, residue: str, name: str, element: str) -> str:
+        if element == "H" and self.donor_name:
+            name = self.donor_name
+        name = name or element
+        return f"{residue} {name}" if residue else name
+
+    @property
+    def distance_text(self) -> str:
+        text = f"{self.distance:.2f} A"
+        if self.kind == "hbond":
+            text += f"  {self.angle:.0f} deg"
+        return text
+
+    def tooltip(self) -> str:
+        """Everything the row asserts, including what it does not."""
+        parts = [f"{self.kind}: {self.pose_atom} -> {self.receptor_atom}"]
+        if self.kind == "hbond":
+            parts.append(
+                f"the distance is the H···acceptor one, at "
+                f"{self.angle:.1f} deg donor-H-acceptor"
+            )
+            if self.donor_name:
+                parts.append(f"named through its donor {self.donor_name}")
+        parts.append(
+            f"this is contact {self.contact_index + 1} of the list the dashed "
+            f"lines are drawn from"
+        )
+        parts.append(
+            f"term: {self.term}" if self.term
+            else "no engine term is named for this row: the contact terms are "
+                 "summed over the whole pose and the engine reports no per-pair "
+                 "share"
+        )
+        return ". ".join(parts)
 
 
 @dataclass
@@ -402,3 +593,45 @@ def residue_summary(contacts: list[Contact]) -> list[tuple[str, int, int, float]
         out.append((residue, hb, len(group), min(c.distance for c in group)))
     out.sort(key=lambda r: (-r[1], -r[2], r[3]))
     return out
+
+
+def pair_rows(contacts: list[Contact],
+              self_residues: "list[str] | tuple[str, ...] | None" = None
+              ) -> tuple[Pair, ...]:
+    """One `Pair` per interaction, in the order `find_contacts` returned them.
+
+    ``self_residues`` is the **pose's** per-atom residue labels, indexed by the
+    same integer `Contact.self_index` is. It is passed in rather than read from
+    the molecule because `find_contacts` has already resolved them and thrown
+    that away: asking the molecule again means a second pass over it on every
+    refresh, and a table whose residues came from a different pass than its
+    distances is a table that can disagree with itself.
+
+    The rows are **not** re-sorted. A pair table is a list to be read against
+    the picture, and the order the dashes are drawn in is the order the contacts
+    came back in; a table that reorders them would make row 7 mean something
+    different from the seventh line. `Contact.kind` is already the strongest
+    class first, because `find_contacts` sorts by it.
+    """
+    labels = list(self_residues or ())
+    out: list[Pair] = []
+    for i, c in enumerate(contacts):
+        residue = (labels[c.self_index]
+                   if 0 <= c.self_index < len(labels) else "")
+        out.append(
+            Pair(
+                contact_index=i,
+                kind=c.kind,
+                self_residue=residue,
+                self_name=c.self_name,
+                self_element=c.self_element,
+                partner_residue=c.partner_residue,
+                partner_name=c.partner_name,
+                partner_element=c.partner_element,
+                donor_name=c.donor_name,
+                distance=float(c.distance),
+                angle=float(c.angle),
+                term=TERM_BY_KIND.get(c.kind, ""),
+            )
+        )
+    return tuple(out)

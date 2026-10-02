@@ -73,6 +73,54 @@ _GUI_REQUIREMENTS = "PyQt6>=6.4 moderngl>=5.8 numpy-stl>=2.0"
 #: is sized as a margin, not as an observation.
 _GL_PUMP_SECONDS = 0.5
 
+#: **The bound on waiting for the product's own context, in seconds. A bound and
+#: not a threshold.**
+#:
+#: What it is waiting for: `Viewport.initializeGL` building its moderngl
+#: context, which is the point at which the app can draw. Before the fix below
+#: this number was inline in the child and the *verdict* was a reading of it --
+#: expire the loop and the child reported "the product's own Viewport did not
+#: build a moderngl context, so the viewer window would open with nothing
+#: rendered in it", which is a claim about the product derived from a clock. On a
+#: loaded machine that is a **falsehood about the viewer**, and it is the exact
+#: species this project keeps making: a value that only exists when the thing
+#: was measured, read as a conclusion about a thing that was not.
+#:
+#: What a reader should conclude when it expires: **only that the viewer did not
+#: come up within this many seconds.** Not that it cannot render. The child now
+#: keeps the two apart: it decides the verdict from `Viewport.isValid()`, which
+#: is Qt's own answer and needs no time at all, and reports a lapsed bound as
+#: its own state (`ready: "bound-expired"`) with its own sentence. Re-run on a
+#: quieter machine, or with a larger bound, to find out which of the two it was.
+#:
+#: The number itself is a margin, not a measurement -- with one exception, now:
+#: the healthy case **has** been observed, on a machine whose `odgui --check`
+#: answers `ok`. The stage-2 child reported `waited = 1.45 s` end to end, of
+#: which `show_seconds = 0.95 s`, against this 15 s bound -- about ten times the
+#: observed cost, and the broken case costs 4.15-4.6 s inside `show()` before
+#: this loop is even entered. So the bound is not tight against anything measured,
+#: and a machine that needs ten times the healthy cost is now reported as
+#: `bound-expired` rather than as a broken viewer.
+_GL_READY_BOUND_SECONDS = 15.0
+
+#: The pump *after* readiness, so `paintGL` has actually run at least once
+#: before the child reports. "The viewer would open with content in it" is a
+#: claim about a painted frame, not about a context that merely exists.
+_GL_SETTLE_SECONDS = 0.5
+
+#: What the parent's own kill buys on top of the child's bound: the child's
+#: interpreter start and its imports.
+#:
+#: **This one is a different kind of number from the bound above.** It exists so
+#: the parent cannot hang behind a child that never returns, and it decides
+#: nothing: when it fires, nothing at all is known about the machine, and the
+#: payload says so with `child_killed`. It is also the term the old arithmetic
+#: was missing -- `max(timeout, 1.0) + 15.0` left no room for the child's own
+#: settle pump or its report, so a context that built at 14.9 s could be killed
+#: *while printing its answer* and the parent would report "the probe did not
+#: answer", which is a different fact and a more alarming one.
+_GL_CHILD_MARGIN_SECONDS = 1.0
+
 _BANNER = "Open Docking Workbench"
 
 #: ``--check`` exit codes. Written down because a diagnostic that always exits
@@ -109,6 +157,34 @@ _EXIT_OK = 0
 _EXIT_NO_GUI_STACK = 3
 _EXIT_NO_CONTEXT = 4
 _EXIT_NO_WIDGET = 5
+
+#: **There is deliberately no sixth code, and the reason is a file this one does
+#: not own.** A lapsed probe bound really is a different event from a machine
+#: that cannot supply a context -- see `_GL_READY_BOUND_SECONDS` -- and the
+#: honest spelling for it is its own exit code, which is what `qt_gl_probe.py`
+#: does with four of them. Adding one here would break
+#: `.github/workflows/ci.yml`, which asserts this exact table:
+#:
+#:     want = {'ok': 0, 'no-gui-stack': 3, 'no-context': 4, 'no-widget': 5}
+#:
+#: A sixth verdict name is a `KeyError` in that step, on the one job that runs
+#: with a real GL route, so the cost of the new code would be a red CI step
+#: rather than a clearer diagnostic. So the distinction is carried where it can
+#: be carried without a second owner's edit: `widget.ready` in the `--json`
+#: payload is one of the four states below, `widget.bound_expired` says which,
+#: and the sentence printed names the bound and says plainly that a lapsed bound
+#: is not a finding. A caller that wants a fifth outcome reads the payload.
+#: **Whoever next edits that table in `ci.yml` should add a `slow` verdict and a
+#: sixth code here, and this paragraph becomes history.**
+#
+#: The four states, as constants because they are a contract a caller branches
+#: on and a bare string compared in two places is a contract nobody wrote down.
+READY_BUILT = "built"
+READY_NOT_REALISED = "not-realised"
+READY_BOUND_EXPIRED = "bound-expired"
+READY_CHILD_KILLED = "child-killed"
+READY_STATES = (READY_BUILT, READY_NOT_REALISED, READY_BOUND_EXPIRED,
+                READY_CHILD_KILLED)
 
 #: ``--check`` verdicts, the ``--json`` spelling of the codes above. One string
 #: per outcome so a script branches on a name rather than on a number that a
@@ -338,34 +414,83 @@ def _describe_no_context(found: dict) -> str:
     # there would be quoting a default in the shape of a measurement: it reads
     # as "show() returned instantly" when in fact the process never came back.
     # Say which of the two happened instead.
+    #
+    # **Three shapes, not two, and the third is the one this function used to get
+    # wrong.** It is only ever called with the `raw` member, and the raw stage
+    # runs *in this process*: there is no child to lose and no `show()` in it. So
+    # the "ending inside show() -- the probe process did not come back" sentence
+    # below used to be the only one a reader could see, describing an event that
+    # cannot happen on this path. It is kept for a payload that really does carry
+    # `show_seconds`, and the plain in-process case now says what happened.
     waited = found.get("waited")
-    if "show_seconds" in found:
+    if found.get("bound_expired"):
+        # A lapsed bound is not a finding, so this must not open by calling it a
+        # driver problem: the lead, the timing line and the remedy below are all
+        # chosen together, because a message whose first sentence says "your
+        # driver is broken" and whose last says "this might just be a slow
+        # machine" is worse than either.
+        lead = (
+            "error: PyQt6 and moderngl are installed, and this check stopped\n"
+            "       waiting for an OpenGL context instead of waiting forever. That\n"
+            "       is a bound this probe gave itself, so it is not on its own a\n"
+            "       finding about this machine: the claim is that Qt did not answer\n"
+            "       within the bound, which is not the claim that it cannot.\n"
+        )
+        timing = (
+            f"the bound lapsed at {found.get('bound_seconds', 0.0):g} s, and the"
+            f" stage below was still inside Qt when it did"
+        )
+    elif "show_seconds" in found:
+        lead = (
+            "error: PyQt6 and moderngl are installed, but Qt could not create the\n"
+            "       OpenGL context the viewport needs, so the window would open\n"
+            "       empty. This is a graphics-driver problem, not a missing package.\n"
+        )
         timing = (
             f"{waited:.1f} s, of which {found['show_seconds']:.1f} s "
             f"was Qt inside show()"
         )
     else:
+        lead = (
+            "error: PyQt6 and moderngl are installed, but Qt could not create the\n"
+            "       OpenGL context the viewport needs, so the window would open\n"
+            "       empty. This is a graphics-driver problem, not a missing package.\n"
+        )
         timing = (
-            f"{waited:.1f} s, ending inside show() -- the probe process did "
-            f"not come back, which is what a driver with no context does"
+            f"{waited:.1f} s, asked in this process on an offscreen surface, and"
+            f" it came back: there is no child process in this stage to lose, so"
+            f" the wait ended because Qt answered"
+        )
+    # The remedy, chosen with the lead. Telling someone whose bound lapsed to go
+    # and buy a GPU is the confidently-wrong advice this file already rewrote
+    # once for code 5, and it would be the same mistake wearing a different
+    # sentence.
+    if found.get("bound_expired"):
+        remedy = (
+            "       Re-run the check on a quieter machine, or with a larger\n"
+            "       _RAW_CONTEXT_SECONDS, to find out which of the two it was: a\n"
+            "       machine that cannot supply a context at all fails this stage\n"
+            "       in about a second, not at the bound.\n"
+        )
+    else:
+        remedy = (
+            "       Worth trying, in order:\n"
+            "         1. a machine with a GPU and a current graphics driver -- a\n"
+            "            remote desktop or a VM without 3-D acceleration cannot\n"
+            "            give Qt a context no matter what is installed;\n"
+            "         2. `odgui` on the machine with the screen, if this one is a\n"
+            "            container or a headless server.\n"
         )
     return (
-        "error: PyQt6 and moderngl are installed, but Qt could not create the\n"
-        "       OpenGL context the viewport needs, so the window would open\n"
-        "       empty. This is a graphics-driver problem, not a missing package.\n"
-        f"         Qt platform   {found.get('platform', '?')}\n"
-        f"         screens       {found.get('screens', '?')}\n"
-        f"         samples asked {found.get('samples', '?')} (granted: unknown -- Qt "
-        "only answers that once a context exists)\n"
-        f"         waited        {timing}\n"
-        "       Worth trying, in order:\n"
-        "         1. a machine with a GPU and a current graphics driver -- a\n"
-        "            remote desktop or a VM without 3-D acceleration cannot\n"
-        "            give Qt a context no matter what is installed;\n"
-        "         2. `odgui` on the machine with the screen, if this one is a\n"
-        "            container or a headless server.\n"
-        "       The docking engine and `odcli` do not need OpenGL and are\n"
-        "       unaffected."
+        lead
+        + f"         Qt platform   {found.get('platform', '?')}\n"
+        + f"         screens       {found.get('screens', '?')}\n"
+        + f"         samples asked {found.get('samples', '?')} (granted: unknown -- Qt "
+        + "only answers that once a context exists)\n"
+        + f"         waited        {timing}\n"
+        + remedy
+        + "       The docking engine and `odcli` do not need OpenGL and are\n"
+        + "       unaffected."
     )
 
 
@@ -475,6 +600,35 @@ def _preflight() -> tuple[object | None, str | None]:
 #: for a success and 1.2 s for a clean failure on the machine that prompted the
 #: two-stage split. The bound exists so a wedged driver cannot hang the command
 #: here, where the child process cannot be used to absorb it.
+#:
+#: **It used to be a sentence, and this paragraph is why that was a defect worth
+#: naming.** Nothing read it. `_probe_raw_context` had no deadline, no timer and
+#: no timeout: it recorded `found["waited"]` and compared it to nothing. Setting
+#: this to 0.001, or deleting the line, changed no behaviour at all while the
+#: four lines above still claimed a bound -- and `check_counted_constants.py`
+#: flagged it for exactly that, as `never read`, which is the same tell this
+#: constant had.
+#:
+#: It is now the deadline `_probe_raw_context` joins its worker thread against,
+#: and a thread is the only shape that can be: every call this stage makes
+#: (`QOffscreenSurface.create()`, `QOpenGLContext.create()`, `makeCurrent()`) is
+#: a blocking driver call **in this process**, so a wall-clock test written
+#: between any two of them is a line that is never reached on the machine it was
+#: written for. What the bound buys is a bounded wait, which is the same bargain
+#: `_probe_opengl` makes one layer up with the parent's kill.
+#:
+#: **What it cannot buy**, and the reason the expiry wording is careful: a driver
+#: that wedges the whole process rather than one call into it -- spinning while
+#: holding the GIL, or ending the process with `0xC0000409` -- is not bounded by a
+#: thread join. PyQt6 releases the GIL around the Qt calls this stage makes, so
+#: the wait is bounded on the failures a driver produces by blocking, and the
+#: claim is deliberately the narrow one: *Qt did not answer within this many
+#: seconds*, never *Qt cannot*.
+#:
+#: The expiry is **data the caller already handles**, not a sixth code: a
+#: `problem` string plus `bound_expired` in the `raw` member, which is the same
+#: key the widget stage sets and the path `_report_check` already takes for "no
+#: context", so it is exit 4 and an honest sentence.
 _RAW_CONTEXT_SECONDS = 10.0
 
 
@@ -496,9 +650,24 @@ def _probe_raw_context() -> tuple[dict, str | None]:
     No child process, and that is the point rather than a convenience. Measured
     here: it never dies, so there is nothing to survive.
 
+    **The bound, and the thread it needs.** The Qt work runs on one daemon
+    thread and this function joins it against `_RAW_CONTEXT_SECONDS`, so a
+    driver that blocks inside `create()` or `makeCurrent()` costs this stage a
+    lapsed bound rather than the command. The thread exists only to make the
+    bound reachable: the calls it makes cannot be interrupted from this one, so
+    a `time.perf_counter()` test between them would never execute. When the
+    bound lapses the worker is still inside the driver and still owns the Qt
+    objects, so this function does not touch them, and `found` is whatever the
+    worker had established by then -- the same "keep the facts that survived"
+    rule the widget stage applies to a child that died.
+
     Returns ``(found, problem)``; ``problem is None`` means a context was created
-    *and* made current *and* its function table resolved.
+    *and* made current *and* its function table resolved. A lapsed bound is a
+    `problem` too, and `found["bound_expired"]` says which one it was -- the
+    existing "no context" outcome with the reason attached, not a new outcome
+    for `_report_check` to learn.
     """
+    import threading
     import time
 
     from PyQt6 import QtGui, QtWidgets
@@ -506,80 +675,132 @@ def _probe_raw_context() -> tuple[dict, str | None]:
     from opendocking.workbench.app import MSAA_SAMPLES
 
     started = time.perf_counter()
-    found: dict = {"stage": "raw"}
-    problem: str | None = None
-    surface = None
-    context = None
-    try:
-        app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(
-            sys.argv[:1]
-        )
-        found["platform"] = QtGui.QGuiApplication.platformName()
+    found: dict = {"stage": "raw", "bound_seconds": _RAW_CONTEXT_SECONDS}
+    failed: list[str] = []
+
+    def ask_qt() -> None:
+        """Everything this stage asks of Qt, recording what it learns in `found`.
+
+        A nested function rather than a module-level one so the work, the fields
+        it fills and the teardown that has to follow it stay in one place -- and
+        because that teardown is only correct on the thread that created the
+        context, which is the thread this runs on. On a lapsed bound this thread
+        is still inside the driver and this body has not returned, which is why
+        the caller reads `found` rather than a return value.
+        """
+        app = None
+        surface = None
+        context = None
         try:
-            found["screens"] = len(QtGui.QGuiApplication.screens())
-        except Exception:
-            found["screens"] = "?"
-
-        fmt = QtGui.QSurfaceFormat()
-        fmt.setSamples(MSAA_SAMPLES)
-        fmt.setDepthBufferSize(24)
-        found["samples"] = fmt.samples()
-
-        surface = QtGui.QOffscreenSurface()
-        surface.setFormat(fmt)
-        surface.create()
-        found["surface_valid"] = bool(surface.isValid())
-
-        context = QtGui.QOpenGLContext()
-        created = bool(context.create()) if found["surface_valid"] else False
-        found["context_created"] = created
-        current = bool(context.makeCurrent(surface)) if created else False
-        found["context_current"] = current
-
-        if current:
-            fmt_now = context.format()
-            found["gl"] = "%d.%d" % (fmt_now.majorVersion(), fmt_now.minorVersion())
-            # The function table, tested for real. This PyQt6 does not wrap
-            # QOpenGLFunctions, but it does wrap the per-profile subclasses, and
-            # their initializeOpenGLFunctions() answers the same question against
-            # the current context. Recorded because a context whose function
-            # table will not resolve is not a usable viewport, and reporting
-            # only the context would repeat the mistake this stage exists to fix.
+            app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(
+                sys.argv[:1]
+            )
+            found["platform"] = QtGui.QGuiApplication.platformName()
             try:
-                from PyQt6.QtOpenGL import QOpenGLFunctions_2_0
-
-                found["functions"] = bool(
-                    QOpenGLFunctions_2_0().initializeOpenGLFunctions()
-                )
-            except Exception as exc:
-                found["functions"] = False
-                found["functions_problem"] = f"{type(exc).__name__}: {exc}"
-        else:
-            found["gl"] = None
-            found["functions"] = False
-    except Exception as exc:  # noqa: BLE001 - any failure is "no context"
-        found.setdefault("gl", None)
-        found.setdefault("functions", False)
-        problem = f"the raw context probe failed ({type(exc).__name__}: {exc})"
-    finally:
-        # Tearing down in this order matters: a context cannot be destroyed
-        # while it is current, and an offscreen surface outlives its context.
-        if context is not None:
-            try:
-                context.doneCurrent()
+                found["screens"] = len(QtGui.QGuiApplication.screens())
             except Exception:
-                pass
-        for obj in (context, surface):
-            if obj is not None:
+                found["screens"] = "?"
+
+            fmt = QtGui.QSurfaceFormat()
+            fmt.setSamples(MSAA_SAMPLES)
+            fmt.setDepthBufferSize(24)
+            found["samples"] = fmt.samples()
+
+            surface = QtGui.QOffscreenSurface()
+            surface.setFormat(fmt)
+            surface.create()
+            found["surface_valid"] = bool(surface.isValid())
+
+            context = QtGui.QOpenGLContext()
+            created = bool(context.create()) if found["surface_valid"] else False
+            found["context_created"] = created
+            current = bool(context.makeCurrent(surface)) if created else False
+            found["context_current"] = current
+
+            if current:
+                fmt_now = context.format()
+                found["gl"] = "%d.%d" % (fmt_now.majorVersion(), fmt_now.minorVersion())
+                # The function table, tested for real. This PyQt6 does not wrap
+                # QOpenGLFunctions, but it does wrap the per-profile subclasses, and
+                # their initializeOpenGLFunctions() answers the same question against
+                # the current context. Recorded because a context whose function
+                # table will not resolve is not a usable viewport, and reporting
+                # only the context would repeat the mistake this stage exists to fix.
                 try:
-                    obj.destroy()
+                    from PyQt6.QtOpenGL import QOpenGLFunctions_2_0
+
+                    found["functions"] = bool(
+                        QOpenGLFunctions_2_0().initializeOpenGLFunctions()
+                    )
+                except Exception as exc:
+                    found["functions"] = False
+                    found["functions_problem"] = f"{type(exc).__name__}: {exc}"
+            else:
+                found["gl"] = None
+                found["functions"] = False
+        except Exception as exc:  # noqa: BLE001 - any failure is "no context"
+            found.setdefault("gl", None)
+            found.setdefault("functions", False)
+            failed.append(
+                f"the raw context probe failed ({type(exc).__name__}: {exc})"
+            )
+        finally:
+            # Tearing down in this order matters: a context cannot be destroyed
+            # while it is current, and an offscreen surface outlives its context.
+            # `app` is bound before the `try` so a driver that raised while Qt was
+            # still building the application reaches this line instead of turning
+            # a reportable failure into a `NameError` out of the `finally`.
+            if context is not None:
+                try:
+                    context.doneCurrent()
                 except Exception:
                     pass
-        del app
+            for obj in (context, surface):
+                if obj is not None:
+                    try:
+                        obj.destroy()
+                    except Exception:
+                        pass
+            del app
+
+    worker = threading.Thread(target=ask_qt, name="odgui-raw-context", daemon=True)
+    worker.start()
+    # **The bound, applied.** `daemon=True` because the worker cannot be asked to
+    # stop -- it is inside a driver call -- and a non-daemon thread would convert
+    # the bounded wait into an unbounded interpreter shutdown, which is the same
+    # hang this constant exists to prevent, one step later.
+    worker.join(_RAW_CONTEXT_SECONDS)
+    expired = worker.is_alive()
+
+    found["waited"] = time.perf_counter() - started
+    if expired:
+        # A lapsed bound, and **not a finding**, in the words the widget stage
+        # already uses for its own: this probe stopped waiting. The claim is that
+        # Qt did not answer within `_RAW_CONTEXT_SECONDS` on this machine, and
+        # not that it could not have. Shaped as a `problem` because that is the
+        # field `_report_check` already branches on, so the expiry is exit 4 with
+        # a reason attached rather than the sixth code this file must not add.
+        found.setdefault("gl", None)
+        found.setdefault("functions", False)
+        found["initialised"] = False
+        found["bound_expired"] = True
+        found["problem"] = (
+            f"the raw context stage had not come back after"
+            f" {_RAW_CONTEXT_SECONDS:g} s, which is the bound this probe gave"
+            f" itself and not a finding: the driver call it waits on -- an"
+            f" offscreen surface, a context, or making one current -- had not"
+            f" returned when the bound lapsed. The only claim here is that Qt"
+            f" did not supply a context on an offscreen surface within"
+            f" {_RAW_CONTEXT_SECONDS:g} s on this machine, which is NOT the"
+            f" claim that it cannot. Re-run the check on a quieter machine, or"
+            f" with a larger bound, to find out which of the two it was"
+        )
+        return found, found["problem"]
 
     found["initialised"] = bool(
         found.get("context_current") and found.get("gl") and found.get("functions")
     )
+    problem = failed[0] if failed else None
     if not found["initialised"] and problem is None:
         problem = (
             "no OpenGL context on an offscreen surface"
@@ -589,7 +810,6 @@ def _probe_raw_context() -> tuple[dict, str | None]:
             f" function table={found.get('functions')})"
         )
     found["problem"] = None if found["initialised"] else problem
-    found["waited"] = time.perf_counter() - started
     return found, (None if found["initialised"] else problem)
 
 
@@ -683,16 +903,21 @@ found["show_seconds"] = time.perf_counter() - started
 # immediately when `_ctx` is None -- so a viewport without `_ctx` is a viewport
 # that opens with nothing drawn in it. Requiring `_ctx` is what makes exit 5 a
 # statement about the viewer rather than about this file.
-deadline = time.perf_counter() + 15.0
+# The bound, from the parent, written in rather than typed here: two copies of
+# a duration is two places for them to disagree about how long a slow machine
+# is allowed to be slow.
+ready_bound = __GL_READY_BOUND_SECONDS__
+deadline = time.perf_counter() + ready_bound
 while viewport._ctx is None and time.perf_counter() < deadline:
     app.processEvents()
     time.sleep(0.005)
+found["bound_seconds"] = ready_bound
 
 # Pump a little past readiness, so `paintGL` has actually run at least once
 # before the child reports. "The viewer would open with content in it" is a
 # claim about a painted frame, not about a context that merely exists.
 if viewport._ctx is not None:
-    settle = time.perf_counter() + 0.5
+    settle = time.perf_counter() + __GL_SETTLE_SECONDS__
     while time.perf_counter() < settle:
         app.processEvents()
         time.sleep(0.005)
@@ -708,15 +933,96 @@ found["moderngl"] = viewport._ctx is not None
 found["widget_valid"] = bool(viewport.isValid())
 found["initialised"] = viewport._ctx is not None
 found["waited"] = time.perf_counter() - started
-found["problem"] = None if viewport._ctx is not None else (
-    "the product's own Viewport did not build a moderngl context, so the "
-    "viewer window would open with nothing rendered in it"
-)
+
+# **Three outcomes, and the verdict is the first two -- not the clock.**
+#
+# `built` is the product's own condition and needs no time to establish.
+# `isValid()` is Qt's own answer to "does this widget have a valid OpenGL
+# context", and it is a fact the moment the widget has been shown: waiting does
+# not make it more true. So the negative finding is read off Qt, and the bound
+# is left with the only job it can honestly do -- bounding the wait.
+#
+# Before this there were two outcomes, and the second was
+# `expired_the_bound -> "the viewer would open with nothing in it"`, which made
+# a quiet machine and a loaded machine disagree about a property of the
+# product. That disagreement is the bug: the only stage on which a quiet run and
+# a loaded run differed here was this one, and the difference was these 15 s and
+# nothing else.
+built = viewport._ctx is not None
+qt_reports_a_context = bool(viewport.isValid())
+if built:
+    ready = "built"
+    problem = None
+elif qt_reports_a_context:
+    ready = "bound-expired"
+    problem = (
+        "Qt reports the product's own Viewport's OpenGL context as VALID, but "
+        "the moderngl context Viewport builds on top of it had not been "
+        "constructed when this probe stopped waiting (%g s). That is a bound "
+        "this probe gave itself, not a finding: the only claim here is that the "
+        "viewer did not come up within %g s on this machine, which is NOT the "
+        "claim that it would open empty. Re-run the check on a quieter machine, "
+        "or with a larger bound, to find out which of the two it was."
+        % (ready_bound, ready_bound)
+    )
+else:
+    ready = "not-realised"
+    problem = (
+        "Qt did not give the product's own Viewport a valid OpenGL context "
+        "(QOpenGLWidget.isValid() is false), so the viewer window would open "
+        "with nothing rendered in it. This is read from Qt rather than from a "
+        "clock: it was already true when the widget was shown, and waiting "
+        "longer would not have made it less true"
+    )
+found["ready"] = ready
+found["bound_expired"] = (ready == "bound-expired")
+found["problem"] = problem
 found["stage"] = "done"
 sys.stdout.write(json.dumps(found) + "\n")
 sys.stdout.flush()
-sys.exit(0 if viewport._ctx is not None else 4)
+sys.exit(0 if built else 4)
 """
+
+
+def _child_source() -> str:
+    """The child, with the parent's durations written into it.
+
+    The placeholders are deliberately not ``%``- or ``str.format``-style: the
+    child contains both (``"%d.%d" % (...)`` for the GL version, and dict
+    literals), so either formatter would rewrite code it is not meant to touch.
+    A plain replace of a token that cannot occur anywhere else cannot.
+
+    The ``assert``s are here because a substitution that silently did not happen
+    would leave the child dying with a `NameError` on its own first line --
+    loud, but only on the machines this file exists to diagnose, which is the
+    worst possible place to discover it.
+    """
+    src = _PROBE_CHILD
+    for placeholder, value in (
+        ("__GL_READY_BOUND_SECONDS__", _GL_READY_BOUND_SECONDS),
+        ("__GL_SETTLE_SECONDS__", _GL_SETTLE_SECONDS),
+    ):
+        assert src.count(placeholder) == 1, (placeholder, src.count(placeholder))
+        src = src.replace(placeholder, repr(float(value)))
+    assert "__GL_" not in src, "an unsubstituted duration placeholder survived"
+    # The child is a separate `python -c` and cannot import these, so the three
+    # states it can report are written twice. This is the check that they are
+    # still the same three: the child assigns each as a string literal, and a
+    # rename here that missed the child would otherwise show up only as a
+    # `widget.ready` a caller does not recognise. `child-killed` is excluded on
+    # purpose -- it is the parent's, and it is set when the child is killed
+    # rather than when it answers, so the child has no spelling of it to keep in
+    # step. Its being absent here is asserted by the parent instead.
+    for state in (READY_BUILT, READY_NOT_REALISED, READY_BOUND_EXPIRED):
+        assert f'ready = "{state}"' in src, (
+            f"{state!r} is declared here but the child does not assign it; the "
+            f"child is a separate source and cannot import it"
+        )
+    assert READY_CHILD_KILLED not in src, (
+        f"{READY_CHILD_KILLED!r} belongs to the parent alone; if the child now "
+        f"reports it, the kill branch and the child have two spellings"
+    )
+    return src
 
 
 def _probe_opengl(timeout: float = _GL_PUMP_SECONDS) -> tuple[dict, str | None]:
@@ -766,11 +1072,23 @@ def _probe_opengl(timeout: float = _GL_PUMP_SECONDS) -> tuple[dict, str | None]:
     import time
 
     started = time.perf_counter()
-    budget = max(float(timeout), 1.0) + 15.0
-    found: dict = {}
+    # The kill, and every term of it named. It is a different kind of number
+    # from the child's bound: it exists so the parent cannot hang behind a child
+    # that never returns, and it decides nothing. The old expression,
+    # `max(timeout, 1.0) + 15.0`, had no room for the child's own settle pump or
+    # its report, so a context that built at 14.9 s could be killed *while
+    # printing its answer* and the parent would then report "the probe did not
+    # answer" -- a different and more alarming fact than the one it had.
+    budget = (
+        max(float(timeout), _GL_PUMP_SECONDS)
+        + _GL_READY_BOUND_SECONDS
+        + _GL_SETTLE_SECONDS
+        + _GL_CHILD_MARGIN_SECONDS
+    )
+    found: dict = {"child_kill_seconds": budget}
     try:
         proc = subprocess.run(
-            [sys.executable, "-c", _PROBE_CHILD],
+            [sys.executable, "-c", _child_source()],
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -778,9 +1096,19 @@ def _probe_opengl(timeout: float = _GL_PUMP_SECONDS) -> tuple[dict, str | None]:
             timeout=budget,
         )
     except subprocess.TimeoutExpired:
+        # A kill, and it is not a verdict. Nothing is known about the machine
+        # beyond "the child did not come back", so the payload says that in its
+        # own field rather than letting a reader infer a finding from a missing
+        # answer -- which is the whole failure this round's item 3 is about.
         return (
-            {"waited": time.perf_counter() - started},
-            f"the OpenGL probe did not answer within {budget:.0f} s",
+            {"waited": time.perf_counter() - started,
+             "child_kill_seconds": budget, "child_killed": True,
+             "ready": "child-killed"},
+            f"the OpenGL probe child was killed after {budget:g} s without "
+            f"reporting. This says the child did not return, and nothing at all "
+            f"about whether the viewer would render: it is a timeout, not a "
+            f"finding, and it is not the same event as the {budget:g} s bound "
+            f"inside the child",
         )
     except OSError as exc:  # pragma: no cover - no interpreter to spawn
         return {"waited": time.perf_counter() - started}, f"the OpenGL probe could not be run ({exc})"
@@ -811,16 +1139,31 @@ def _probe_opengl(timeout: float = _GL_PUMP_SECONDS) -> tuple[dict, str | None]:
         found.pop("initialised", None)
         found.pop("problem", None)
         return found, None
+    if found.get("problem"):
+        # **The child's own sentence, used whenever the child produced one.**
+        #
+        # It exits 4 on a bad outcome and 0 on a good one, so the exit code alone
+        # cannot tell "Qt never gave the widget a context" from "the bound I set
+        # for myself lapsed" -- and this branch used to throw the child's answer
+        # away and substitute its own, which collapsed exactly the distinction
+        # the child had gone to the trouble of drawing. The exit code stays what
+        # it is; the sentence is the one that carries the finding.
+        found.pop("initialised", None)
+        return found, found["problem"]
     if proc.returncode == 0 and found:
         found.pop("initialised", None)
-        return found, found.get("problem") or "no OpenGL context"
-    # No JSON, or JSON without an answer: the child died. On this machine that is
-    # what a driver that cannot supply a context does, and it is the case the
-    # command exists for, so it is reported rather than treated as a crash of
-    # the diagnostic itself.
+        return found, "no OpenGL context"
+    # The child produced no sentence of its own: it really did not answer. That
+    # is not the same fact as an answer that says "no", and it is not the same
+    # fact as the bound lapsing inside the child either -- the exit code is the
+    # only evidence there is, so the sentence quotes it and claims nothing more.
     return found, (
-        f"Qt could not create the context and the probe ended without "
-        f"answering (exit {proc.returncode})"
+        f"the OpenGL probe child ended without reporting anything "
+        f"(exit {proc.returncode}). The exit code is the only evidence here, so "
+        f"this is not a finding about the machine: on a driver that cannot "
+        f"supply a context Windows ends the process with 0xC0000409 before any "
+        f"line is printed, and a number that specific is worth more than a "
+        f"sentence this file guessed at"
     )
 
 

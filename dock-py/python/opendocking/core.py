@@ -168,11 +168,41 @@ def scoring_descriptions() -> list[str]:
 class GridBox:
     """An axis-aligned cuboid in which the ligand is allowed to be placed.
 
+    There are **two** ways to build one, and their first argument means
+    different things. This is stated here because they are otherwise
+    indistinguishable by type and arity, and mixing them up is silent.
+
+    ==================  ===================  ====================
+    call                 first argument      second argument
+    ==================  ===================  ====================
+    ``GridBox(a, b)``    ``a`` = lower corner  ``b`` = upper corner
+    ``GridBox``          ``a`` = centre        ``b`` = **span**
+    ``.from_center_``                        (edge length)
+    ``size(a, b)``
+    ==================  ===================  ====================
+
+    Given the same two numbers, the two produce **different boxes**::
+
+        GridBox((0, 0, 0), (14, 14, 14)).min_corner
+        (0.0, 0.0, 0.0)                                  # spans 0..14
+        GridBox.from_center_size((0, 0, 0), (14, 14, 14)).min_corner
+        (-7.0, -7.0, -7.0)                               # spans -7..7
+
+    Same edge lengths, seven angstroms apart, no error either way. Prefer the
+    keyword form, which cannot be confused: ``GridBox(min_corner=..., max_corner=...)``
+    and ``GridBox.from_center_size(center=..., size=...)``.
+
     Parameters
     ----------
     min_corner, max_corner:
         Inclusive lower and exclusive upper corners, in Ångström, in the
-        receptor's own coordinate frame.
+        receptor's own coordinate frame. Both must be finite and
+        ``max_corner`` strictly above ``min_corner`` on every axis. This is the
+        ``__init__`` form; the argument names are what distinguish it.
+    center, size:
+        A **centre** and a **span**, for ``GridBox.from_center_size`` only.
+        ``size`` is an edge length, not a corner, so
+        ``from_center_size(a, b)`` and ``GridBox(a, b)`` are different boxes.
 
     Examples
     --------
@@ -184,6 +214,12 @@ class GridBox:
     __slots__ = ("_box",)
 
     def __init__(self, min_corner: Sequence[float], max_corner: Sequence[float]) -> None:
+        """Build a box from its **corners**, not from a centre and a size.
+
+        See the class docstring: ``GridBox(min, max)`` and
+        ``GridBox.from_center_size(center, size)`` take the same two numbers
+        and mean different things by them.
+        """
         self._box = _core.GridBox(
             tuple(float(v) for v in min_corner),
             tuple(float(v) for v in max_corner),
@@ -193,7 +229,11 @@ class GridBox:
     def from_center_size(
         cls, center: Sequence[float], size: Sequence[float]
     ) -> "GridBox":
-        """Build a box of the given size centred on ``center``."""
+        """Build a box of the given **size** centred on ``center``.
+
+        ``size`` is a span (an edge length), not a corner -- see the class
+        docstring for why that is worth stating.
+        """
         return cls._from_raw(
             _core.GridBox.from_center_size(
                 tuple(float(v) for v in center), tuple(float(v) for v in size)
@@ -440,6 +480,25 @@ class GridMaps:
         return self._maps.memory_mb
 
     @property
+    def unknown_atom_types(self) -> int:
+        """Receptor atoms whose PDBQT type this engine does not recognise.
+
+        The engine has carried this count on the maps since the field was added,
+        and :class:`Receptor` and :class:`DockingResult` both expose it. This
+        class did not, so from Python the number was unreachable -- and the
+        receptor is the object that goes out of scope the moment maps exist, so
+        the maps were the one place a caller could still not audit.
+
+        Non-zero means the maps are real and the *energies are understated*: an
+        unrecognised type still contributes its shape term while silently losing
+        its hydrogen-bond and hydrophobic character.
+
+        Read it as "at least this many": maps written before the field existed
+        deserialise to 0, which is not a claim that every atom was recognised.
+        """
+        return int(self._maps.unknown_atom_types)
+
+    @property
     def box(self) -> GridBox:
         """The box these maps cover.
 
@@ -560,6 +619,15 @@ class Ligand:
         whose ``reference_coords`` were all NaN and whose ``radius`` was
         ``0.0`` -- a confident answer about a molecule with no position, which
         then poisons every energy computed from it.
+
+        Every bond must name two *different* atoms that both exist. An
+        out-of-range index and a self-bond are both refused rather than
+        dropped, because a dropped bond is a different molecule from the one
+        described: the two atoms stop being neighbours, rotatable-bond
+        perception loses a torsion, ring membership loses a ring, and every
+        energy that comes back is finite and plausible. A bond listed twice is
+        the one exception -- that is a redundant table, not a wrong one, and it
+        is stored once.
         """
         arr = np.ascontiguousarray(coords, dtype=np.float64)
         if arr.ndim != 2 or arr.shape[1] != 3:
@@ -586,6 +654,17 @@ class Ligand:
                             f"bond {bond} refers to atom {i}, and this molecule "
                             f"has {n} atoms"
                         )
+                # A self-bond passes the range test and is still not a bond, so
+                # it needs its own refusal. Before this, `0 <= 0 < n` was the
+                # only test here and the engine's `i != j` guard dropped it
+                # silently: the ligand was then built without that bond and
+                # every number stayed finite and plausible. A dropped bond is a
+                # different molecule, not a missing result.
+                if bond[0] == bond[1]:
+                    raise ValueError(
+                        f"bond {bond} is a self-bond: an atom cannot be bonded to "
+                        "itself"
+                    )
         return cls(
             _core.Ligand.from_arrays(
                 list(elements),
@@ -685,6 +764,44 @@ class DockingResult:
         return int(self._res.rejected_pose_count)
 
     @property
+    def unknown_atom_types(self) -> int:
+        """Receptor atoms whose PDBQT type this engine does not recognise.
+
+        Non-zero means the run succeeded and the *energies are understated*: an
+        unrecognised type contributes its shape term while silently losing its
+        hydrogen-bond and hydrophobic character, and no pose count reveals it.
+        Reported rather than refused, because another tool may emit type names
+        AutoDock never defined.
+
+        It is on the result as well as on ``Receptor`` because the receptor is
+        gone by the time a result exists — precalculate, drop the receptor, hold
+        maps, dock. Read it as "at least this many": maps written before the
+        count existed deserialise to 0, which is not a claim that every atom was
+        recognised.
+        """
+        return int(self._res.unknown_atom_types)
+
+    @property
+    def poses_outside_box_count(self) -> int:
+        """Reported poses with no atom at all inside the search box.
+
+        A pose with one atom inside the box scored a real interaction with the
+        receptor. A pose with none scored only the ligand's own internal energy
+        plus the out-of-box penalty, and is ranked beside poses that did bind --
+        so a result can be complete, ranked, timed and ``rc=0`` while describing
+        no binding mode at all.
+
+        Read it against :attr:`num_poses`. Equal to it means every pose reported
+        is wholly outside the box.
+
+        Reported, not refused: the search ran, the poses are physically
+        consistent, and an out-of-box pose is charged 1000 kcal/mol per ångström
+        of overhang, so the table already shows the result is worthless. What
+        this adds is that the table does not have to be *read* to notice.
+        """
+        return int(self._res.poses_outside_box_count)
+
+    @property
     def scoring_function(self) -> str:
         """Name of the scoring function used."""
         return self._res.scoring_function
@@ -774,6 +891,48 @@ class DockingResult:
                 "contains solid protein rather than a pocket, or that "
                 "exhaustiveness is too low."
             )
+        if self.unknown_atom_types:
+            lines.append(
+                f"  WARNING: {self.unknown_atom_types} receptor atom(s) carry a "
+                "PDBQT type this engine does not recognise. They contribute a "
+                "shape term while losing their hydrogen-bond and hydrophobic "
+                "character, so every energy here understates the receptor. "
+                "Re-export the receptor with known AutoDock types to fix it."
+            )
+        # Printed only when it is non-zero, and that is a decision rather than
+        # an omission, so it is written down here.
+        #
+        # The case for it: this is the overwhelmingly common value, and a line
+        # that reads "poses outside box: 0" on every run teaches a reader to
+        # skip the line -- which costs exactly the run where it matters. It also
+        # matches the two diagnostics above it, so a reader learns one rule
+        # ("scan for WARNING") instead of three.
+        #
+        # The case against it, honestly: in prose, *the absence of this line is
+        # not evidence that the count is zero.* It only means the count was
+        # zero -- that is the same thing, but only if the reader already knows
+        # the line is conditional. So the cost of this choice is a reader who
+        # wants proof of absence in the prose output and has to ask for the
+        # number some other way.
+        #
+        # It is not paid in the other two surfaces, which is why this trade is
+        # available: the property above is always readable and costs one
+        # attribute access, and the `--json` record carries the field
+        # unconditionally, so proof of absence is one `grep` over machine output
+        # and never a missing human line. A number that is always in the JSON,
+        # always on the object, and only sometimes in the prose is the same fact
+        # surfaced three ways, which is what "the two output modes must agree"
+        # has to mean when one of them is a table for people.
+        if self.poses_outside_box_count:
+            outside = self.poses_outside_box_count
+            lines.append(
+                f"  WARNING: {outside} of {self.num_poses} reported poses have no "
+                "atom at all inside the search box. They scored only the ligand's "
+                "own internal energy plus the out-of-box penalty, so that part of "
+                "the table is not a binding mode. That usually means the box does "
+                "not contain anywhere the ligand can sit, or that exhaustiveness is "
+                "too low."
+            )
         return "\n".join(lines)
 
     def __repr__(self) -> str:
@@ -791,6 +950,7 @@ def dock(
     mode: str = "mc",
     scoring: str | None = None,
     steps: int | None = None,
+    min_contact_distance: float | None = None,
 ) -> DockingResult:
     """Dock ``ligand`` against precalculated ``maps``.
 
@@ -819,6 +979,10 @@ def dock(
         Local-search steps per walk. Leave unset unless tuning. Must be at
         least 1 if given; a negative one raised ``OverflowError`` from the
         engine's unsigned conversion while ``steps=0`` raised ``ValueError``.
+    min_contact_distance:
+        Smallest ligand-receptor separation, in Ångström, for a pose to be
+        reported. ``None`` leaves the engine default of 2.0 Å; ``0.0`` disables
+        the filter and reports the raw energy minimum.
     """
     if exhaustiveness < 1:
         raise ValueError("exhaustiveness must be at least 1")
@@ -853,6 +1017,7 @@ def dock(
             mode,
             scoring,
             None if steps is None else int(steps),
+            None if min_contact_distance is None else float(min_contact_distance),
         )
     )
 
@@ -1008,8 +1173,17 @@ def evaluate_conformations(
 
     Pass a dict as ``report_backend`` and it is filled in with
     ``backend`` (``"gpu"`` or ``"cpu"``), ``adapter``, ``gpu_skip_reason``
-    and ``num_conformations``. A silent CPU fallback reads as an unexplained
-    slowdown, so ask for it if you care.
+    and ``num_conformations``.
+
+    ``gpu_skip_reason`` answers *why a request for the GPU was not honoured*,
+    which ``backend`` alone cannot: a build compiled without the GPU feature
+    declines with one reason, and a build that has the feature but cannot open
+    an adapter declines with another, and those call for opposite repairs. A
+    call that passed ``use_gpu=True`` and did not get the GPU therefore always
+    gets a non-empty reason, so a refusal is never indistinguishable from
+    success. A call that passed ``use_gpu=False`` always gets ``None`` instead:
+    it asked for nothing, and a reason there would report a fallback that never
+    happened. Ask for the report if you care either way.
 
     The result is the *total* energy — intermolecular plus the scaled
     intramolecular term — identical to calling :func:`score_conformation` once
@@ -1038,14 +1212,19 @@ def gpu_status() -> dict[str, bool]:
 
 
 def available_backends() -> list[str]:
-    """List the parallel backends the engine will consider for a search."""
-    import os
+    """List the parallel backends the engine will consider for a search.
 
+    The thread count is the size of rayon's global pool, which is the pool the
+    search runs on -- **not** ``os.cpu_count()``. The two differ whenever
+    ``RAYON_NUM_THREADS`` is set, and the difference is not cosmetic: a
+    measured crambin/biotin run takes 0.436 s on 16 threads and 8.680 s on one,
+    with bit-identical energies. Reporting the machine's core count while the
+    engine runs on a single thread reports a number that is false.
+    """
     backends = ["cpu"]
     if gpu_status()["available"]:
         backends.append("gpu")
-    n = os.cpu_count() or 1
-    backends.append(f"cpu/{n}-threads")
+    backends.append(f"cpu/{_core.rayon_threads()}-threads")
     return backends
 
 

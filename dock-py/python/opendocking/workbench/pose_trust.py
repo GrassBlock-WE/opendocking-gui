@@ -1,13 +1,13 @@
 """Can *this* pose's numbers be trusted? The verdict, bound to one run.
 
-`scripts/result_trust.py` is a pure verdict module: it reads no file, imports no
-engine and starts no process, so it can be called from here, from a report
-script and from a gate with the same answer. It takes a **flat dict of numbers
-plus thresholds**, all optional, and folds them into one of three answers --
-`yes`, `no`, `unknown` -- through the engine's own published contracts. This
-module is the other half of that: it is the workbench's binding of those
-numbers to the objects a run really carries, and it is the only place in the
-package where a verdict is produced.
+`opendocking/result_trust.py` is a pure verdict module: it reads no file,
+imports no engine and starts no process, so it can be called from here, from a
+report script and from a gate with the same answer. It takes a **flat dict of
+numbers plus thresholds**, all optional, and folds them into one of three
+answers -- `yes`, `no`, `unknown` -- through the engine's own published
+contracts. This module is the other half of that: it is the workbench's binding
+of those numbers to the objects a run really carries, and it is the only place
+in the package where a verdict is produced.
 
 Four things about the binding are the whole design, and each of them is a
 defect it exists to prevent.
@@ -43,17 +43,30 @@ exactly what I would have to measure to have one.* It is not a dead end dressed
 up as a feature; the action that changes it is named, and it is the button in
 the panel above.
 
-What this panel costs, measured rather than asserted: reading one pose's
-gradient took **7.7 us**, folding it into a verdict took **13.7 us**, and the
-whole of `describe_pose` -- binding, formatting, four rows -- took **77.8 us**
-(500 to 2000 iterations each, on 1crn + biotin, 11 degrees of freedom,
-`F:\\python310`, this machine). So the whole panel is a read of arrays the run
-already holds: no tabulation, no engine call, no thread, and nothing here that
-could block the GUI thread the way the term maps do. The one value it does not
-compute itself, the out-of-box penalty, is reused from the energy breakdown
-above it *for the same pose index* -- recomputing it would mean a second engine
-call for a number already on screen, and a panel that disagreed with the panel
-above it.
+What this panel costs, measured rather than asserted, on this machine
+(`F:\\python310`, 1crn + biotin, 11 degrees of freedom, real desktop platform):
+
+* `describe_pose` headless -- binding, folding and formatting, no Qt -- took
+  **77.8 us** (500 iterations);
+* the whole refresh on the GUI thread of a live window, `_refresh_pose_verdict`
+  including the four `QTableWidgetItem`s and the stylesheets, took a median of
+  **362.7, 444.9 and 425.1 us** on three consecutive selections, and 419.8 us
+  and 425.5 us on two others -- so about 420 us, and the difference from 77.8 us
+  is the table, not the verdict;
+* with the verdict module not importable the same call takes **86.7 us** and
+  draws no rows, because there is nothing to fold.
+
+So the panel is a read of arrays the run already holds: no tabulation, no engine
+call, no thread. The same refresh, with the term maps still being tabulated and
+therefore no out-of-box penalty to reuse, is **not separately timed**: on this
+fixture the maps are already built by the time a pose can be selected, so the
+state was not reached. Its code path is this one with a single reader returning
+`None`, which is a strict subset of the work measured above.
+
+The one value the panel does not compute itself, the out-of-box penalty, is
+reused from the energy breakdown above it *for the same pose index* --
+recomputing it would mean a second engine call for a number already on screen,
+and a panel that disagreed with the panel above it.
 """
 from __future__ import annotations
 
@@ -123,35 +136,80 @@ class PoseVerdictUnavailable(RuntimeError):
 _MODULE: Any = None
 _MODULE_ERROR: str = ""
 
+#: Where this module looks for `result_trust`, in order, and why in that order.
+#:
+#: **The name is the thing that moved, not just the file.** This list is two
+#: names long, and the reason is measured rather than predicted: the module was
+#: packaged as `opendocking/result_trust.py`, so its importable name became
+#: `opendocking.result_trust` and a bare `import result_trust` stopped
+#: answering. A consumer written against the *location* and not the *name*
+#: breaks on the day the move lands, which is the day its fallback stops being
+#: needed and starts being the only thing that would have worked.
+#:
+#: The packaged name is first so a shipped copy is the one used; the top-level
+#: name is second because something may put a directory holding the module on
+#: the path, and refusing to try that would be refusing to be a library.
+#:
+#: **There was a third entry, this checkout's `scripts/` directory, and it is
+#: gone.** It was a last resort on the reasoning that a checkout convenience
+#: beats no verdict at all, and it was removed on the day the module was
+#: packaged. Three facts about this repository, each of them checkable rather
+#: than argued:
+#:
+#: * **the branch could not be taken.** It looked for
+#:   `parents[4]/"scripts"/result_trust.py`, and packaging moved that file into
+#:   the package, so the guard has read false ever since -- `scripts/` is a
+#:   directory and holds no `result_trust.py` at all;
+#: * **nothing needed it.** The first entry answers, so the loop returns before
+#:   a directory is ever consulted, and a resolution that gets that far has
+#:   already failed twice;
+#: * **it was the only thing here that wrote to `sys.path`.** A panel's import
+#:   behaviour depending on the shape of the checkout it happened to run from is
+#:   a different behaviour in a wheel, where there is no `parents[4]` to walk.
+#:
+#: `scripts/pose_trust_check.py` pins what is left: the order, that the
+#: packaged name answers on a cold cache, and that the refusal names every
+#: candidate it tried.
+#:
+#: `IMPORT_CANDIDATES` is data rather than a literal inside the function so a
+#: check can ask what the order is supposed to be, instead of reading it back
+#: out of the source.
+IMPORT_CANDIDATES = ("opendocking.result_trust", "result_trust")
+
 
 def verdict_module() -> Any:
     """The `result_trust` module, imported once, or a stated reason it is absent.
 
-    Imported by bare name because that is what it is: a pure module in
-    `scripts/`, not part of the installed package. In this source tree, and in
-    a checkout of the release, `scripts/` is on the path of anything that puts
-    the repository root there; in an installed wheel it is not, and the panel
-    then says so in words rather than showing a verdict it cannot compute.
-    Whether `result_trust` should move into `opendocking/` is a packaging
-    decision that belongs to the module's owner, not to this panel.
+    The packaged name first and a top-level name second, and nothing else: the
+    checkout's `scripts/` directory used to be a third candidate and was removed
+    once the module was packaged -- see `IMPORT_CANDIDATES` for the measurement
+    that decided it. The failure message lists every name it tried and what each
+    answered, because the sentence that used to be here -- that the module is
+    not part of the installed package -- was true when it was written and would
+    have been the wrong thing to read the day it was.
     """
     global _MODULE, _MODULE_ERROR
     if _MODULE is not None:
         return _MODULE
     if _MODULE_ERROR:
         raise PoseVerdictUnavailable(_MODULE_ERROR)
-    try:
-        _MODULE = importlib.import_module("result_trust")
-    except Exception as exc:  # noqa: BLE001 - any import failure is the same fact
-        _MODULE_ERROR = (
-            "the verdict module could not be imported "
-            f"({type(exc).__name__}: {exc}). It is a pure module in "
-            "`scripts/result_trust.py` and is not part of the installed "
-            "package, so a wheel-installed workbench has no verdict to show. "
-            "Nothing here was measured, so nothing here passes."
-        )
-        raise PoseVerdictUnavailable(_MODULE_ERROR) from exc
-    return _MODULE
+    tried = []
+    for name in IMPORT_CANDIDATES:
+        try:
+            _MODULE = importlib.import_module(name)
+            return _MODULE
+        except Exception as exc:  # noqa: BLE001 - any failure is the same fact
+            where = ("the installed package" if "." in name
+                     else "a top-level module on the path")
+            tried.append(f"{where} (`{name}`): {type(exc).__name__}: {exc}")
+    _MODULE_ERROR = (
+        "the verdict module could not be imported, so nothing was measured and "
+        "nothing passes. Tried: "
+        + "; ".join(tried)
+        + ". It is a pure module that turns a dict of numbers into one of three "
+        "verdicts, and this panel needs it for every contract it shows."
+    )
+    raise PoseVerdictUnavailable(_MODULE_ERROR) from None
 
 
 def _reset_module_cache() -> None:
@@ -226,7 +284,20 @@ def _fmt(value: Any) -> str:
 
 @dataclass(frozen=True)
 class PoseVerdict:
-    """One pose's verdict, and the numbers behind it."""
+    """One pose's verdict, and the numbers behind it.
+
+    `from_file` and `why` are the two fields a pose read from a file carries and
+    a docked pose does not. They are fields rather than deductions from
+    `num_poses == 0` because "the count is zero" and "this came from a file" are
+    different facts that happen to agree today, and a header built on the
+    coincidence would be a header that lies the day they diverge.
+
+    `why` is the reason the verdict is what it is **in one sentence**, printed
+    by `explanation()` under the table and never in the header. It is where a
+    pose file's "a pose file carries coordinates rather than a conformation"
+    went when the header stopped carrying it: a reason belongs with the other
+    reasons, and a reason in a glance-sized line is not a reason.
+    """
 
     trust: str
     pose_index: int
@@ -236,23 +307,79 @@ class PoseVerdict:
     supplied: tuple[str, ...]
     absent: tuple[str, ...]
     misspelled: tuple[str, ...] = ()
+    from_file: bool = False
+    why: str = ""
 
     @property
     def described_pose(self) -> str:
-        """The one line that says which pose these numbers are about."""
-        return f"pose {self.pose_index + 1} of {self.num_poses}"
+        """The one line that says which pose these numbers are about.
+
+        Built by `_pose_identity`, which is also what builds the label handed to
+        the verdict module, so the two spellings cannot drift apart: a header
+        that read ``pose 3 of 9`` beside the module's own ``pose 3`` would be
+        two names for one pose in one sentence.
+
+        The three-copy header this replaced is in
+        `dist/pose_trust/pose_verdict_unknown.png` as it was captured before the
+        fix -- ``pose 1 of 9 -- UNKNOWN: pose 1 of 9 (from a pose file): ...``
+        -- and `scripts/pose_trust_check.py` counts the occurrences rather than
+        asserting the shape, so a repeat is a red gate rather than a screenshot
+        somebody has to notice.
+        """
+        return _pose_identity(self.pose_index, self.num_poses, self.from_file)
 
     @property
     def state_word(self) -> str:
         return STATE_WORDS.get(self.trust, self.trust)
 
-    def headline(self) -> str:
-        """The one line a reader reads first, state first and in words.
+    #: Where the reasons are, named in the header itself. Not decoration: a
+    #: shorter header with nothing pointing at the block would be a header that
+    #: has lost information rather than one that has been shortened. The ruling
+    #: is that the reasons live once **under the table**, so the header has to
+    #: send the reader there by name instead of merely stopping talking.
+    WHERE_REASONS = ("Which contracts read which way, and why each one does, is "
+                     "in the table below.")
 
-        The state word comes before the reason so that a reader who stops
-        after one word still stops on the state rather than on a number.
+    def _clause(self) -> str:
+        """One clause, counted from the rows, saying what the state is made of.
+
+        **A count, not a quotation.** Each of the four `unmeasured` contracts
+        carries a sentence, and an `UNKNOWN` header that joined them was four
+        sentences long -- in the one element a reader reads in a glance. So this
+        says how many failed and how many were not measured, and the block below
+        says which and why.
+
+        The "no contract was read" branch is not reachable from a verdict: a
+        verdict is four contracts or a refusal, and a refusal is not a
+        `PoseVerdict`. It is here so that an empty row list reads as a fact
+        rather than as a clause about nothing.
         """
-        return f"{self.described_pose} -- {self.trust.upper()}: {self.summary}"
+        holds = sum(1 for r in self.rows if r.state == "holds")
+        fails = sum(1 for r in self.rows if r.state == "fails")
+        unmeasured = sum(1 for r in self.rows if r.state == "unmeasured")
+        if not (holds or fails or unmeasured):
+            return "no contract was read"
+        bits: list[str] = []
+        if fails:
+            bits.append(f"{fails} contract{'' if fails == 1 else 's'} failed")
+        if unmeasured:
+            bits.append(f"{unmeasured} not measured")
+        if not bits:
+            return "every applicable contract holds"
+        return " and ".join(bits)
+
+    def headline(self) -> str:
+        """The one line a reader reads first: the state, the pose, and a pointer.
+
+        Three things and no more -- the state word, which pose this is about,
+        and where the reasons are. A verdict is read in a glance and four
+        sentences is not a glance, so the reasons are `explanation()`'s job and
+        are printed once, under the table. The verdict module's own roll-up
+        stays on `summary`, which the export carries, instead of being printed
+        twice on screen.
+        """
+        return (f"{self.trust.upper()}: {self.described_pose} -- "
+                f"{self._clause()}.  {self.WHERE_REASONS}")
 
     def stylesheet(self) -> str:
         """The colours and the font for this verdict, in one stylesheet."""
@@ -273,8 +400,15 @@ class PoseVerdict:
         and "only the engine could change it" are not the same kind of news.
         Unmeasured contracts print their reason too -- an absent measurement
         that is not named reads as a row somebody forgot.
+
+        **`why` leads, when there is one.** For a pose read from a file this is
+        the sentence that says *why* nothing was measured, and it belongs here
+        rather than in the header: the header is read in a glance and this is
+        four lines of prose that the reader needs to stop for anyway.
         """
         parts: list[str] = []
+        if self.why:
+            parts.append(self.why)
         for row in self.failing_rows():
             kind = f" ({row.remedy_kind})" if row.remedy_kind else ""
             parts.append(f"{row.name}: {row.because}  To change it{kind}: "
@@ -458,9 +592,11 @@ def pose_values(
                 f"pose {index + 1} is not one of the {num_poses} poses this run "
                 f"reported"
             )
-    values["label"] = f"pose {index + 1} of {num_poses}" if num_poses else (
-        f"pose {index + 1} (from a pose file)"
-    )
+    # One spelling of the pose's name, shared with `PoseVerdict.described_pose`
+    # by way of `_pose_identity`. `from_file=False` because this function is
+    # reached only for a pose with a run behind it; a file pose goes through
+    # `describe_file_pose`, which supplies its own label.
+    values["label"] = _pose_identity(index, num_poses, False)
     for name in sorted(_READERS):
         if name not in schema:
             raise PoseVerdictUnavailable(
@@ -531,6 +667,43 @@ def describe_pose(
     )
 
 
+#: Why a pose from a file has no verdict, in one sentence.
+#:
+#: It is printed **under the table**, on `PoseVerdict.why`, and not in the
+#: header. It was in the header when the header also carried the module's
+#: roll-up, which is how a reader got the same paragraph twice: once in the one
+#: element meant to be read in a glance, and once in the place designed to be
+#: read properly. The verdict module's own clause already names the pose and
+#: already says "from a pose file", so this sentence is the *reason behind* that
+#: answer rather than a second copy of it.
+FILE_POSE_WHY = (
+    "These poses were read from a file, and a pose file carries coordinates "
+    "rather than a conformation -- the engine's gradient and its out-of-box "
+    "penalty are properties of a run in memory, and nothing here was measured."
+)
+
+
+def _pose_identity(index: int, num_poses: int, from_file: bool) -> str:
+    """The one spelling of "which pose", used by the label and by the header.
+
+    Two call sites that both had to name the pose -- `described_pose` and the
+    `label` handed to the verdict module -- and two spellings is how a header
+    ends up saying ``pose 3 of 9`` beside the module's ``pose 3``. So there is
+    one function and both of them call it.
+
+    A file pose is named with its count when the file gave one and without when
+    it did not, because a file of unknown length is not nine poses and printing
+    "of 0" would be a claim nobody made.
+    """
+    index = int(index)
+    num_poses = int(num_poses)
+    if not from_file:
+        return f"pose {index + 1} of {num_poses}"
+    if num_poses:
+        return f"pose {index + 1} of {num_poses} (from a pose file)"
+    return f"pose {index + 1} (from a pose file)"
+
+
 def describe_file_pose(pose_index: int, num_poses: int = 0) -> PoseVerdict:
     """A pose that came from a file: no opinion, and the reason in words.
 
@@ -539,26 +712,27 @@ def describe_file_pose(pose_index: int, num_poses: int = 0) -> PoseVerdict:
     cleared -- is a *bug*, and this function is for the one situation that is
     not: a pose file, which structurally cannot carry what the contracts read.
     The window knows which of the two it has, and says so.
+
+    ``label`` is handed to the module and the file's own reason is kept on
+    ``why``. Neither is prepended to anything here: the module writes the label
+    into the summary it returns, and `why` is printed under the table, and the
+    header carries the identity alone.
     """
     module = verdict_module()
-    label = (f"pose {int(pose_index) + 1} of {int(num_poses)} (from a pose file)"
-             if num_poses else f"pose {int(pose_index) + 1} (from a pose file)")
+    label = _pose_identity(pose_index, num_poses, True)
     verdict = module.verdict_pose({"label": label})
     schema = set(module.schema_for("pose"))
     return PoseVerdict(
         trust=verdict.trust,
         pose_index=int(pose_index),
         num_poses=int(num_poses),
-        summary=(
-            f"{label}: these poses were read from a file, and a pose file "
-            f"carries coordinates rather than a conformation -- the engine's "
-            f"gradient and its out-of-box penalty are properties of a run in "
-            f"memory, and nothing here was measured. {verdict.summary}"
-        ),
+        summary=verdict.summary,
         rows=_rows_from_verdict(verdict),
         supplied=(),
         absent=tuple(sorted(schema)),
         misspelled=tuple(verdict.misspelled),
+        from_file=True,
+        why=FILE_POSE_WHY,
     )
 
 

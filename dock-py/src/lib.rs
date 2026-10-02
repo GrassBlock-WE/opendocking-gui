@@ -293,6 +293,29 @@ impl PyGridMaps {
         (self.inner.data_len() * 4) as f64 / (1024.0 * 1024.0)
     }
 
+    /// Receptor atoms whose PDBQT type this engine does not recognise.
+    ///
+    /// The engine has carried this count on the maps since it grew the field,
+    /// and `Receptor` and `DockingResult` both expose it. This binding did
+    /// not, so from Python the number existed and was unreachable -- and the
+    /// gap is not cosmetic, because the receptor is the object that goes out
+    /// of scope the moment maps exist: `precalculate`, drop the receptor, hold
+    /// maps, dock. A caller who wanted to audit the *maps* rather than the
+    /// result could not, and the only Python-visible route to the count ran
+    /// through a docking run they may not have performed.
+    ///
+    /// Non-zero means the maps are real and the *energies are understated*: an
+    /// unrecognised type still contributes its shape term and silently loses
+    /// its hydrogen-bond and hydrophobic character. Reported, not refused --
+    /// another tool may emit type names AutoDock never defined.
+    ///
+    /// Read it as "at least this many": maps written before the field existed
+    /// deserialise to 0, which is not a claim that every atom was recognised.
+    #[getter]
+    fn unknown_atom_types(&self) -> usize {
+        self.inner.unknown_atom_types()
+    }
+
     /// The box these maps cover.
     #[getter]
     fn box_(&self) -> PyGridBox {
@@ -339,12 +362,17 @@ impl PyLigand {
         // on Linux by looking for a file whose name is the whole document.
         // Nothing caught it: every caller passed malformed text and saw a
         // catchable ValueError either way, which is exactly what it wanted.
+        // `Ligand::from_parsed`, not a local reimplementation of it. This entry
+        // point used to parse the text and then build the ligand itself, which
+        // meant `Ligand.from_pdbqt(path)` and `Ligand.from_pdbqt_str(text)`
+        // had separate notions of what a valid ligand is -- and the text path is
+        // the one a caller is most likely to use on a string it just fetched
+        // or generated. It now goes through the same constructor, so the
+        // refusal a file gets for declaring rotatable bonds the engine cannot
+        // build cannot be stepped around by reading the same bytes as text.
         let parsed: ParsedStructure = parse_pdbqt(text).map_err(to_py_err)?;
-        let torsions = parsed.active_torsion_pairs();
         Ok(PyLigand {
-            inner: Arc::new(
-                Ligand::from_molecule_with(parsed.molecule, &torsions).map_err(to_py_err)?,
-            ),
+            inner: Arc::new(Ligand::from_parsed(parsed).map_err(to_py_err)?),
         })
     }
 
@@ -411,29 +439,27 @@ impl PyLigand {
             atoms.push(atom);
         }
 
-        let mut mol = Molecule::from_atoms(atoms).map_err(to_py_err)?;
-        if let Some(pairs) = bonds {
-            // The caller's graph *replaces* the distance-perceived one. Appending
-            // it instead would leave every bond twice, and a duplicated
-            // rotatable bond makes the cluster graph cyclic — which then breaks
-            // the invariant that one torsion owns exactly one child cluster.
-            mol.bonds.clear();
-            mol.neighbors = vec![Vec::new(); n];
-            for (i, j) in pairs {
-                if i < n && j < n && i != j {
-                    if mol.neighbors[i].contains(&j) {
-                        continue; // the same bond twice in the caller's table
-                    }
-                    mol.bonds.push(dock_core::types::Bond::new(i, j));
-                    mol.neighbors[i].push(j);
-                    mol.neighbors[j].push(i);
-                }
-            }
-            // Ring membership drives rotatable-bond perception, so recompute it
-            // now that the graph is final.
-            mol.assign_ring_membership().map_err(to_py_err)?;
-        }
-        mol.assign_vina_atom_kinds();
+        // `Molecule::from_bonds`, not an inline `if i < n && j < n && i != j`
+        // around a `bonds.clear()`. That guard used to *drop* a bond it
+        // rejected, and a dropped bond is a different molecule rather than a
+        // missing result: the two atoms stop being neighbours, rotatable-bond
+        // perception loses a torsion, ring membership loses a ring, and every
+        // number that comes back is finite and plausible. The constructor
+        // refuses the same inputs instead, and it is the one definition of the
+        // rule -- `Molecule`'s fields are private, so this binding cannot edit
+        // the graph even if it wanted to.
+        let mol = match bonds {
+            // The caller's graph *replaces* the distance-perceived one.
+            // Appending would leave every bond twice, and a duplicated
+            // rotatable bond makes the cluster graph cyclic -- which then
+            // breaks the invariant that one torsion owns exactly one child
+            // cluster.
+            Some(pairs) => Molecule::from_bonds(atoms, &pairs).map_err(to_py_err)?,
+            None => Molecule::from_atoms(atoms).map_err(to_py_err)?,
+        };
+        // No trailing `assign_vina_atom_kinds()`: both constructors assign the
+        // kinds themselves, and re-deriving them here is a second place for the
+        // rule to drift from the constructors'.
         Ok(PyLigand {
             inner: Arc::new(Ligand::from_molecule(mol).map_err(to_py_err)?),
         })
@@ -468,7 +494,7 @@ impl PyLigand {
     fn atom_kinds(&self) -> Vec<String> {
         self.inner
             .molecule
-            .atoms
+            .atoms()
             .iter()
             .map(|a| format!("{:?}", a.kind).to_lowercase())
             .collect()
@@ -479,7 +505,7 @@ impl PyLigand {
         let flat: Vec<f64> = self
             .inner
             .molecule
-            .atoms
+            .atoms()
             .iter()
             .flat_map(|a| a.coord)
             .collect();
@@ -590,6 +616,53 @@ impl PyDockingResults {
         self.result.rejected_pose_count
     }
 
+    /// Receptor atoms whose PDBQT type this engine does not recognise.
+    ///
+    /// Non-zero means the run is real and the *energies are understated*: an
+    /// unrecognised type still contributes its shape term and silently loses
+    /// its hydrogen-bond and hydrophobic character, and no pose count shows
+    /// that. It is reported rather than refused, because another tool may emit
+    /// type names AutoDock never defined.
+    ///
+    /// It is here, and not only on `Receptor`, because the receptor is gone by
+    /// the time a result exists — precalculate, drop the receptor, hold maps,
+    /// dock. A result that carries no such count is indistinguishable from a
+    /// clean one, which is the state this field exists to end. Read it the same
+    /// way as `rejected_pose_count`: both are "the search did not do quite
+    /// what you asked", from opposite ends.
+    #[getter]
+    fn unknown_atom_types(&self) -> usize {
+        self.result.unknown_atom_types
+    }
+
+    /// Reported poses with no atom at all inside the search box.
+    ///
+    /// A pose with one atom inside the box scored a real interaction with the
+    /// receptor. A pose with none scored only the ligand's own internal energy
+    /// plus the out-of-box penalty, and is ranked beside poses that did bind —
+    /// so a result can be complete, ranked, timed and `rc=0` while describing
+    /// no binding mode at all. Counting whole poses is what makes the number
+    /// mean one thing: how much of this result is not a binding mode.
+    ///
+    /// Read it against `num_poses`. Equal to it means every pose reported is
+    /// wholly outside the box.
+    ///
+    /// It is a count taken by the same loop that charges the out-of-box penalty,
+    /// compared against each pose's own atom count — two integers the engine
+    /// already had. There is no tolerance to choose and no energy to threshold,
+    /// so the number cannot be tuned into appearing or into disappearing.
+    ///
+    /// Reported, not refused: the search ran, the poses are physically
+    /// consistent, and an out-of-box pose is charged 1000 kcal/mol per ångström
+    /// of overhang, so the table already shows the result is worthless. What
+    /// this adds is that the table does not have to be *read* to notice. The
+    /// refusal belongs one step earlier, on a box that misses the receptor
+    /// entirely, where every map is identically zero.
+    #[getter]
+    fn poses_outside_box_count(&self) -> usize {
+        self.result.poses_outside_box_count
+    }
+
     /// Name of the scoring function used.
     #[getter]
     fn scoring_function(&self) -> String {
@@ -697,7 +770,7 @@ impl PyDockingResults {
                 pose.rmsd.unwrap_or(0.0)
             )
             .map_err(to_py_err)?;
-            for (atom, c) in self.ligand.molecule.atoms.iter().zip(pose.coords.iter()) {
+            for (atom, c) in self.ligand.molecule.atoms().iter().zip(pose.coords.iter()) {
                 writeln!(
                     w,
                     "{:<3} {:>10.4} {:>10.4} {:>10.4}",
@@ -730,7 +803,9 @@ impl PyDockingResults {
 ///
 /// `exhaustiveness` is the number of independent search walks (AutoDock's
 /// `--exhaustiveness`); higher finds better poses and costs proportionally
-/// more. `mode` is `"mc"`, `"lga"` or `"both"`.
+/// more. `mode` is `"mc"`, `"lga"` or `"both"`. `min_contact_distance` is the
+/// ligand-receptor separation floor in ångström; `None` leaves the engine
+/// default (`MIN_CONTACT_DISTANCE`, 2.0) and `0.0` disables the filter.
 #[pyfunction(name = "dock")]
 #[pyo3(signature = (
     ligand,
@@ -742,6 +817,7 @@ impl PyDockingResults {
     mode = "mc".to_string(),
     scoring = None,
     steps = None,
+    min_contact_distance = None,
 ))]
 #[allow(clippy::too_many_arguments)]
 fn dock_py(
@@ -754,6 +830,7 @@ fn dock_py(
     mode: String,
     scoring: Option<String>,
     steps: Option<u32>,
+    min_contact_distance: Option<f64>,
 ) -> PyResult<PyDockingResults> {
     let sc = match scoring {
         Some(name) => scoring_from_name(&name)?,
@@ -783,6 +860,14 @@ fn dock_py(
     config.lga.seed = seed;
     if let Some(s) = steps {
         config.monte_carlo.steps = s;
+    }
+    if let Some(d) = min_contact_distance {
+        // `DockingConfig::min_contact_distance` is read by `dock()` itself, in
+        // the clash partition, and `0.0` is its documented way to disable the
+        // filter -- so the value is forwarded rather than validated here. A
+        // negative floor would reject every pose, which is the caller's
+        // statement to make, not something this binding should second-guess.
+        config.min_contact_distance = d;
     }
 
     let result = dock(&ligand.inner, &maps.inner, &sc, &config).map_err(to_py_err)?;
@@ -1058,7 +1143,7 @@ fn score_terms<'py>(
     let masks: Vec<[bool; dock_core::scoring::TERM_FIELDS]> = ligand
         .inner
         .molecule
-        .atoms
+        .atoms()
         .iter()
         .map(probe_term_mask)
         .collect();
@@ -1186,6 +1271,25 @@ fn gpu_compiled() -> bool {
     cfg!(feature = "gpu")
 }
 
+/// Threads in rayon's global pool, which is the pool the search runs on.
+///
+/// Not `os.cpu_count()`. The two differ whenever `RAYON_NUM_THREADS` is set,
+/// and the search's wall time follows *this* number: a measured crambin/biotin
+/// run takes 0.436 s on 16 threads and 8.680 s on 1, with bit-identical
+/// energies. A caller reporting the machine's core count while the engine runs
+/// on one thread is reporting a number that is simply false.
+///
+/// Read from the pool rather than from the environment, so it is whatever the
+/// pool was actually built with. Rayon reads `RAYON_NUM_THREADS` when the
+/// global pool is first initialised, so setting the variable after import has
+/// no effect on this number -- which is the honest answer, and is why the
+/// check in `scripts/core_check.py` re-reads it in a subprocess with the
+/// variable set before the interpreter starts.
+#[pyfunction]
+fn rayon_threads() -> usize {
+    rayon::current_num_threads()
+}
+
 /// World-space coordinates of a conformation.
 ///
 /// Forward kinematics turns the degree-of-freedom vector into Cartesian
@@ -1239,6 +1343,7 @@ fn _dockpy(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(conformation_coordinates, m)?)?;
     m.add_function(wrap_pyfunction!(gpu_available, m)?)?;
     m.add_function(wrap_pyfunction!(gpu_compiled, m)?)?;
+    m.add_function(wrap_pyfunction!(rayon_threads, m)?)?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())
 }

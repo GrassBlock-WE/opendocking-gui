@@ -13,7 +13,7 @@ The guards are reverse-verified: loosening the criteria has to change the
 answer, and tightening them has to be able to empty it. A filter that returns
 the same thing no matter what you set is indistinguishable from no filter.
 
-Run:  python scripts/contacts_check.py
+Run:  python scripts/contacts_criteria_check.py
 """
 
 from __future__ import annotations
@@ -49,6 +49,40 @@ CRAMBIN_POSE = ROOT / "examples" / "crambin_pose.pdbqt"
 
 FAILURES: list[str] = []
 CHECKS = 0
+
+#: How many checks this file records, **counted from a run and not derived from
+#: the source above**.
+#:
+#: `F:\python310\python.exe scripts\contacts_criteria_check.py` with
+#: `PYTHONIOENCODING=utf-8` and `PYTHONPATH=dock-py\python`: **`39/39 passed`,
+#: exit 0**, in 0.4 s. The pin is that run's 39 plus the tally check below, so
+#: 40, and the run that has to agree with the pin is the *second* run rather
+#: than the one the 39 came from.
+#:
+#: **Read `EXPECTED_CHECKS = 40` against the site count and it looks like a
+#: coincidence; it is the opposite, and the number is a trap either way.** This
+#: file had 40 `check()` call sites and ran 39 of them, and adding the tally
+#: check takes the sites to 41 while the run goes to 40. So the pin is *not* the
+#: census, it is one below it, and a reader who checks the constant against a
+#: walk of the syntax tree will find them off by one in the direction that
+#: matters. `check_scripts_declare.py` reports this file as `18 unconditional +
+#: 22 guarded` for exactly this reason: 22 of the 41 sites are inside a branch.
+#: If these two numbers are ever brought into agreement by editing the census,
+#: one of them is wrong and it will not be the census that notices.
+#:
+#: **The count is conditional, and saying so is part of pinning it.** 39 holds
+#: for a tree where `examples/1crn_prep.pdbqt` and `examples/crambin_pose.pdbqt`
+#: both exist, because section 8 picks between one `check()` for the missing
+#: fixture and eighteen for the real crambin run. The other three conditionals
+#: are `if found:` in sections 1 and 6 (six sites) and `if
+#: kinds.get("hbond"):` at the end of section 9 (one site), all of which are
+#: about the data under test rather than about the machine. A run that takes a
+#: different branch records a different number, and the tally check goes red
+#: and says so -- which is the correct outcome rather than a nuisance: a run
+#: that measured 22 checks has not measured what this file says it measures, and
+#: the fix is to make the fixtures present, never to widen this constant to
+#: cover the shortfall.
+EXPECTED_CHECKS = 40
 
 
 def check(name, ok, detail=""):
@@ -279,7 +313,22 @@ def main() -> int:
             check("a residue with a hydrogen bond is ranked first",
                   summary[0][1] > 0, f"top is {summary[0][0]} with {summary[0][1]}")
 
-    print(f"\n{CHECKS - len(FAILURES)}/{CHECKS} passed")
+    # The pin, asserted on the way out rather than only in the declaration. The
+    # `+ 1` is this check, which has not been counted yet when the comparison is
+    # built.
+    #
+    # Deliberately **outside** the `if CRAMBIN.is_file()` branch above: a run
+    # that took the missing-fixture branch has measured 22 checks, and that run
+    # is exactly the one that has to be caught here rather than skipping the
+    # assertion that would catch it. This is the opposite choice from
+    # `cli_prep_check.py` and `prep_check.py`, which both return early and leave
+    # the tally unasserted, and the difference is what each early return already
+    # reports: a fixture that is absent is a red on its own check.
+    check("this file's own count is the count it declares",
+          CHECKS + 1 == EXPECTED_CHECKS,
+          f"{CHECKS} ran before this one and {EXPECTED_CHECKS} are declared")
+
+    print(f"\n{CHECKS - len(FAILURES)}/{CHECKS} passed (expected {EXPECTED_CHECKS})")
     for f in FAILURES:
         print(f"  FAILED: {f}")
     return 1 if FAILURES else 0

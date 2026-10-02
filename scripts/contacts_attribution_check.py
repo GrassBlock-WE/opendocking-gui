@@ -1,6 +1,6 @@
 """What the contact analysis is attributed to, and what it does not say.
 
-`contacts_check.py` checks the *criteria*: a synthetic hydrogen bond built to a
+`contacts_criteria_check.py` checks the *criteria*: a synthetic hydrogen bond built to a
 known geometry, moved one degree and one ångström at a time across each
 threshold, and a pose translated 400 Å away to prove the filter can empty
 itself. That is the right thing to check and it is checked well.
@@ -34,7 +34,7 @@ attribution and invariance rather than about cut-offs:
   made, so it is pinned here rather than left to be over-read.
 
 Nothing here needs a docking run or a fixture file: every case is synthetic
-and exact. Run:  python scripts/contacts_check2.py
+and exact. Run:  python scripts/contacts_attribution_check.py
 """
 
 from __future__ import annotations
@@ -58,6 +58,36 @@ from opendocking.workbench import structure as S  # noqa: E402
 
 FAILURES: list[str] = []
 CHECKS = 0
+
+#: How many checks this file records, **counted by running this file** and not
+#: derived from the source above.
+#:
+#: `F:\python310\python.exe scripts\contacts_attribution_check.py` with
+#: `PYTHONIOENCODING=utf-8` and `PYTHONPATH=dock-py\python`: **`18 checks
+#: passed`, exit 0**, in 0.4 s. The pin is that run's 18 plus the tally check
+#: below, so 19, and the run that has to agree with the pin is the *second* run
+#: rather than the one the 18 came from.
+#:
+#: **18 is not the number of `check()` sites, and the difference is the whole
+#: reason this note exists.** This file has 16 call sites and runs 18 checks,
+#: because two of the sites sit in `for` loops: one over the two
+#: donate-directions in section 2, one over the `("UNL", "REC")` placeholder
+#: family in section 4. A pin copied from a site census would be 16 and would be
+#: wrong by two, and a census-derived pin is the specific mistake this constant
+#: is here to avoid -- so the two numbers are stated separately and the pin is
+#: the run's.
+#:
+#: **Why 18 is stable rather than merely observed, which is the part that makes
+#: it safe to pin.** Both loops iterate over literal tuples written above them,
+#: so their multipliers are 2 and 2 no matter what the module under test
+#: returns. Nothing else in this file counts anything: every `find_contacts`
+#: result is consumed as a verdict inside a `check(...)` call and never as a
+#: loop bound or a slice, and the file's own docstring says why that is
+#: possible -- every case here is synthetic and exact, so no fixture file and no
+#: docking run stands between the source and the number. The two shapes that
+#: would move it are both edits: a site added or deleted, or a loop given a
+#: length that comes from data.
+EXPECTED_CHECKS = 19
 
 
 def check(name, ok, detail=""):
@@ -85,7 +115,7 @@ def build(rows, names=None, residues=None):
 
     `names` and `residues` are what a parsed file would carry; left out, the
     view has no structure and every label is `""`, which is the state the
-    synthetic fixtures in `contacts_check.py` are already in.
+    synthetic fixtures in `contacts_criteria_check.py` are already in.
     """
     coords = np.asarray([(r[1], r[2], r[3]) for r in rows], np.float32).reshape(-1, 3)
     elements = [r[0] for r in rows]
@@ -114,7 +144,7 @@ def build(rows, names=None, residues=None):
 def hbond_at(angle_deg=180.0, h_to_a=1.8, receptor_name="O", receptor_residue=None):
     """Donor O, its H 1.0 A along +x, and an acceptor at a chosen geometry.
 
-    Mirrors the helper in `contacts_check.py` so the two files build the same
+    Mirrors the helper in `contacts_criteria_check.py` so the two files build the same
     geometry and a change to one is visible against the other.
     """
     phi = math.radians(angle_deg)
@@ -442,11 +472,19 @@ def main() -> int:
         f"depends on where the scene is put",
     )
 
+    # The pin, asserted on the way out rather than only in the declaration. The
+    # `+ 1` is this check, which has not been counted yet when the comparison is
+    # built, and it is placed before the failure report so a wrong tally is
+    # reported as a failed check rather than only as a number in the summary.
+    check("this file's own count is the count it declares",
+          CHECKS + 1 == EXPECTED_CHECKS,
+          f"{CHECKS} ran before this one and {EXPECTED_CHECKS} are declared")
+
     print()
     if FAILURES:
         print(f"{len(FAILURES)} check(s) failed: {FAILURES}")
         return 1
-    print(f"{CHECKS} checks passed")
+    print(f"{CHECKS} checks passed (expected {EXPECTED_CHECKS})")
     return 0
 
 

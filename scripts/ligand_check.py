@@ -72,6 +72,52 @@ CHECKS = 0
 #: two N.
 LIGANDS = ("ibuprofen", "benzene", "phenol", "salbutamol", "biotin")
 
+#: How many checks this file records, **counted by running this file** and not
+#: derived from the source above.
+#:
+#: `F:\python310\python.exe scripts\ligand_check.py` with
+#: `PYTHONIOENCODING=utf-8` and `PYTHONPATH=dock-py\python`: **`106/106 passed`,
+#: exit 0**, in 0.8 s. The pin is that run's 106 plus the tally check below, so
+#: 107, and the run that has to agree with the pin is the *second* run rather
+#: than the one the 106 came from.
+#:
+#: **57 call sites produce 106 checks, and here the two reconcile exactly**, so
+#: the derivation is given rather than asserted:
+#:
+#:   * the `for name in LIGANDS` loop holds 15 sites and runs **11** of them
+#:     per ligand, five times: 55. The four it does not run are the two
+#:     failure arms -- a missing `.sdf` and a `prepare()` that crashed -- plus
+#:     the two mutually exclusive halves of the golden-reference check.
+#:   * 37 sites sit outside any loop and run once each: 37.
+#:   * the atom-type `cases` table is 12 entries from one site: 12.
+#:   * the two `try:`/`except` pairs around `load_molecule` contribute one
+#:     check each, not two, because only one arm of each pair runs: 2.
+#:
+#: 55 + 37 + 12 + 2 = 106, which is the run. The census that
+#: `check_scripts_declare.py` reports for this file is 37 unconditional + 20
+#: guarded, and it measures the other question -- "could this site stop
+#: running" rather than "how many checks will the report" -- so the two numbers
+#: are both correct and neither is the pin.
+#:
+#: **The golden-reference branch is balanced, and that is why this pin does not
+#: move when a reference file is missing.** The `if ref.exists():` arm and the
+#: `else:` arm each hold exactly one site, so a missing
+#: `examples/<name>_prep.pdbqt` swaps which check runs without changing how many
+#: run: the run stays at 107 and goes red on
+#: `<name>: reproduces the checked-in ... atom for atom` instead. That was the
+#: point of the `else` arm -- before it the check vanished and only the printed
+#: count moved -- and it is the one branch in this file whose firing or not
+#: firing is invisible in the total.
+#:
+#: **The three branches that *do* move the count all move it on a red.** A
+#: missing example `.sdf` gives that ligand 1 check instead of 11, and a
+#: `prepare()` that crashes gives it 2; either way the run is already red on
+#: the check that says why, and the tally then adds a second red naming the
+#: shortfall. Reading that second red as "the constant needs widening" is the
+#: mistake this note exists to prevent: the cause is in the failures list, one
+#: line above.
+EXPECTED_CHECKS = 107
+
 
 def check(name, ok, detail=""):
     global CHECKS
@@ -87,7 +133,7 @@ def section(t):
 
 
 def finish() -> int:
-    print(f"\n{CHECKS - len(FAILURES)}/{CHECKS} passed")
+    print(f"\n{CHECKS - len(FAILURES)}/{CHECKS} passed (expected {EXPECTED_CHECKS})")
     for f in FAILURES:
         print(f"  FAILED: {f}")
     return 1 if FAILURES else 0
@@ -257,6 +303,18 @@ def main() -> int:
                   atom_lines(p.text) == want,
                   f"{len(atom_lines(p.text))} produced against {len(want)} in the "
                   f"reference")
+        else:
+            # Recorded, and recorded as a **failure**, because this file has no
+            # skip vocabulary and inventing one here would be a larger change than
+            # the defect deserves. A gate whose golden reference has gone cannot
+            # verify the one thing this section exists to verify, so the run has
+            # to say so in the exit status rather than in a smaller total. Before
+            # this `else` the check vanished: only the printed count moved, and
+            # nothing named the file that was missing.
+            check(f"{name}: reproduces the checked-in {ref.name} atom for atom",
+                  False,
+                  f"the golden reference is not present at {ref}, so nothing was "
+                  f"compared")
         check(f"{name}: every PDBQT record is 79 columns and typed from its name",
               all(len(l) == 79 for l in atom_lines(p.text))
               and all(l[77:79].strip() == p.names[i].split("_")[0]
@@ -641,6 +699,16 @@ def main() -> int:
           and not bonds_sane([(3, 1)], merged.n)
           and not bonds_sane([(0, 1), (0, 1)], merged.n),
           "an index past the end, a reversed bond, and a repeated one")
+
+    # The pin, asserted on the way out rather than only in the declaration. The
+    # `+ 1` is this check, which has not been counted yet when the comparison is
+    # built. It is inside `main` and outside every loop, so it runs once on every
+    # path that reaches the end -- including the ones where a loop above ran
+    # fewer times, which is exactly when the total has moved and this has to
+    # notice.
+    check("this file's own count is the count it declares",
+          CHECKS + 1 == EXPECTED_CHECKS,
+          f"{CHECKS} ran before this one and {EXPECTED_CHECKS} are declared")
 
     return finish()
 

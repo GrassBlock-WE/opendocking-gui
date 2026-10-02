@@ -2,7 +2,15 @@
 # Windows 11 / rustc 1.98.1 / Python 3.10 before it was written here; see
 # docs/VERIFICATION.md.
 #
-# Three jobs, each named after what it actually verifies, because a job whose
+# The bash those commands were validated under, stated because "bash" is
+# ambiguous on this machine. All 51 `run:` blocks pass `bash -n` under GNU bash
+# 5.2.37 at `C:\Program Files\Git\bin\bash.exe`. The `bash` on `PATH` here is
+# `C:\WINDOWS\system32\bash.exe`, the WSL launcher, and it fails all 51 blocks
+# spuriously. On the `windows-latest` runner `bash` is Git bash and resolves
+# normally, so this note is about reproducing the local validation rather than
+# about the CI image.
+#
+# Four jobs, each named after what it actually verifies, because a job whose
 # name promises more than it pins is how a suite goes dark without anybody
 # noticing:
 #
@@ -11,6 +19,12 @@
 #                         deliberately installed no GUI extras.
 #   python check suite -- the audit scripts under `scripts/`. No display is
 #                         used and none is needed.
+#   documentation      -- the gates that hold the prose to the source: what the
+#                         documents claim, that every citation they make still
+#                         resolves, and that no file has been silently
+#                         re-encoded underneath the tree. This job was missing
+#                         from this list while it existed and ran, which is the
+#                         same failure the list is here to prevent.
 #   workbench          -- everything that needs a real Qt OpenGL widget.
 #
 # **What this file used to get wrong**, measured on runs 36823282397 and
@@ -121,19 +135,45 @@ jobs:
         run: cargo test --workspace --locked ${{ matrix.cargo }}
 
       # What four times the search budget actually buys. `cargo test` above
-      # cannot run this target: it sits behind a *named* feature, so the opt-in
-      # is the word "convergence-budget" and it is spelled out here. That is the
-      # point -- an `#[ignore]`d test would have kept the cost at zero and the
-      # count honest-looking, and nothing would have gone red when it stopped
-      # running. Deleting this step is a visible deletion, not a silent change
-      # of behaviour. Release profile, because the same target costs 419 s
-      # unoptimised and about 9 s optimised; the measurement is the product, not
-      # the wall clock.
+      # cannot run these targets: each sits behind a *named* feature, so the
+      # opt-in is the word "convergence-budget" and it is spelled out here.
+      # That is the point -- an `#[ignore]`d test would have kept the cost at
+      # zero and the count honest-looking, and nothing would have gone red when
+      # it stopped running. Deleting this step is a visible deletion, not a
+      # silent change of behaviour.
+      #
+      # Two targets are named, one per step. `--test <name>` selects exactly one
+      # target, so a second target registered under the *same* feature is not
+      # reached by naming the first: it would sit in `tests/` and in Cargo.toml
+      # and never execute, which is the same shape as the forgotten Python gates
+      # recorded below -- present enough to satisfy an inventory, guarding
+      # nothing. Each step names one target on purpose, so that adding a third
+      # has to be a visible addition here rather than an inherited accident.
+      #
+      # Release profile: these run real searches, so the measurement is the
+      # product, not the wall clock. The previous "419 s unoptimised / 9 s
+      # optimised" figures in this comment were inherited text that nobody had
+      # ever re-measured; they are replaced by figures that were measured, on
+      # an AMD Ryzen 7 7735H whose load at the start of each measurement is
+      # recorded with the number, so they are an upper bound and not a CI
+      # expectation:
+      #   convergence_budget    27.3 s test / 28.9 s warm wall
+      #   budget_monotonicity  22.3 s test / 23.0 s warm wall
+      # An earlier revision of this comment quoted 35.0 s for the first and it
+      # did not reproduce across four runs; the test time moved and the wall
+      # time did not, so only the wall figure is quoted here now. Debug-profile
+      # cost is still not measured, so no debug figure is claimed.
       - name: What a larger search budget buys (named feature, release profile)
         run: >-
           cargo test --locked --release
           --features ${{ matrix.all_features }}
           --test convergence_budget
+
+      - name: Does a larger budget reliably buy a better pose (named feature, release profile)
+        run: >-
+          cargo test --locked --release
+          --features ${{ matrix.all_features }}
+          --test budget_monotonicity
 
       # Zero tolerance, in both feature configurations. The matrix already
       # covers that; a separate job would just duplicate it.
@@ -341,15 +381,64 @@ jobs:
         run: python scripts/release_tree_parity_check.py
 
       # The meta-checks go first, and on purpose: `check_scripts_declare.py`
-      # audits every other script's declared count, and `docs_claims_check.py`
-      # scores the prose against the code. Running them last would mean a
-      # failure in a suite is reported without knowing whether the suite's own
-      # bookkeeping is the thing that broke.
+      # audits every other script's declared count, `docs_claims_check.py`
+      # scores the prose against the code, `check_counted_constants.py` looks
+      # for typed numbers whose only remaining power is to change a sentence,
+      # and `clearing_paths_check.py` drives `--pin` as a subprocess against a
+      # private copy of `scripts/` and asserts what it does. Running them last
+      # would mean a failure in a suite is reported without knowing whether the
+      # suite's own bookkeeping is the thing that broke. A detector that goes
+      # red because the trees are moving is the detector working; it is not
+      # grounds for `continue-on-error`, which is the one thing in this workflow
+      # that could hide a result.
+      #
+      # The condition is `!cancelled()` and deliberately NOT
+      # `steps.wheel.outcome == 'success'`. None of these four reads the built
+      # wheel or the installed package: they read source, and the harness's
+      # subject is pure stdlib. Gating them on the wheel means a failed wheel
+      # build silently hides four audit results — which is the same class of
+      # failure as a check that reports nothing, and worse, because the run
+      # looks clean. The cost of dropping the condition is that these run even
+      # when the extension did not build, which is the correct trade: an audit
+      # of the tree is still worth having when the artefact is broken.
       - name: The audit scripts' own bookkeeping and the documents
-        if: ${{ !cancelled() && steps.wheel.outcome == 'success' }}
+        if: ${{ !cancelled() }}
         run: |
           python scripts/check_scripts_declare.py
           python scripts/docs_claims_check.py
+          python scripts/check_counted_constants.py
+
+      # Two more audits over the tree, same trade as the step above: no wheel, no
+      # display, pure stdlib, so they are worth having when the artefact is broken.
+      #
+      # `check_verdict_bool.py` sweeps every check-like call site in `scripts/`
+      # and rejects a verdict that is not a bool. It exists because a slot that
+      # returned `(not moved, "")` -- truthy whatever the bool inside it says --
+      # took the passing branch on every run, forever, and survived a green 13-of-13.
+      # It carries its own probe: it splices a real gate's verdict into a tuple
+      # and asserts this sweep reports that one site. A gate that cannot report a
+      # non-bool would report a clean tree there too, which is the same
+      # green-with-nothing-under-it it was written to end.
+      #
+      # `unreached_product_check.py` asks, for every function in the installed
+      # package, whether any *product* module calls it. Being called only from
+      # `scripts/`, `examples/`, tests, or its own module does not count. Its
+      # subject is not dead code -- dead code that says so is harmless -- it is
+      # product code whose documentation reads as enforcement that is absent.
+      - name: Verdict shapes, and product code nothing reaches
+        if: ${{ !cancelled() }}
+        run: |
+          python scripts/check_verdict_bool.py
+          python scripts/unreached_product_check.py
+
+      # Deliberately its own step. This one runs the real `--pin` repeatedly
+      # against sandbox copies, so it costs 6-7.5 minutes; the three above cost
+      # seconds. A slow check that gates a fast one turns a two-minute failure
+      # into a ten-minute failure, and the incentive that creates is to skip it.
+      - name: The sanctioned ways of clearing a red, exercised rather than described
+        if: ${{ !cancelled() }}
+        run: |
+          python scripts/clearing_paths_check.py
 
       - name: Engine binding surface
         # 38 pytest cases covered this module, and between them they missed a
@@ -365,6 +454,45 @@ jobs:
         if: ${{ !cancelled() && steps.wheel.outcome == 'success' }}
         run: python scripts/core_check.py
 
+      - name: The built extension is the one this source declares
+        # The gate that would have caught the day `odcli dock -o` exited 1 with
+        # `AttributeError: 'DockingResults' object has no attribute
+        # 'unknown_atom_types'` while `--json` on the same command returned three
+        # healthy poses. `extension_surface_check.py` cannot see it: that gate
+        # compares the names `core.py` calls *on the module*, and the name that
+        # broke is reached as an attribute on a returned instance, which
+        # `dir(ext)` does not contain.
+        #
+        # **Why this step is not green by construction, which is the usual
+        # objection to a binary check in CI.** A runner has no `_dockpy.pyd` in
+        # the checkout -- `.gitignore` line 17 is `*_dockpy.pyd`, so git has
+        # never tracked one -- so run bare this file would skip all five
+        # binary-dependent checks and measure nothing while reporting success.
+        # It is pointed at the extension *inside the wheel this job just built*,
+        # which is a real build from this job's source, and a mismatch is a
+        # genuine defect: a stale cargo cache, a build that picked up a different
+        # source, a wheel assembled from the wrong tree. The comparison is of
+        # declared names, not bytes, so a correct rebuild under a different
+        # toolchain is green rather than red.
+        if: ${{ !cancelled() && steps.wheel.outcome == 'success' }}
+        run: |
+          wheel="$(ls -t dist/*.whl | head -1)"
+          python - "$wheel" <<'PY'
+          import sys, zipfile, pathlib
+          out = pathlib.Path("dist/_extracted")
+          out.mkdir(parents=True, exist_ok=True)
+          with zipfile.ZipFile(sys.argv[1]) as z:
+              name = [n for n in z.namelist() if n.endswith("_dockpy.so")
+                      or n.endswith("_dockpy.pyd")]
+              if not name:
+                  raise SystemExit(f"no compiled extension inside {sys.argv[1]}")
+              target = out / pathlib.PurePosixPath(name[0]).name
+              target.write_bytes(z.read(name[0]))
+              print(target)
+          PY
+          OD_BINARY_SOURCE_PYD="$(ls dist/_extracted/_dockpy.* | head -1)" \
+            python scripts/binary_source_parity_check.py
+
       - name: Pose/receptor interaction criteria
         # No display needed, and it has to be a gate rather than a note: the
         # hydrogen-bond thresholds were once accepted as arguments and then
@@ -372,8 +500,8 @@ jobs:
         # time and the answers did not change.
         if: ${{ !cancelled() && steps.wheel.outcome == 'success' }}
         run: |
-          python scripts/contacts_check.py
-          python scripts/contacts_check2.py
+          python scripts/contacts_criteria_check.py
+          python scripts/contacts_attribution_check.py
 
       - name: Scoring agrees across the two surfaces
         # The same pose, scored through the Python wrapper and through the Rust
@@ -503,10 +631,19 @@ jobs:
         with:
           python-version: "3.11"
 
-      # The Chinese documents are UTF-8. PowerShell 5.1 reads them as GBK and
-      # silently destroys them, so their integrity is checked on every push.
-      - name: Document encoding
-        run: python scripts/check_doc_encoding.py
+      # PowerShell 5.1 reads UTF-8 as GBK and silently destroys what it writes
+      # back, so encoding integrity is checked on every push. The scope was
+      # widened after the gate was found to be watching the one file type this
+      # repository has never damaged: it now reaches 161 files and judges 159 of
+      # them across 14 types, including the `.py` and `.rs` sources where the
+      # corruption actually happened. Reach and judged set are different counts
+      # and both are stated because conflating them produced a number here that
+      # no measurement supported; the two files that fall out are `Cargo.lock`
+      # (excluded suffix) and `dock-py/python/opendocking/_dockpy.pyd` (binary).
+      # It prints its own scope, because a gate whose coverage is invisible
+      # makes "0 damaged" a statement nobody can check.
+      - name: Text encoding across the source tree
+        run: python scripts/check_text_encoding.py
 
       - name: Links and local-path leakage
         run: python scripts/check_repo_docs.py
@@ -677,6 +814,39 @@ jobs:
           echo "widget=${widget}" >> "$GITHUB_OUTPUT"
           echo "raw=${raw}" >> "$GITHUB_OUTPUT"
           echo "route=${route}" >> "$GITHUB_OUTPUT"
+          # The screenshots are uploaded as an artifact and opened by people who
+          # never see this log, so the fact that decides whether they can read
+          # anything has to travel with the pictures themselves. Qt's `offscreen`
+          # platform plugin carries no font database: on such a route every glyph
+          # is an empty box while the geometry and the colours are perfectly
+          # faithful. An artifact of unreadable panels looks exactly like an
+          # artifact of panels, which is why this is written into the upload.
+          mkdir -p dist
+          {
+            echo "Qt route that produced the widget: ${route}"
+            echo "written at: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo ""
+            echo "CAN THESE PICTURES BE READ?"
+            # Three cases, not two. A two-way branch here would answer "yes" for
+            # route=none, which is the case where no picture was taken at all --
+            # the exact shape of a confidently wrong claim this file keeps
+            # refusing to ship.
+            if [ -z "${route}" ] || [ "${route}" = "none" ]; then
+              echo "Not applicable: no widget on this runner, so this run produced no"
+              echo "screenshots. If pictures are in this artifact anyway, they came"
+              echo "from somewhere that did not report a route."
+            elif [ "${route}" = "offscreen platform" ]; then
+              echo "No. This run's widget came up on Qt's offscreen platform, whose"
+              echo "plugin ships no font database, so every glyph drawn in these PNGs"
+              echo "is an empty rectangle. The geometry and the colours are real and"
+              echo "faithful; no wording, no number and no label in these images can"
+              echo "be read, and no claim about text may rest on them."
+            else
+              echo "Yes, as far as this route goes: the widget was realised on the"
+              echo "route named above rather than on offscreen, so a font database is"
+              echo "present and glyphs are drawn as glyphs."
+            fi
+          } > dist/shot_CAPTURE.txt
           if [ "$widget" -eq 1 ]; then
             echo "::notice::route '${route}' realised an OpenGL widget; the windowed steps will run"
           elif [ "$raw" -eq 1 ]; then
@@ -694,6 +864,16 @@ jobs:
           echo "OpenGL context on this runner:    ${{ steps.capability.outputs.raw == '1' && 'yes' || 'no' }}"
           echo "Qt OpenGL widget on this runner:   ${{ steps.capability.outputs.widget == '1' && 'yes' || 'no' }}"
           echo "route that produced a widget:      ${{ steps.capability.outputs.route || 'none' }}"
+          # Three cases, not two: a two-way test would print "yes" when no widget
+          # existed, which is the one answer that is certainly wrong.
+          _route='${{ steps.capability.outputs.route }}'
+          if [ -z "$_route" ] || [ "$_route" = "none" ]; then
+            echo "screenshots carry readable text:   n/a -- no widget, so no screenshots"
+          elif [ "$_route" = "offscreen platform" ]; then
+            echo "screenshots carry readable text:   NO -- offscreen has no font database"
+          else
+            echo "screenshots carry readable text:   yes, on the route named above"
+          fi
           echo
           echo "Verified without a widget: the GUI-stack audit, the workbench interaction"
           echo "and framing suites, and the two shader-level smoke levels."
@@ -704,13 +884,21 @@ jobs:
             echo "                                   That is a limit of the runner, not a pass."
           fi
 
-      # This one prints which routes obtain a context and *always* exits 0, on
-      # purpose: it attributes a failure to Qt's own widget or to the product,
-      # which the ladder above deliberately does not distinguish -- it only
-      # decides. It is named accordingly so that a green tick here is never read
-      # as "OpenGL was verified".
-      - name: OpenGL route attribution (informer -- never fails)
+      # This one prints which routes obtain a context and its exit code is a
+      # **function of its verdict**, with four reachable states: 0 PASS, 2
+      # NO_CONTEXT, 4 INCONCLUSIVE (it could not measure), 3 DEFECT (its own
+      # checks failed). It used to return 0 on every path, which meant the one
+      # failure it exists to detect -- a context that never comes up -- was
+      # reported as success. A green tick here is now "the contexts came up".
+      #
+      # `continue-on-error` is deliberate and is the other half of the fix: a
+      # fact about the runner's GL stack must not cancel the thirteen audits
+      # after this step, so the verdict is recorded and readable rather than
+      # allowed to stop the run. What it will never do again is report a
+      # machine fact as a pass.
+      - name: OpenGL route attribution (machine fact; may not block the run)
         if: ${{ !cancelled() && steps.capability.outcome == 'success' }}
+        continue-on-error: true
         run: xvfb-run -a -s "-screen 0 1280x1024x24" python scripts/qt_gl_probe.py
 
       # A fourth question, asked after the capability report and the route
@@ -767,6 +955,126 @@ jobs:
           QT_QPA_PLATFORM: xcb
         run: xvfb-run -a -s "-screen 0 1280x1024x24" python scripts/workbench_smoke.py
 
+      # Eight registered gates that nothing in this workflow executed until now.
+      # They were not excluded on purpose -- no file in the repository records a
+      # reason for leaving any of them out -- so the honest description is that
+      # they were forgotten, and a forgotten gate is one that satisfies every
+      # declaration check while guarding nothing.
+      #
+      # Two of them are the only things standing behind numbers the
+      # documentation pins: `framing_selection_check.py` is the sole producer
+      # of the 27 that `docs/VERIFICATION.md` quotes, and `wheel_payload_check.py`
+      # is what catches a wheel that quietly stops carrying a module the product
+      # imports.
+      #
+      # `installed_copy_check.py` was excluded here at first and is now in. The
+      # reason it was excluded was that CI rebuilds and reinstalls in every job,
+      # so it compared a freshly built copy with the tree and went green over a
+      # tautology -- worse than a gate that skips, because it pretends to be
+      # measuring. What changed is the tautology, not the reasoning: the gate
+      # now manufactures a deliberately stale copy on every invocation and
+      # requires its own predicate to refuse it, so the green beside it means
+      # the predicate can still tell old from current. The note at its own step
+      # carries that detail.
+      #
+      # The exclusion that survives in this workflow is
+      # `extension_surface_check.py`, and the note at its own step says why.
+      - name: "Pose trust: can the panel show one pose's numbers beside another's"
+        if: ${{ !cancelled() && steps.capability.outcome == 'success' }}
+        env:
+          LIBGL_ALWAYS_SOFTWARE: "1"
+          QT_QPA_PLATFORM: xcb
+        run: xvfb-run -a -s "-screen 0 1280x1024x24" python scripts/pose_trust_check.py
+
+      - name: "Energy terms: does the displayed sum equal the engine's own"
+        if: ${{ !cancelled() && steps.capability.outcome == 'success' }}
+        env:
+          LIBGL_ALWAYS_SOFTWARE: "1"
+          QT_QPA_PLATFORM: xcb
+        run: xvfb-run -a -s "-screen 0 1280x1024x24" python scripts/energy_terms_check.py
+
+      - name: Does selecting a pose actually put it on screen
+        if: ${{ !cancelled() && steps.capability.outcome == 'success' }}
+        env:
+          LIBGL_ALWAYS_SOFTWARE: "1"
+          QT_QPA_PLATFORM: xcb
+        run: xvfb-run -a -s "-screen 0 1280x1024x24" python scripts/framing_selection_check.py
+
+      - name: Do the representation names match the geometry they label
+        if: ${{ !cancelled() && steps.capability.outcome == 'success' }}
+        env:
+          LIBGL_ALWAYS_SOFTWARE: "1"
+          QT_QPA_PLATFORM: xcb
+        run: xvfb-run -a -s "-screen 0 1280x1024x24" python scripts/representation_names_check.py
+
+      - name: Torsion bond records, keyed by atom serial and round-tripping
+        if: ${{ !cancelled() && steps.capability.outcome == 'success' }}
+        run: python scripts/torsion_bond_record_check.py
+
+      - name: Does the built wheel carry every module the package has
+        if: ${{ !cancelled() && steps.capability.outcome == 'success' }}
+        run: python scripts/wheel_payload_check.py
+
+      # `installed_copy_check.py` was deliberately left out of this block two
+      # steps ago, and the reason given there was that it would compare a
+      # freshly built copy with the source and go green six times over a
+      # tautology. **The tautology is gone, not the reason.** The gate now builds
+      # a deliberately stale copy of the package on every invocation and
+      # requires its own predicate to refuse it, naming the module and the
+      # import a user would hit. So the green beside that self-test means
+      # something: it means this predicate can still tell old from current.
+      #
+      # `extension_surface_check.py` is deliberately *absent* from this workflow,
+      # which is the opposite call on the same reasoning: on a runner every job
+      # builds and installs from the same source, so a source/binary arity
+      # mismatch cannot arise there and a step would be green by construction.
+      # It runs as a local preflight, where the stale extension actually lives.
+      - name: Is the installed copy the one this tree ships (self-test included)
+        if: ${{ !cancelled() && steps.capability.outcome == 'success' }}
+        run: python scripts/installed_copy_check.py
+
+      # The complementary half of the step above, and the reason it is here
+      # rather than absent.
+      #
+      # `binary_source_parity_check.py` asks whether the `_dockpy.pyd` **in a
+      # tree** is the build of the `lib.rs` beside it. On a fresh checkout there
+      # is no such binary -- `.gitignore` line 17 is `*_dockpy.pyd` and git has
+      # never tracked one -- so on a runner that gate has no subject and records
+      # a counted skip. This one asks a different question: which `_dockpy.pyd`
+      # would Python **actually load right now**, and is that one the build of
+      # this tree's `lib.rs`. On a runner the answer is the installed copy, so
+      # this step covers exactly the case the other gate skips, and the two are
+      # complementary rather than redundant.
+      #
+      # What this step is *not*: the drift that gate was written for. A
+      # maintainer with a stale in-tree binary next to a current install, where
+      # `PYTHONPATH` silently decides which one a test run imports, cannot arise
+      # on a runner that builds and installs from one source. That is a local
+      # preflight condition, and the gate is meant to be run there too -- the
+      # same split `extension_surface_check.py` is given above, for the same
+      # reason.
+      - name: Is the binary Python would load the build of this tree
+        if: ${{ !cancelled() && steps.capability.outcome == 'success' }}
+        run: python scripts/extension_install_parity_check.py
+
+      - name: The gpu feature says what it did, or why it did not
+        # Every CI runner is a CPU-only build, and that is the machine this
+        # gate is written for: a build without the `gpu` feature reports "no
+        # GPU" whether or not the machine has a card, because gpu_compiled() is
+        # a compile-time constant and no adapter probe is ever constructed. The
+        # two rows that cannot run SKIP with that mechanism named, and a skip
+        # counts toward the pinned total, so this reads 11 on this runner and 11
+        # on a machine with an adapter -- the split moves, the total does not.
+        if: ${{ !cancelled() && steps.capability.outcome == 'success' }}
+        run: python scripts/gpu_feature_check.py
+
+      - name: Does the screen driver set still produce images rather than blanks
+        if: ${{ !cancelled() && steps.capability.outcome == 'success' }}
+        env:
+          LIBGL_ALWAYS_SOFTWARE: "1"
+          QT_QPA_PLATFORM: xcb
+        run: xvfb-run -a -s "-screen 0 1280x1024x24" python scripts/screenshot_frame_check.py
+
       - name: "Screenshot: contact geometry"
         if: ${{ !cancelled() && steps.capability.outcome == 'success' && steps.capability.outputs.widget == '1' }}
         env:
@@ -790,16 +1098,41 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: workbench-screenshots
-          path: dist/shot_*.png
+          # `shot_CAPTURE.txt` rides along with the pictures on purpose: it names
+          # the Qt route that produced them and, when that route is `offscreen`,
+          # states outright that the glyphs are boxes. An artifact whose pictures
+          # cannot be read is otherwise indistinguishable from one whose can.
+          path: |
+            dist/shot_*.png
+            dist/shot_CAPTURE.txt
           if-no-files-found: ignore
 
       - name: Real launch, then close
         if: ${{ !cancelled() && steps.capability.outcome == 'success' && steps.capability.outputs.widget == '1' }}
+        # `continue-on-error` is deliberate, and it is the other half of a fix
+        # rather than a way to make a red step green. The launch check used to
+        # exit 0 when the window came up but nothing on the machine could be
+        # asked to close it -- it printed "the close path was not exercised" and
+        # "PARTIAL -- its clean shutdown was not verified" to stderr, and then
+        # reported success, on a step named "Real launch, **then close**". Half
+        # the step was untested and the exit code said the opposite. It now exits
+        # INCOMPLETE for that case, which is correct and would otherwise turn
+        # this step red on any runner where the openbox install fell back.
+        #
+        # So the distinction has to live here instead. `odgui_launch_check.py`
+        # already separates `env_blocked` from `EXIT_FAILED` for exactly this
+        # reason -- "this runner has no window manager" and "the viewer is broken"
+        # are different findings and folding them together makes the first look
+        # like the second. A missing WM is an environment fact and annotates; a
+        # window that came up and then failed to close is a product defect and
+        # blocks. This is the same treatment `qt_gl_probe` gets above.
+        continue-on-error: true
         run: |
           # A window manager is started by hand because xvfb-run does not start
           # one, and the check closes the window the way a person does. If
-          # openbox is unavailable the subshell simply has no WM and the check
-          # reports that it could not exercise the close path, rather than
-          # failing on a missing package.
+          # openbox is unavailable the subshell has no WM and the check exits
+          # INCOMPLETE -- which is why the step carries `continue-on-error` and
+          # why that is honest rather than a shrug: the run did not prove the
+          # close path works, and it now says so in its verdict.
           xvfb-run -a -s "-screen 0 1280x1024x24" sh -c \
             'openbox >/dev/null 2>&1 & sleep 2; python scripts/odgui_launch_check.py'

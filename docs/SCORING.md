@@ -21,35 +21,37 @@
 
 | 位置 | 量 | 依据 | 结论 |
 |---|---|---|---|
-| §1 | 12 个 `R` 值 | `types.rs:189-208` 逐行对 | ✅ 12/12 |
+| §1 | 12 个 `R` 值 | `types.rs::interaction_radius`（`types.rs:205-222`）逐行对 | ✅ 12/12 |
 | §1 | C···C 3.8、O···O 3.2、hb 2.7、N···O 2.85 Å | `Rᵢ+Rⱼ` 算术 | ✅ 算术；N···O 仅公式性质，见 §2.3 |
-| §1 | H = 0.0 vs 实测 3.7773 Å | `core.score_conformation` | ⚠️ 矛盾属实，机制已定位 |
+| §1 | H = 0.0 vs 实测 3.7773 Å | `core.score_conformation` | ⚠️ 机制已定位；网格/打分两条路径的分裂已由 `VERIFICATION.md` 缺陷 190 消除，**残余只有「没有自己那块图的 token」**（极性氢与 `Placeholder`），见 §1.1 |
 | §1.1 | 0.4 Å 换算表 | 算术自洽 | ✅（历史量） |
 | §1.1 | `−0.815`、2.39 Å | 一次历史测量 | ➖ 不可复算（原文已标） |
-| §2.1 | `g1 (0.5, 0.5)`、`g2 (0.0, 0.5)` | `scoring.rs:232-233` | ✅ |
-| §2.3 | `hb (−0.5, 0.0)`、`hyd (0.5, 1.5)` | `scoring.rs:111,119` | ✅ |
+| §2.1 | `g1 (0.5, 0.5)`、`g2 (0.0, 0.5)` | `scoring.rs::gauss1`（`scoring.rs:232`）、`scoring.rs::gauss2`（`scoring.rs:233`） | ✅ |
+| §2.3 | `hb (−0.5, 0.0)`、`hyd (0.5, 1.5)` | `scoring.rs::hbond_term`（`scoring.rs:110-111`）、`scoring.rs::hydrophobic_term`（`scoring.rs:118-119`） | ✅ |
 | §3 | Vina 6 个权重 | `scoring_descriptions()` 运行输出 | ✅ 6/6 |
-| §3 | Vinardo 5 个权重 + scale | 同上 + `scoring.rs:179-186` | ✅ 5/5 |
-| §4 | `pair_energy` 组装 | `scoring.rs:336-347` 逐行 | ✅ |
-| §4.1 | `MIN_INTRA_BOND_DISTANCE = 4` | `ligand.rs:22` | ✅ |
-| §5.1 | 4 个 slot + `weights_for_kind` 表 | `scoring.rs:383-397` | ✅ 表一致 |
+| §3 | Vinardo 5 个权重 + scale | 同上 + `scoring.rs::vinardo`（`scoring.rs:178-186`） | ✅ 5/5 |
+| §4 | `pair_energy` 组装 | `scoring.rs::pair_energy`（`scoring.rs:613-624`）逐行 | ✅ |
+| §4.1 | `MIN_INTRA_BOND_DISTANCE = 4` | `ligand.rs::MIN_INTRA_BOND_DISTANCE`（`ligand.rs:22`） | ✅ |
+| §4.2 | 盒外惩罚按**超出量逐轴**计费 | `grid.rs::out_of_box_violation_per_axis`（`grid.rs:1560`）+ `search::OUT_OF_BOX_PENALTY`（`search/mod.rs:103`） | ✅ 本轮补上：唯一定义 + 四条性质；形状、梯度、牵引三条各有一个 Rust 单测钉住 |
+| §5.1 | 4 个 slot + `weights_for_kind` 表 | `grid.rs::MAPS_PER_TYPE`（`grid.rs:260`）+ `scoring.rs::weights_for_kind`（`scoring.rs:660-682`） | ✅ 表一致 |
 | §5.1 | 「拆两张图让分解变精确」 | 13 组实测矩阵 | ⚠️ **只对公式成立**；引擎侧曾按元素分块，**已修复**，见 §5.1.1 |
-| §5.2 | `STRIDE = 10 · 4 = 40` | `types.rs:792` × `grid.rs:162`；WGSL `:48` | ✅ |
+| §5.2 | `STRIDE = 10 · 4 = 40` | `types.rs::GRID_TYPE_COUNT`（`types.rs:1183`）× `grid.rs::MAPS_PER_TYPE`（`grid.rs:260`）；WGSL `energy.wgsl::STRIDE`（`energy.wgsl:82`） | ✅ |
 | §5.3 | `cutoff = 8.0`、外层 `reach` | `scoring.rs`、`grid.rs` 逐行 | ❌ 原写 `cutoff + 2R`（0.4 Å 时代形式），已改写为 `cutoff + MAX_GRID_TYPE_RADIUS + a.radius`，见 §5.3 |
 | §5.3 | `Shape` 支撑止于 5.200 Å | `grid.rs` 单测实测 | ✅ 实测；cutoff 是上界不是调出来的数 |
 | §5.4 | 五项分解、已加权、仅 CPU | `TermBreakdown`、`TermMaps`、`TermBackend`、`energy.wgsl` | ✅ 逐项实测；`energy.wgsl` 无逐项路径 |
 | §6.1–6.2 | 插值与梯度公式 | 未逐行复核 | ➖ 未复核 |
-| §6.4 | 默认 `spacing = 0.375` | `grid.rs:70` | ✅ |
+| §6.4 | 默认 `spacing = 0.375` | `grid.rs::DEFAULT_SPACING`（`grid.rs:91`） | ✅ |
 | §6.4 | 「折半降 1/4」 | 三档 `spacing` 实测 | ❌ 复现不出，见 §6.4 |
 | §6.4 | 「8 倍内存」 | 实测 7.40 / 7.57 / 7.89 | ❌ 已改写 |
 | §6.4 | 生物素/crambin、`2.6 × 10³` | 一次历史测量 | ➖ 不可复算（原文已标） |
-| §7 | 分类规则伪码 | `types.rs:669-705` 逐行 | ✅ |
-| §7 | token 清单 | `types.rs:287-292` | ⚠️ 补 `FA` |
-| §7 | `NDA`/`ODA` 往返丢失 | `pdbqt.rs:284,601` | ✅ 属实 |
+| §7 | 分类规则伪码 | `types.rs::AtomType` 的 `kind` 字段与 `types.rs::can_donate`/`types.rs::can_accept`/`types.rs::is_apolar`（`types.rs:477-493`）逐行 | ✅ |
+| §7 | token 清单 | `types.rs::from_token`（`types.rs:286-292`） | ⚠️ 补 `FA` |
+| §7 | `NDA`/`ODA` 往返丢失 | `pdbqt::parse_atom_line`（`pdbqt.rs:355-469`）、`pdbqt::fit`（`pdbqt.rs:883-889`） | ✅ 属实 |
 | §8 | 旋转梯度符号、SO(3) Jacobian | 本轮未跑 Rust 测试 | ➖ 未复核 |
-| §9.1 | `ATOM_STRIDE = 8`、binding 0..4 | `energy.wgsl:32-49`、`gpu/mod.rs:59` | ✅ 静态核对 |
-| §9.2 | 64 字节、`min`@32、`spacing`@48 | `gpu/mod.rs:465-471` | ❌ 原文「`min`@0」错，已改 |
-| §9 | GPU 与 CPU 一致 < 1e-3 | 需要真 GPU | ➖ 本机 `gpu_status()` 不可用 |
+| §9.1 | `ATOM_STRIDE = 8`、binding 0..4 | `energy.wgsl::ATOM_STRIDE`（`energy.wgsl:83`，常量）；binding 0..4 是同文件第 66–79 行 | ✅ 静态核对 |
+| §9.2 | 结构体 **80 字节**、`min`@32、`spacing`@48、`bmax`@64 | `gpu::grid_params_matches_the_wgsl_uniform_layout`（`gpu/mod.rs:785`）逐条断言 | ❌ 原文写「64 字节」且无 `bmax` 一行——在 `bmax` 加进来之前那是对的，现已改 |
+| §9 | 「与 CPU 一致 < 1e-3」 | `gpu::the_cpu_and_gpu_paths_agree_where_the_difference_was_measured`（`gpu/mod.rs:965`） | ❌ 上一版引的测试名「`gpu_energies_match_the_cpu_interpolation`」**在 `dock-core/src` 里根本不存在**（照这个名字 grep 是零命中）；容差也不是绝对 `1e-3`，而是逐构象的 `64·f32::EPSILON·read_magnitude`。已改写。**「不存在」说的是那个旧名字，不是本行依据栏里这个**——本栏这个测试现在确实在 `dock-core/src` 里 |
+| §9 | 两条后端**盒外**也走同一个函数 | `scripts/gpu_cpu_parity_check.py`（把差异按盒内/盒外分开报） | ➖ **本文不转述它的读数**。盒内夹具按构造看不见盒外（`gpu/mod.rs:719-746`），所以这一条只有那个脚本在钉 |
 
 **关于 `dock-core` 内部的三处注释与实现不符**（`scoring.rs:39`、`types.rs:382`、
 `types.rs:660` 区域），本文按实测记录，代码归属不在本文件范围内，**未改**，
@@ -60,6 +62,26 @@
 §2.3 里那一段改成「已修复」的记录。同一个会话里，§2.3 那条「`N···O` 恒为
 `0.000000`」也一并作废（跨元素分块已修复，见 §5.1.1），`<!-- DEFECT -->` 标记随之撤下。
 **这两处的教训是同一个：一条写着「已修复」却没有被核过的句子，比没有这条句子更贵。**
+
+**本轮把台账的行号全部换成了符号名，这是同一类修正。** 原先的「依据」栏写的是
+`types.rs:189-208`、`scoring.rs:336-347`、`grid.rs:70` 这类行号。行号是**某一天的
+读数**，不是规范：代码前面插一段注释，它就指向别处去了，而正文里的结论一个字
+都不会变。本轮抽查的十处里**有十处已经指错**（`types.rs:189-208` 现在落在函数
+doc comment 上，`scoring.rs:336-347` 现在是「权重在哪里乘」那段注释，
+`grid.rs:70` 是 `# Provenance`，`types.rs::push_bond`（`types.rs:669-705`）是成键感知而不是原子分类）。所以
+依据栏现在先写符号名 `file::symbol`，行号只作为**括号里的定位提示**——符号名会漂
+（`pair_energy` 还在），行号会飘（`scoring.rs:383-397` 已经不是那张表了）。
+
+同一栏里还有三栏的**性质不同，混在一起会出事**：
+
+* `✅` 且依据是一个 Rust 单测名——**门会重测它**，改了会红；
+* `✅` 且依据是一次运行/一次构建的读数——**门不会重测它**，那是一次历史测量，
+  本文已经逐处标注（§1.1、§6.4 那几条 `➖` 就是）；
+* `➖` ——**本轮没有核实**，原样保留并标出。
+
+**一个写进了正文、却没有任何门重测的数，和一个写对了的数，读起来一模一样。**
+所以本文尽量让每个数都带着它的门：要么是单测名，要么是脚本名。做不到的（历史
+测量）就明写「不可复算」。
 
 ---
 
@@ -89,17 +111,24 @@ d(rᵢ, rⱼ) = ‖rᵢ − rⱼ‖ − (R_i + R_j)
 给 H 半径 0 的理由：PDBQT 里留下的极性氢**本来就应该坐在它的供体重原子上**，
 把它当成一个独立球会让每个正常的氢键都报成重叠。
 
-> **预制表内循环与打分路径用的不是同一个 `d`。** 预制表内循环是
-> `d = r2.sqrt() - 2.0 * a.radius`（`grid.rs:416`），`a` 是**受体原子**；
-> 打分路径是 `rᵢ + rⱼ`（`scoring.rs::surface_distance`）。对混元素对，
-> 前者是 `2·R_j`、后者是 `Rᵢ + R_j`，**两条路径的间距轴不同**。
-> §4 的能量组装与 §4.1 的分子内项走的是后者。
+> **网格路径与打分路径现在用的是同一个 `d`，但极性氢仍然不是。** 预制表内循环
+> 是 `let d = r - (rp + a.radius);`（`grid::precalculate`，`grid.rs:910`；
+> 那一行是 `grid.rs:493`）：`rp` 是**探针所在那块图**的
+> 制表半径（`types.rs::grid_type_radius`）、`a.radius` 是受体原子半径，于是
+> `d = r − (R_探针 + R_受体)`，与打分路径的 `rᵢ + rⱼ`
+> （`scoring.rs::surface_distance`）**是同一个数**。每个受体原子写进全部十块，
+> 所以混元素对不再错位。
 >
-> 本文原先把这一点写成「这是 Vina 自己的做法」。**该归因本轮无法离线核实**
-> （既没有 Vina 源码也没有它的二进制）。但无论 Vina 怎么做，下面这条**内部**
-> 矛盾都成立：§1.1 说半径决定每一项落在间距轴的哪个位置，而配体真正采样的
-> 那张表是按 `2·R_j` 制表的——所以**混元素对在网格上落的位置，和公式里的位置
-> 不是同一个**。实测见下一段。
+> 例外是**没有自己那块图的原子**。极性氢的 `R_H = 0`
+> （`types.rs::interaction_radius`，`types.rs:205-222`），而
+> `types.rs::grid_type_index`（`types.rs:1164-1179`）把 `H` 折进碳图，于是它采样的是按
+> `2·R_C = 3.80` 制表的碳图——**对氢来说两条路径的间距轴仍然不同**。下一段实测的
+> 3.7773 Å 量的正是这一点。
+>
+> 本文原先把「网格用 `2·R_j`、打分用 `Rᵢ + Rⱼ`」记成一条**未修复**的缺陷并归到
+> `grid.rs:416`；**那一行现在只是一句注释，这个分裂已经不存在**——见
+> [`VERIFICATION.md`](VERIFICATION.md) 缺陷 190（修复）与 194（本文 §1.2 的同一
+> 矛盾）。「这是 Vina 自己的做法」这个归因**本轮仍无法离线核实**。
 
 > **「H 半径 0」与实测的 C···H 零交叉 3.7773 Å 曾被判为不可同时成立
 > （`VERIFICATION.md` 第 172 条）。本轮把两者的机制分开了：半径表是对的。**
@@ -113,14 +142,17 @@ d(rᵢ, rⱼ) = ‖rᵢ − rⱼ‖ − (R_i + R_j)
 > | 把它当「接触距离」反推 | `R_C + R_H = 3.7773` → `R_H = −0.011` Å |
 > | 按 `R_H = 0` 走**打分路径**的公式零交叉 | **1.7784 Å** |
 >
-> 两个数差 **2·R_C = 3.80 Å**，正好等于 `2·R_j` 与 `Rᵢ + R_j` 的差。
+> 两个数差 **2·R_C = 3.80 Å**，正好等于 `2·R_C` 与 `R_C + R_H` 的差。
 > 所以实测的 3.7773 **不是**「引擎给极性氢一个约 1.84 Å 的半径」：
-> 极性氢被折进了碳图（`types.rs:787`，`Element::H => 0`），于是它采样的是
-> 按 `2·R_C = 3.8` 制表的碳图。反推 `R_H ≈ 1.84` 那一步，是把
+> 极性氢被折进了碳图（`types.rs::grid_type_index`（`types.rs:1164-1179`，
+> `H => 0` 那一支在第 1178 行），于是它
+> 采样的是按 `2·R_C = 3.8` 制表的碳图。反推 `R_H ≈ 1.84` 那一步，是把
 > 「这张图是用谁的半径制的」当成了「探针自己的半径」。
 >
-> **仍然成立的缺陷不是半径表，而是上面那条**：同一个原子对，网格路径与打分
-> 路径给出的 `d` 不同。归属 `dock-core`（`grid.rs:416`），本轮未改。<!-- DEFECT -->
+> **仍然成立的残余不是半径表，而是「没有自己那块图的 token」**：极性氢与
+> `Placeholder` 按别的元素半径制表，所以**对这两个 token，两条路径的间距轴仍然
+> 不同**。其余九个 token 上两条路径给出同一个数，守卫是
+> 守卫是 `types.rs::the_radius_table_backs_the_grid_types`（`types.rs:1570`）。<!-- DEFECT -->
 
 ### 1.1 这里曾经是一个 bug：所有重原子都是 0.4 Å
 
@@ -153,7 +185,8 @@ d(rᵢ, rⱼ) = ‖rᵢ − rⱼ‖ − (R_i + R_j)
 
 > **本节的两个数字（`−0.815`、2.39 Å）本轮无法离线复现。** 冠醚/酚羟基的
 > 夹具不在 `examples/` 里，跑它需要自己搭分子。它们是**一次历史测量的记录**，
-> 不是当前可复算的量。半径表本身（上一节）已逐项对照 `types.rs:189-208` 核实，
+> 不是当前可复算的量。半径表本身（上一节）已逐项对照
+> `types.rs::interaction_radius`（`types.rs:205-222`）核实，
 > 与代码一致。<!-- DEFECT -->
 
 ---
@@ -316,7 +349,8 @@ E_total = E_inter + slope · E_intra,    slope = 0.006（vina）/ 0.0075（vinar
 ```
 
 `E_intra` 是同一套逐对公式在**配体自身**图距 ≥ 4 的原子对上的求和
-（`ligand.rs::MIN_INTRA_BOND_DISTANCE = 4`，即 1-4 及更远；定义在 `ligand.rs:22`）。
+（`ligand.rs::MIN_INTRA_BOND_DISTANCE = 4`，即 1-4 及更远；常量在
+`ligand.rs::MIN_INTRA_BOND_DISTANCE`（`ligand.rs:22`））。
 它阻止柔性配体把自己折回到身上。
 
 > **上一版把这条常量归给 `kinematics.rs`，那个文件里根本没有它**（全文无此标识符）。
@@ -326,6 +360,187 @@ E_total = E_inter + slope · E_intra,    slope = 0.006（vina）/ 0.0075（vinar
 **偏离 Vina。** Vina 为每个构象临时构建一张配体自身网格再读表。
 本工具直接对预计算的邻居表求和，消除了插值误差——代价是每步多几十次求值，
 换来的是分子内项精确。
+
+### 4.2 盒外惩罚（逐轴斜坡）
+
+这一项不是逐对能量，而是加在**装配好的分子间能量**上的一项约束罚。它不属于
+Vina，是本工具自己加的，所以上文的 `E_total = E_inter + slope · E_intra` 里
+它落在 `E_inter` 内部。
+
+唯一定义在 `grid.rs::out_of_box_violation_per_axis`（`grid.rs:1560`）：
+
+```
+v[k]      = (p[k] − b.max[k]) .max (b.min[k] − p[k]) .max 0      k ∈ {0,1,2}
+violation = v[0] + v[1] + v[2]
+E_penalty = OUT_OF_BOX_PENALTY × violation
+OUT_OF_BOX_PENALTY = 1000.0        (search/mod.rs:103，单位 kcal/mol)
+```
+
+四条必须一起记的性质，漏掉任何一条都会把上面的数读错：
+
+1. **按超出量逐轴计费**，不是「越界记 1000」也不是「每个越界原子记一次」。
+2. **按面量，不按盒心量。** 只在 +x 越界的原子只有 `v[0] > 0`。若改成按盒心
+   量，梯度会指向盒心，一个从角上越界的原子会被推着**穿过盒子内部**回去。
+3. **转角两面各记一次。** x、y 各出 1 Å 记 2 × 1000.0，不是记一次。
+4. **梯度是这条斜坡自己的导数**，在该轴朝外：`g[k] = 1000.0 · sign(p[k] − 面)`，
+   所以 dE/dx 恒为 **+1000**，`−∇E` 指向盒内。盒内既不罚也不产生梯度。
+
+罚值记进分子间项（`search::evaluate_full`，`search/mod.rs:251`；累加那一行是
+`search/mod.rs:289`），**不摊到形状项上**，所以诊断路径用一个
+独立字段报它（`TermBreakdown::out_of_box_penalty`，见 §5.4），
+`total() = terms_total() + out_of_box_penalty`。搜索与诊断共用上面那个唯一定义，
+所以诊断量不可能与被诊断的能量各说各话。
+
+**幅值是平台不是旋钮——这正是它曾经错的原因。** 旧实现是「越界即记 1000.0」的
+阶跃，于是盒外是一块平台，Armijo 充分下降**永远不可能被满足**，每一次试探步都被
+否掉；`line_search` 又先用 `max_step_norm = 4 Å` 给第一步封顶，于是任何 ≥8 的罚值
+给出**同一条**轨迹。**只把符号改对不解决这件事，改函数形状才解决。** 机制说明见
+[`search/mod.rs`](../dock-core/src/search/mod.rs) 的 `OUT_OF_BOX_PENALTY` doc comment
+（`search/mod.rs:85-101`）与 [`VERIFICATION.md`](VERIFICATION.md) 缺陷 225。
+
+> **本文此前完全没有这一项。** `scoring.rs` 的 `pinned_constants` 模块注释
+> （`scoring.rs:968-973`）写着 `OUT_OF_BOX_PENALTY`「no line in `SCORING.md` at
+> all」——补上本节之后那句注释就不成立了，需要同步更新（属 `dock-core`，不在本文
+> 范围内）。`docs/API.md::OUT_OF_BOX_PENALTY`（`docs/API.md:216`）写的
+> `OUT_OF_BOX_PENALTY = 1000.0` **仍然正确**：
+> 常数没变，变的是它乘的东西。**这一行原本引的是 `docs/API.md:194`，本轮更正**：
+> `API.md` 的 `evaluate_population` 一节被扩写之后那行下移了 10 行。**`VERIFICATION.md`
+> 225 行引的是同一处，本轮由 `docs_claims_check.py` 一次报出两处一起改**——两处漂移
+> 的成因是同一个人的同一次编辑，而**发现它们的是门禁，不是人**：这正是 277/284 那个
+> 「行号是一次读数、不是规格」的形状，只是这次漂移的来源是文档自己。
+
+下表是**实测**而非定义，每行的出处是钉住该性质的 Rust 单测：
+
+| 量 | 实测 | 单测 |
+|---|---|---|
+| 越出 20 / 200 / 2000 Å | 20000 / 200000 / 2000000 kcal/mol | `the_out_of_box_penalty_is_per_angstrom_of_violation` |
+| 各悬出量处的 dE/dx | 一律 +1000.000000 | `the_out_of_box_penalty_is_the_gradient_of_the_energy_it_adds` |
+| 转角 1 Å + 1 Å | 2000.0 kcal/mol，‖g‖₂ = 1414.213562 = 1000·√2 | 同上 |
+| 从盒外 1 Å 起步的 `minimize` | x = +4.1250，E −0.2007，不再在盒外 | `an_out_of_box_atom_is_pulled_back_in_by_its_descent_direction` |
+| 盒内 | 罚值 0，无梯度 | 同上第一条 |
+
+修正前的对照组同样实测过：越出 20 / 200 / 2000 Å **都**记 1000.0；`minimize`
+在 33 次评估后原样返回 x = +7.0000，**与起点一样仍在盒外**。
+
+### 4.2.1 罚项从哪里开始计：两个判据，和它们之间那条没人命名的带
+
+上一节给了**算式**，没有给**起点**。而缺陷 270 之所以能活下来，正是因为起点
+从来没被写下来过：GPU 侧当时对每个越界原子返回 `1000.0`，CPU 侧按 Å 计，两边
+**没有任何一句写下来的话让它们必须相等**。分歧要有规范才是分歧。
+
+**罚项是两个判据的合取，不是一个判据。**
+
+* **判据 A — 插值格判据。** `u_k = (p[k] − b.min[k]) / spacing_k`；任一轴
+  `u_k < 0` 或 `floor(u_k) >= n_k − 1` 时这个原子**读不到网格**，
+  `grid.rs::fractional`（`grid.rs:1197-1211`）返回 `None`。搜索路径走的就是这一份
+  （`search::evaluate_full`（`search/mod.rs:251-337`）在 `None` 分支上计费）。
+* **判据 B — 面判据，也就是计费判据。**
+  `v[k] = (p[k] − b.max[k]).max(b.min[k] − p[k]).max 0`，只有 `Σ_k v[k] > 0` 才真的
+  收钱（`grid.rs::out_of_box_violation_per_axis`（`grid.rs:1560-1570`））。
+
+**同一个判据 A 在这棵树里现在只写了两遍**：`grid.rs::fractional`（`grid.rs:1197`，
+`GridMaps` 那份，搜索与 GPU host 共用）与 `TermMaps::fractional`（`grid.rs:2007`，
+诊断专用）。**上一版本节写的是「写了三遍」，第三遍在 `energy.wgsl::sample`——本节上一版给它标的行号现在指向别处去了，
+那句话作废**：核函数不再从收窄坐标推这个谓词，
+它收 host 的 `in_box` 标志（`energy.wgsl:218`）。`u` 与 `floor(u)` 仍然留在核函数里
+（`energy.wgsl:211`、`energy.wgsl:235`），但**只用来把下标夹进范围，不再决定任何事**。
+Rust 侧的写法是 `!(i >= 0.0) || !(i < n)`，其中 `i = floor(u)`、`n = dims[k] - 1`，
+两者都在 `f64`（`grid.rs:1201-1206`）。
+
+**上一版记下的那个等价关系仍然成立，而它仍然只写在这里、没有写进代码注释**：
+`n_k − 1` 是整数，所以 `floor(u) >= n_k − 1` 当且仅当 `u >= n_k − 1`。
+**两份转写加一条只存在于本文档里的等价关系，就是缺陷 270 剩下的形状；第三份已经
+没有了。** 少一份转写不等于那一条就不用写——它现在只有两个消费者，
+而 `energy.wgsl` 那个消费者已经改成不消费它了。
+
+**两个判据的起点不同，这是本节唯一一处读者会预测错数的地方。** A 从**最后一个
+格点**起，B 从**面** `b.max` 起。`grid.rs::estimate_dims`（`grid.rs:305-317`）给出
+`n_k = ⌈size_k / spacing_k⌉ + 1`，所以最后一个格点在 `b.min + (n_k − 1)·spacing_k`，
+而
+
+```
+(n_k − 1)·spacing_k = ⌈size_k / spacing_k⌉·spacing_k  >=  size_k
+```
+
+——**最后一个格点永远在面上或面之外，所以罚项永远不会在面之前开始。** 这条不等式
+是 A 与 B 起点一致的**唯一**理由。
+
+于是中间存在一条带：`b.max` 与最后一个格点之间。落在带里的原子，**判据 A 已成立
+（它的网格能量被丢掉，不是被清零后计入 `inter`），而判据 B 的 `Σ_k v[k] = 0`，所以
+罚值为 0、梯度也为 0**。带宽就是上面那个 overshoot，
+`⌈size/s⌉·s − size ∈ [0, s)`。22 Å 盒上按上式解出：
+
+| spacing (Å) | 0.5 | 0.4 | 0.45 | 0.37 | **0.375（默认）** |
+|---|---|---|---|---|---|
+| overshoot (Å) | 0.000000 | 0.000000 | 0.050000 | 0.200000 | **0.125000** |
+
+**这些数是从上式解出来的，不是从引擎读出来的**——绑定没有导出 `estimate_dims`
+（实测 `hasattr(opendocking.core, "estimate_dims")` 为 `False`），所以这里**没有
+一条能在本机重跑的引擎级读数**，只有一条可复算的推导。把它当成实测会读错。
+
+还有一处不要混用：`grid.rs::contains`（`grid.rs:247-249`）是 `min` 含、`max` **不含**，
+所以那条带里的原子 **`contains` 为假、罚值却为 0**。「是否在盒内」和「是否被罚」
+不是同一个谓词，本文不把前者当前者用。
+
+**规范（每一条都只依赖上面的式子，不依赖任何一次运行）：**
+
+1. **单位。** `search::OUT_OF_BOX_PENALTY`（`search/mod.rs:103`）是 **1000.0 kcal/mol per Å
+   per axis**：`v[k]` 是 Å，乘积是 kcal/mol，跨三轴求和之后仍然是 kcal/mol。**它不是
+   「越界就记 1000」**——那句话是修正前的形状。
+2. **求和范围。** 对**配体的每一个重原子**各算一次，加进 `inter`，也就是分子间项
+   （`search::evaluate_full`（`search/mod.rs:251-337`）），不摊到形状项上。
+3. **转角两面各记一次。** `Σ_k v[k]` 对三轴求和，角落原子在两轴上 `v > 0`，所以记
+   两次；`grid.rs::out_of_box_violation`（`grid.rs:1575-1577`）就是这个和的三轴版本。
+4. **梯度是这条斜坡自己的导数**，只在该轴 `v[k] > 0` 时非零，所以那条带里梯度也是 0。
+
+**这一节不规定的**（写下来是为了不让读者以为它规定的）：一个构象的**总分**（罚项与
+形状/氢键/疏水项如何合成一个数，§4 上文的 `E_total` 只覆盖分子内项）；GPU 上
+`f32` 舍入的**具体次序**（所以残余只能给量级，见 4.2.2）；那条带里被丢掉的网格能量
+**应该如何**处理（本文记录它被丢掉，这是读数不是规范）；以及
+`TermMaps` 那份 `fractional` **必须**与 `GridMaps` 那份相同——实测相同，但**没有任何
+东西钉住它**，它是下一个同类缺陷的位置。
+
+### 4.2.2 跨后端读数：先说清是谁测的
+
+下面的数**不是本文测的**，归属必须写明，因为本节最容易被读成「本文保证」：
+
+* 前两行来自 `docs/VERIFICATION.md` 缺陷 270 行记录的、引擎 owner 在
+  **RTX 3050 Laptop（驱动 572.83）** 上的一次运行；
+* 3 passed / 3 failed / 2 skipped 来自
+  `scripts/gpu_cpu_parity_check.py` **自己文件头部**（`gpu_cpu_parity_check.py:98-108`）
+  的记录。
+
+| 量 | 修正前 | 修正后 |
+|---|---|---|
+| 盒外最差 \|GPU − CPU\| | **3222.32 kcal/mol** | **1.889938e-03** |
+| 85 个越界构象里超带的行数 | **85 / 85** | **0 / 85** |
+| 排名反转的对数 | 有（位移 8.0 Å：GPU **6999.985** < CPU **7882.264**） | **0 / 130,816** |
+| 位移 8.0 Å 的两条后端 | GPU 6999.985 / CPU 7882.264 | CPU **7882.2637** / GPU **7882.2650** |
+| **盒内一致性** | **3.772e-05** | **3.772e-05（逐位未变）** |
+
+**盒内那一行逐位未变，是这张表里最该被读出来的一行。** 修复只动盒外那一段，所以盒内
+不该动；它**确实**没动。不写这一行，读者无法区分「修复没有波及盒内」和「没人量过盒内」，
+而这两种情况读起来一模一样。**修复的影响半径没写出来，读起来就和没测一样。**
+
+残余随罚值一起长，量级就是 `64 · f32::EPSILON · read_magnitude`：位移 6.5 Å 处
+**1.76e-04**，8.0 Å 处 **1.33e-03**，8.4 Å 处 **2.55e-03**——**与一个更大的和上多几次
+`f32` 舍入应当有的样子一致**，所以它不是第二个缺陷。
+
+修正后仍在跑的盒外夹具是
+`gpu::the_cpu_and_gpu_paths_agree_outside_the_box_too`（`gpu/mod.rs:1244`）；盒内那条是
+`gpu::the_cpu_and_gpu_paths_agree_where_the_difference_was_measured`（`gpu/mod.rs:965`），
+它的夹具按构造看不见盒外（见 §9）。
+
+**3 passed / 3 failed / 2 skipped 是那份文件自己 docstring 里的记录，不是缺陷**，而且
+该 docstring **自己写明**这是对**一个已失效的二进制**的一次测量（748,032 B、
+sha256 `3b46188c90d3ee0e`）。本会话开始时开发树与 site-packages 的扩展都已是
+**778,240 B / sha256 `066fdd0c`**，所以**这 3/3/2 没有在当前二进制上重测过**。§9 那句
+「本文不转述那个脚本的读数」因此仍然成立：本文断言的是**那份记录说了什么**，不是
+**今天的树给出什么**。
+
+最后，5000 Å 出界那个读数 **34,910,908.99956484 kcal/mol** 是**整个构象的总分**，
+不是 `1000 × 5000`；罚项只是它的一部分。4.2.1 规范的是罚项，**不**规范一个构象的
+总分——后者要 §2、§3、§4 一起读才能预测。
 
 ---
 
@@ -363,7 +578,8 @@ E_total = E_inter + slope · E_intra,    slope = 0.006（vina）/ 0.0075（vinar
 > ```
 >
 > 读端：配体原子按**自己的** `type_index` 去读同一块。于是受体原子与配体原子
-> 只有在 `grid_type_index` 相同（`types.rs:773`，`C/N/O/P/S/F/Cl/Br/I/Met`）时
+> 只有在 `types.rs::grid_type_index` 相同（`types.rs:1164-1175`，
+> `C/N/O/P/S/F/Cl/Br/I/Met`）时
 > 才可能互相看到；表面的表面距离当时还按 `r − 2·R_self` 算，即假定探针元素与
 > 受体原子相同。**氢键项因此只对同元素的供体–受体成立。**
 >
@@ -567,30 +783,30 @@ if d > kernels.cutoff { continue; }
 写死——`TermMaps` 的 60 走不到 shader 上去，**连意外都到不了**。
 （`dock-core` 有一条单测盯的就是这件事：60 一旦出现在 shader 里，那条单测立刻红。）
 
-> **Python 侧的承诺：两丮各记一行。** `scoring.rs` 说这个事实记在**两个**调用方真正会碰到的地方，绑定把它们**分别**透了出来，状态不同：
+> **Python 侧的承诺：两半各记一行。** `scoring.rs` 说这个事实记在**两个**调用方真正会碰到的地方，绑定把它们**分别**透了出来，状态不同：
 >
 > | 承诺的位置 | Rust | Python |
 > |---|---|---|
 > | `TermBreakdown::backend`（拿着分解结果时） | 有 | 有 |
-> | `TermMaps::BACKEND`（建表**之前**） | 有 | **无** |
+> | `TermMaps::BACKEND`（建表**之前**；Python 侧的名字是 `TermMaps.backend` 属性） | 有 | 有 |
 >
-> 第一行意味着**拿着分解结果的 Python 调用方能问，而不是推断**：`backend` 键的值取自引擎自己的字段（今天恒为 `"cpu"`）。第二行意味着**更贵的那个问题从 Python 仍然问不到**：分解表每点 60 个 `f32`，是生产表 40 的 1.5 倍，而 `TermMaps` **不**暴露 `BACKEND`。
+> 两行现在**都**意味着 Python 调用方能问，而不是推断：`backend` 键和 `TermMaps.backend` 的值都取自引擎自己的字段（今天恒为 `"cpu"`），所以「这个分解是哪个后端算出来的」和「要不要建这张每点 60 个 `f32`、内存 1.5 倍的诊断表」两个问题都能在**建表之前**问到答案。注意名字不同：Rust 侧是 `TermMaps::BACKEND` 关联常量，Python 侧是 `TermMaps.backend` 属性。
 >
 > 表里的两行是两个各自独立的契约：`scripts/docs_claims_check.py` 逐行比对代码与文档，**行数也断言**。补上 `TermMaps.BACKEND` 会让第二行变红，文档必须跟着改；而**删掉第二行**（代码不动）也会变红——“文档已经开口没说哪半缺失”也是失效。两半曾经都没有，记录见 [`LIMITATIONS.md`](LIMITATIONS.md) §4.3。
-> **Python 侧的承诺：两半兑现了一半。** `scoring.rs` 承诺这个事实记在**两个**
-> 调用方真正会碰到的地方，绑定把它们**分别**透了出来，状态不同：
+> **Python 侧的承诺：两半都已兑现。** `scoring.rs` 承诺这个事实记在**两个**
+> 调用方真正会碰到的地方，绑定把它们**分别**透了出来：
 >
 > * **`TermBreakdown::backend` —— 已兑现。** `score_conformation_terms` 返回的 dict
 >   里有 `backend` 键，值取自引擎自己的字段（今天恒为 `"cpu"`），不是 Python 侧推断的。
->   所以**拿着分解结果的 Python 调用方现在能问，而不是推断**。
-> * **`TermMaps::BACKEND` —— 未兑现。** `TermMaps` **仍然不**暴露 `BACKEND`，
->   于是「在建表之前决定要不要建」这个更贵的问题（分解表每点 60 个 `f32`，是生产表
->   40 的 1.5 倍）Python 调用方还是问不到。
+>   所以**拿着分解结果的 Python 调用方能问，而不是推断**。
+> * **`TermMaps::BACKEND` —— 已兑现。** Python 侧以 `TermMaps.backend` 属性
+>   暴露同一个值，**在建表之前**就能问；分解表每点 60 个 `f32`、是生产表 40 的
+>   1.5 倍这个代价，于是可以在付出去之前先问一句。
 >
-> 这个「一半」是本节唯一的未兑现项，`scripts/docs_claims_check.py` 对两半**分别**
-> 断言：代码暴露了哪一半，文档就得说哪一半暴露了。补上 `TermMaps.BACKEND` 会让那一半
-> 的断言变红，文档必须跟着改——所以这句话不会停在「曾经不兑现」上。见
-> [`LIMITATIONS.md`](LIMITATIONS.md) §4.3。
+> 这一节曾把第二半记为「未兑现」，那是当时的真话：`TermMaps` 侧没有暴露，
+> Python 问不到。现在暴露了，文档跟着改，`scripts/docs_claims_check.py` 对两半
+> **分别**断言：代码暴露了哪一半，文档就得说哪一半暴露了——所以这句话不会停在
+> 「曾经不兑现」上。见 [`LIMITATIONS.md`](LIMITATIONS.md) §4.3。
 >
 > **曾经**两半都没有：`backend` 键不存在，`TermMaps` 也没暴露 `BACKEND`，
 > 于是「拿着分解结果的调用方必须能问，而不是推断」那句话当时只在 Rust 侧成立。
@@ -710,7 +926,8 @@ pose 1: closest approach to a cell face = 0.0000 cells
 > `|grad| = 4.07`，因为「离面足够近」和「离面为零」在这个量级上没有区别。
 > 所以本文把措辞从「恰好」降到「落在面上附近」，并且**不再说「每个」**：
 > 样本是 3 个姿势，不是一个可以量出命中率的分布。
-> `examples/audit_poses.py` 的 `face-gap` 列（位姿行，`audit_poses.py:288` 打印）就是量这个的，要定命中率应该
+> `examples/audit_poses.py` 的 `face-gap` 列（位姿行，
+> `audit_poses.py:341` 打印，由 `audit_poses.py:296-298` 算）就是量这个的，要定命中率应该
 > 在一批姿势上统计它，而不是从 3 个样本外推。**注意那一列按 4 位小数打印**：
 > 它区分不了 `1e-08` 与 `3e-04` conf 单位，所以它不能用来判断「这个下降区有多宽」——
 > 审计现在另外打印 `width` 列与 8 步阶梯，量宽度要用那两个。<!-- DEFECT -->
@@ -781,8 +998,10 @@ pose 1: closest approach to a cell face = 0.0000 cells
     其他               → Other
 ```
 
-最后一行按**类型**写是 `{CH, CP, FH, ClH, BrH, IH}`（`types.rs:359`）；
-按 **token** 写则是上面七个：`F` 与 `FA` 都解析成 `FH`（`types.rs:287-288`），
+最后一行按**类型**写是 `{CH, CP, FH, ClH, BrH, IH}`
+（`types.rs::is_donor`，`types.rs:359`）；
+按 **token** 写则是上面七个：`F` 与 `FA` 都解析成 `FH`
+（`types.rs::from_token`（`types.rs:286-304`）），
 所以本文第一版漏了 `FA`。同理 `S`/`SA` 都解析成 `SP`，而 `SP` **不在**
 `is_hydrophobic` 里——`SP` 与 `PP` 一样落到 `Other`。
 （`types.rs:382` 给 `AtomKind::Hydrophobic` 写的变体注释是
@@ -814,9 +1033,11 @@ OA + 显式 HD       -> donoracceptor   （供受体都成立，故为 DonorAcce
 得到的是 `Donor`。代码自己的注释（`types.rs:653-655`）举的例子是
 「羧基羟基氧：带 `HD` 故供，受体因为是 `OA`」，两半缺一不可。
 
-**`NDA` 和 `ODA` 从 PDBQT 文件里读不到。** 类型列在 `pdbqt.rs:284` 只取
-第 78–79 两列，写出时 `pdbqt.rs:601` 的 `fit(token, 2, false)` 又把 token
-截成 2 字符，所以三字符类型在往返中必然丢失：`NDA` 读成 `ND`（Donor 而非
+**`NDA` 和 `ODA` 从 PDBQT 文件里读不到。** 类型列在
+`pdbqt::parse_atom_line`（`pdbqt.rs:355-469`，取列是 `col(line, 77, 79)`、
+解析是 `AtomType::from_token(&token)`）只取第 78–79 两列，写出时
+`pdbqt::fit`（`pdbqt.rs:883-889`，调用是 `fit(atom.atom_type.token(), 2, false)`）
+又把 token 截成 2 字符，所以三字符类型在往返中必然丢失：`NDA` 读成 `ND`（Donor 而非
 DonorAcceptor）。分类器实现了 `NDA`/`ODA` 分支，但公开入口到不了。
 实践中 `DonorAcceptor` 只由「`OA`/`NA` 类重原子 + 显式 `HD`」产生，
 这也正是 `prepare_ligand` 写出的形式。<!-- DEFECT -->
@@ -879,8 +1100,75 @@ DonorAcceptor）。分类器实现了 `NDA`/`ODA` 分支，但公开入口到不
 `gpu/energy.wgsl` 用 compute shader 对一批 (原子, 探针点) 求能量，
 用 shared memory 做树形归约。
 
-**与 CPU 的一致性是被测试强制的**：`gpu_energies_match_the_cpu_interpolation`
-在真实 GPU 上跑，断言 GPU 能量与 CPU 三线性插值差 < 1e-3。
+**与 CPU 的一致性有两层门，范围不同。** 单元测试
+`gpu::the_cpu_and_gpu_paths_agree_where_the_difference_was_measured`（`gpu/mod.rs:965`）
+在真实 GPU 上跑，但它的夹具**按构造全在盒内**：CPU 侧对越界直接
+`.expect("point is inside the box")`（调用点 `gpu/mod.rs:1103`；被调的那个函数是
+`grid::GridMaps::interpolate_with_gradient`（`grid.rs:1233`）——**上一版把它写成
+`gpu::interpolate_with_gradient` 并给了 `gpu/mod.rs` 里的行号，而 `gpu/mod.rs` 里
+根本没有这个函数，它一直是 `GridMaps` 的方法。**），并有一条
+`reach < 6.0` 的前置断言把这一点钉住。所以它守的是「盒内**插值**这条表达式在
+一个由读数量级推出的带内」，**不是**「两条后端处处相等」——**盒外那一段它连
+问题都没问到**。
+
+跨后端相等这件事的门在
+[`scripts/gpu_cpu_parity_check.py`](../scripts/gpu_cpu_parity_check.py)：它对一批
+构象分别走 CPU 与 GPU 求值，把差异按**盒内 / 盒外**分开报。**本文不转述那个脚本
+的读数**——那是一个测出来的数，钉住它的是脚本本身，不是本文。要复核就跑它。
+<!-- 门禁 scripts/gpu_cpu_parity_check.py -->
+
+> **本文上一版这里写的两处都是错的：**
+> 测试名「`gpu_energies_match_the_cpu_interpolation`」**在 `dock-core/src` 里根本
+> 不存在**（照这个名字去 grep 是零命中），而容差也**不是**一个绝对的 `1e-3`。
+> 真实断言是**逐构象**的 `64 · f32::EPSILON · read_magnitude`——`64` 是
+> `8 角点 × 4 slot × 2 原子` 的 `f32` 舍入次数，`read_magnitude` 是**该构象真正
+> 读到的那批网格数据的量级**，不是插值后的总能量。**把一个随构象缩放的带写成
+> 「< 1e-3」，等于把一个性质写成了一个数。**
+>
+> 这条错法有代价：盒外惩罚的 GPU 实现当时是**另一个函数**，而这条「与 CPU 一致」
+> 的断言在**每一个盒内点上都是绿的**。原因是结构性的——夹具不许问那个问题。
+> 修复侧已加 `gpu::the_cpu_and_gpu_paths_agree_outside_the_box_too`（`gpu/mod.rs:1244`）；
+> 它与上面那个脚本是**两道独立的门**，不要只认其中一道。
+
+> **上一条「远角从哪来」的分歧由 `dock-core` 关闭了，而关闭的方式换过一次，
+> 所以本文上一版写在这里的那句话本身也作废了。** 上一版说「核函数现在读那个字段：
+> `let per_axis = max(p - params.bmax.xyz, params.min.xyz - p);`」——**它现在不读
+> `bmax` 了，也不重算越界量**。越界分支在 `energy.wgsl::sample`（`energy.wgsl:207`）里的那个 `if` 上，是：
+>
+> ```wgsl
+> if !(in_box > 0.5) {
+>     return OUT_OF_BOX_PENALTY * violation;
+> }
+> ```
+>
+> `violation` 是**主机量好的那个数**：host 侧用
+> `grid.rs::out_of_box_violation_per_axis`（`grid.rs:1560`）在 `f64` 上量逐轴斜坡、
+> 求和，和 `in_box` 标志一起随点上传（`gpu::pack_upload`，`gpu/mod.rs:296`，
+> 越界那一臂在 `gpu/mod.rs:322-324`；读法在 `energy.wgsl:278` 的 `c.violation.x`）。
+> 所以**分支与量级是同一个决定，由同一侧做出**，两边乘的是同一个
+> `OUT_OF_BOX_PENALTY`。
+>
+> **`bmax` 字段仍留在 80 字节 uniform 结构的偏移 64 上，但 `sample` 不再读它**
+> （字段在 `energy.wgsl:54`，偏移由 `gpu::grid_params_matches_the_wgsl_uniform_layout`
+> （`gpu/mod.rs:785`）钉住）。留它是为了不动已发布的布局；**留着一个「看起来在驱动
+> 罚值、其实不驱动」的字段，与留着一句不再为真的注释是同一类缺陷**，所以它在源码里
+> 被标注出来，而不是被悄悄删掉或悄悄留着。
+>
+> 这条路径的代价写在明处：量级传下去让 binding 1 的每点元素从 16 字节涨到 32 字节
+> （`array<vec4<f32>>` 装不下「位置 + 标志 + 距离」），而 downlevel 的 4 个 storage
+> buffer 上限已经用满、加不出第五个——所以是**元素变宽，不是绑定变多**。
+>
+> 守它的是三道门，两道**不需要**适配器：`shader_and_rust_agree_on_the_out_of_box_penalty`
+> （`gpu/mod.rs:830`，纯文本：核函数必须乘主机那个数、必须读 `violation.x`、
+> 扁平的 `return 1000.0;` 不许回来），`gpu::pack_upload` 的 host 侧断言，
+> 以及 `docs_claims_check.py` 里把本段这个形状钉住的那一条。
+> **需要**适配器的是
+> `gpu::the_out_of_box_magnitude_is_the_hosts_and_putting_it_back_breaks_the_band`
+> （`gpu/mod.rs:2033`）：它把旧的「从收窄坐标重量级」放回去、要求带子变红——
+> **没有适配器时它打印 `NOT MEASURED` 后返回，那不是失败。**
+> 所以 §4.2 开头那条纪律仍然成立：**在这台机器上，「修复存在」有源码与文本检查为证，
+> 「修复被演示过」没有。**
+> <!-- 门禁 scripts/gpu_cpu_parity_check.py -->
 
 ### 9.1 为适配 downlevel 而做的布局
 
@@ -898,37 +1186,76 @@ ATOM_STRIDE = 8   // [type, w0, w1, w2, w3, pad, pad, pad]
 单测 `the_kernel_stays_within_the_downlevel_storage_buffer_limit` 守住上限，
 `shader_and_rust_agree_on_the_atom_stride` 守住两个 stride 常量。
 
+**同一道 4 个绑定的限制还决定了 binding 1 的元素有多宽。** 每个待评点要传位置、
+盒内标志和盒外量，而 `array<vec4<f32>>` 一个元素只有 16 字节、放不下这三样，
+所以元素变成**一对** `vec4<f32>`——`gpu::COORD_FLOATS`（`gpu/mod.rs:66`）= 8 个
+`f32`，也就是 `min_binding_size` 的 32 字节。**这里的选择是「元素变宽」而不是
+「绑定变多」，理由和上一段完全一样：加不出第五个 binding。** 加第五个的那条路
+是关掉的，不是没想过。宽度由 `gpu::the_upload_is_sized_for_the_batch_and_no_shorter`
+（`gpu/mod.rs:2973`）钉住，它同时断言 `COORD_FLOATS * 4 == 32`——一个 `n_conf = 1`
+的上传正好 32 字节，低于这个数 wgpu 会拒绝 bind group。
+
+**本节上一版没有这一段，于是 `COORD_FLOATS` 在 `docs/` 里一次都没出现过**，
+门禁把它记成「没有下落」。这是真的漏，而不是豁免：该常量是**已发布布局的一部分**，
+而这一轮它刚变重——元素从 16 涨到 32 字节正是为了装下主机算好的越界量（见 §9 末段）。
+
 ### 9.2 uniform 的 16 字节对齐
 
-`GridParams` 的 Rust 侧（`gpu/mod.rs:382`）是：
+`GridParams` 的 Rust 侧（`gpu::GridParams`（`gpu/mod.rs:718-735`））是：
 
-```
+```rust
 nx: u32, ny: u32, nz: u32, n_atoms: u32, n_conf: u32,   // 5 × 4 = 20 字节
 _pad: [u32; 3],                                          // 20 → 32，12 字节
 min: [f32; 4],                                           // 偏移 32
 spacing: [f32; 4],                                       // 偏移 48
+bmax: [f32; 4],                                          // 偏移 64
 ```
 
-结构体大小 **64 字节**。WGSL 侧（`energy.wgsl:21`）**没有** `_pad` 字段，
+结构体大小 **80 字节**。WGSL 侧（`energy.wgsl::GridParams`（`energy.wgsl:33-55`））
+**没有** `_pad` 字段，
 但 `vec4<f32>` 在 uniform 地址空间按 16 字节对齐，所以那 5 个 `u32` 之后
 WGSL 自己插入 12 字节空洞，`min` 同样落在偏移 32、`spacing` 落在 48——
 两边一致。缺了 Rust 侧这块 `_pad`，`min_binding_size` 与实际布局就不符，
-pipeline 验证会失败。单测 `grid_params_matches_the_wgsl_uniform_layout`
-（`gpu/mod.rs:442`）断言大小为 64 并逐个断言偏移。
+pipeline 验证会失败。单测 `gpu::grid_params_matches_the_wgsl_uniform_layout`（`gpu/mod.rs:785`）
+断言大小并逐个断言偏移。
+
+末尾的 `energy.wgsl::bmax`（`energy.wgsl:54`）是**搜索盒的上界**：制表体积到
+`min + (n − 1) · spacing` 为止，而 `estimate_dims` 向上取整，所以体积可能略大于
+盒。**它现在不是 §4.2 那个函数的输入了**——`sample` 不再读它，越界斜坡改由 host 侧
+`grid.rs::out_of_box_violation_per_axis`（`grid.rs:1560`）直接对着 `grid.grid_box()`
+量（见 §9 末段）。**上一版本节写的「它是 §4.2 那个函数的输入」现在作废**，那时
+核函数用它重算越界量。它留在 80 字节布局里是**为了不动已发布的结构**，不是为了
+驱动罚值；这一点在 `energy.wgsl:42-54` 的字段注释里也写明了。
+
+> **本节的上一版没有 `bmax` 这一行、并且写「结构体大小 **64 字节**」**——在
+> `bmax` 被加进来之前那是对的，现在不是。`min`@32 与 `spacing`@48 仍然对。
+> 上一版下面那段「本文上一版写的是 `_pad` 补在末尾、`min` 落偏移 0」的自纠是
+> **另一轮**的错，不受本次改动影响，仍然成立。
 
 > **本文上一版写的是「`GridParams` 末尾补了 `_pad: [u32; 3]`……`min` 落在偏移 0、
 > `spacing` 落在偏移 48」。两个说法都错**：`min` 在偏移 **32** 不是 0，
 > 而 `_pad` 在**中间**（`n_conf` 之后、`min` 之前）不是在末尾。
-> 正确值取自 `gpu/mod.rs:465-471` 的逐条断言，本轮按源码与 WGSL 布局规则核对。
+> 正确值取自 `gpu::grid_params_matches_the_wgsl_uniform_layout`（`gpu/mod.rs:785`，
+> 逐条断言在 `gpu/mod.rs:480-487`），本轮按源码与 WGSL 布局规则核对。
 >
 > 另注：`scoring.rs:39` 的模块注释仍写「`hb` is maximal at `d ≤ −0.7`，
 > which for an O···O pair is a 2.5 Å heavy-atom separation」——那是**已废弃的
 > 窗口**（现为 `d ≤ −0.5` → 2.7 Å，见 §2.3），与同文件 `hbond_term` 的
 > docstring 自相矛盾。归属 `dock-core`，本轮未改。<!-- DEFECT -->
 >
-> **GPU 路径本轮完全未运行**（`core.gpu_status()` 返回
-> `{'compiled': False, 'available': False}`），以上全部是**读源码 + 读单测断言**，
-> 不是实测。`§9.1` 与本小节的「与 CPU 一致」类断言本轮无法复算。
+> **本节以上是读源码 + 读单测断言写的，本轮已经能在真 GPU 上复算**：用
+> `--features gpu` 重建的引擎给出 `core.gpu_status()` =
+> `{'compiled': True, 'available': True}`，此时
+> [`scripts/gpu_cpu_parity_check.py`](../scripts/gpu_cpu_parity_check.py) 会跑，
+> 并把盒内 / 盒外分开报。**本文仍然不把它的读数抄进正文**——那是一次构建、一台
+> 机器的读数；抄进来它就成了本文的断言，而没有任何门会重测它。**要引用就引用那个
+> 脚本。**
+>
+> 上一版这里写的是「**GPU 路径本轮完全未运行**」，并把 `gpu_status()` 的
+> `{'compiled': False, 'available': False}` 当作一段结论印在正文里。**那是构建
+> 配置的事实，不是引擎的性质**——换一个带 `gpu` feature 的构建它就翻面了。把它
+> 写进文档，读者会以为「GPU 路径能不能验证」是本文的属性，而它其实是本机这次
+> 构建的属性。
 
 ---
 
@@ -985,3 +1312,62 @@ Apache-2.0）、Vinardo（Quiroga & Villarreal, *PLoS ONE* **11**, e0163579, 201
 CC-BY）、AutoDock 4.2（Morris et al., *J. Comput. Chem.* **29**, 2789, 2008;
 GPL-2.0）、Meeko（Morris et al., *PLoS ONE* **17**, e0163573, 2022; LGPL-2.1）。
 全部为按公开方程的独立实现，未复制上游代码。
+
+## 11. 常量覆盖：每个导出常量在 `docs/` 里的下落
+
+**本节存在的理由是一个可检的元命题**：一个没有规范的量，它的分歧是抓不到的；而这棵
+树里原本**没有任何东西注意「少了规范」这件事**。§4.2.1 补的就是这样一处规范——补的
+时候才发现，别的常量连「有没有规范」都没人问。所以本节把这个问题变成一条门禁。
+
+**两边都不是手抄的清单。** 左边从源码推，右边从文档读：
+
+* **左集** = `dock-core/src` 里 `#[cfg(test)]` 之外的 `pub const`（实测 **25 处声明、
+  21 个名字**）。「导出」取 `pub mod` + `pub const`：`lib.rs` 的模块声明实测**全是
+  `pub mod`**，所以 `pub const` 就是这个 crate 的对外面；`pub(crate)` 不算。`#[cfg(test)]`
+  区间按大括号配对排除，所以 28 个夹具常量（含 `*_DOC` 与 `RECEPTOR`/`EXOTIC` 之类
+  私有名）不进这个集合。
+* **右集** = `docs/*.md` 的行，按三档分：提到该名字的某一行**带 `文件:行号` 引用**
+  → **已锚定**；不带引用但**带数字** → **已定量**；只提到名字 → **只被提及**。
+* **本节下面那张表** = **明确记下「没有规范」，以及是哪种「没有」**。
+
+实测分档（**四档互斥、按强到弱分配**，所以它们把这 22 个名字分开）：
+
+| 档 | 数 | 判据 |
+|---|---|---|
+| **已锚定** | 8 | 提到它的那一行**带 `文件:行号` 引用**：`ATOM_STRIDE` `COORD_FLOATS` `DEFAULT_SPACING` `GRID_TYPE_COUNT` `MAPS_PER_TYPE` `MIN_INTRA_BOND_DISTANCE` `OUT_OF_BOX_PENALTY` `WALK_SEED_STRIDE` |
+| **已定量** | 11 | 不带引用但**带数字**：`BACKEND` `COUNT` `IDENTITY` `MAX_GRID_POINTS` `MAX_GRID_TYPE_RADIUS` `MIN_ATOM_SEPARATION` `MIN_CONTACT_DISTANCE` `STERIC_LIMIT` `TERM_FIELDS` `VINA_CUTOFF` `WORKGROUP_SIZE` |
+| **只被提及** | 1 | 两样都没有：`ALL` |
+| **`docs/` 里根本没有** | 2 | 一次都没被提到：`ENERGY_WGSL` `ISLAND_SEED_STRIDE` |
+
+**下面那张表里的 3 行 = 「只被提及」1 + 「根本没有」2**：豁免不是第四个档位，而是
+**给后三档里没有规范的那些补一句理由**。已锚定 8 + 已定量 11 = 19，豁免 3 < 19——
+这条不等式是门禁的一部分，理由见 §11.1。
+
+| 常量 | 状态 | 为什么没有规范 |
+|---|---|---|
+| `ALL` | 不需要规范 | **三个不同的常量共用一个名字**：`MapSlot::ALL`（4 项）、`TermField::ALL`（6 项）、`Element::ALL`（12 项），各自是「该枚举的全部变体，按判别值顺序」。没有一个可另外写一份的数值语义——规范它就是复述枚举定义本身，而定义已经在 `docs/API.md` 的类型表里。 |
+| `ENERGY_WGSL` | 不需要规范 | 它是 `include_str!("energy.wgsl")` 的结果，**即核函数源码本身**。它的规范就是 §9 引用那份 WGSL 的地方；再写一份只会是第二份转写，而第二份转写正是缺陷 270 的形状。 |
+| `ISLAND_SEED_STRIDE` | **已知缺口（未解决）** | LGA 岛间迁移的种子混合器，`search::ISLAND_SEED_STRIDE`（`search/lga.rs:183`）在 `base_seed ^ (island as u64).wrapping_mul(...)` 里用到，与 `WALK_SEED_STRIDE` 同类。`VERIFICATION.md` 缺陷 240 已把「带种子常量无人钉住」登记为**未解决**，而这一条至今**没有钉**。**列在这里是登记缺口，不是宣布它不需要规范**——状态词与上面两行不同，就是为了让这件事读起来不一样。 |
+
+### 11.1 这条门禁断言的是什么，以及它**没有**断言什么
+
+**它断言的是「有下落」，不是「有规范」。** 三档里最弱的一档是「已定量」，而它只要求
+**提到该名字的那一行里有个数字**——**不要求那个数字是这个常量的值，也不要求它现在
+还对**。所以「已定量」是一个下界：它排除了「没人提过」，排除了「提了但没有量」，
+**没有**排除「量错了」。量错由本文别的门禁和 `dock-core` 的单测负责，不由这一条。
+
+**按裸名匹配，所以一处提到同时覆盖多个声明。** `ALL` 有 3 处声明、`COUNT` 有 3 处
+（`Element::COUNT = 12`、`AtomType::COUNT = 18`、`AtomKind::COUNT = 5`），而文档里一处
+提到 `COUNT` **不能归因到三者中的哪一个**。这不是假设出来的损失：`API.md` 原本只写了
+`Element::COUNT = 12` 与 `AtomType::COUNT = 18`，`AtomKind::COUNT = 5` **被静默漏掉**
+而门禁是绿的——本轮已把那一句补上，所以**当前**三个都写到了；但**门禁仍然分不出是
+哪一句覆盖了哪一个**，这个损失写在这里而不是藏起来。
+
+**一个已知的退化方向，本门禁挡不住**：如果下一个人给 21 个常量各写一条理由合格的
+「不需要规范」，本节会全绿而元命题落空。本门禁只加了一条**结构性**的挡板——豁免表
+必须**短于**已锚定加已定量之和（实测 3 < 18），把 21 个全豁免会让这一条变红。这挡住
+的是「整体豁免」，挡不住「精心设计的整体豁免」。
+
+**不覆盖**：`static`；`pub fn` 体内的字面量；macro 展开得到的常量；`pub(crate)`；
+任何不是 `SCREAMING_CASE` 的常量；`docs/` 之外的两份 README（那是另一条门禁的范围）。
+**也不覆盖「已定量的那个数字对不对」**，如上。

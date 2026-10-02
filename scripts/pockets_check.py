@@ -607,13 +607,21 @@ def main() -> int:
               f"{len(pose_pts)} atoms; the shortlist holds {held}")
         # This used to be a second copy of the boolean above, with a different
         # sentence underneath it. A check that can only fail when the one above
-        # already failed inflates the count without testing anything, and the
-        # sentence was not even true: it claimed "rank 9 against a default of
-        # 12" when the measured position is 8 of 12 (9 is its rank out of all
-        # sixteen crambin offers, a different list). The claim this was *for* is
-        # real and worth keeping -- the default list is long enough to reach a
-        # site ranked 8 -- so it is stated as the thing it is: the list length
-        # boundary, computed on both sides of it.
+        # already failed inflates the count without testing anything.
+        #
+        # The sentence under it was false too, and falsely in a way worth
+        # recording: it claimed the measured position was 8 of 12 while 9 was its
+        # rank out of all sixteen crambin offers, "a different list". Measured,
+        # the position is **9 in both** -- 9 of 12 at the default, 9 of 16 with
+        # max_pockets=99, 9 of 16 with the ceiling removed -- at rank_score
+        # 2.4037, between 2.4235 at position 8 and 2.3595 at position 10, so the
+        # position is well separated rather than a tie. The two lists differ in
+        # their denominator, not in their occupant: `find_pockets` sorts once and
+        # returns `found[:max_pockets]`, so the shortlist is a prefix of the long
+        # one and truncation provably cannot move anybody. The claim this check
+        # is *for* is real and worth keeping -- the default list is long enough
+        # to reach a site ranked 9 -- so it is stated as the thing it is: the
+        # list length boundary, computed on both sides of it.
         shortlist = P.find_pockets(rec_pts, list(rec.elements),
                                    residues=rec.residue_labels(),
                                    max_pockets=best)

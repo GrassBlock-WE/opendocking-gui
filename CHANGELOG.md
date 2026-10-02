@@ -13,6 +13,25 @@ The project is pre-1.0. The `0.x` line is where the interfaces still move.
 
 ### Added
 
+- **The result now reports how many poses came back entirely outside the search box.**
+  `DockingResult.poses_outside_box_count`, also in `--json` as
+  `poses_outside_box_count`, and a one-line warning in the prose output **only when
+  the count is non-zero** — a line printed on every run is a line people learn to
+  skip, and the trade is written into the code rather than left implicit.
+  - **It is a count, not a threshold.** The engine already computed a boolean for
+    every pose (did a grid lookup return `None` — the same branch that charges the
+    out-of-box penalty) and discarded it at the `Pose` boundary. A `bool` cannot
+    distinguish "one atom poked through a face" from "not one atom is in the box",
+    so the value was widened to a count and carried out. No tolerance and no penalty
+    were invented; the number comes from a loop that already ran.
+  - **Why a refusal was not chosen:** a pose 5000 Å outside scores 34,910,908.99956484
+    kcal/mol, so it cannot masquerade as a small attractive score — but a refusal
+    would also reject legitimate runs, since redocking a whole protein with a large
+    box is legal, and it would discard a description of what the engine actually did.
+  - **See the known limitation below: through `dock()` in this release the count is
+    structurally always 0.** It is reported because the fact is true and the reader is
+    entitled to it, not because it has been observed to fire.
+
 - **The workbench now shows where a pose's energy came from.** A new *pose energy
   breakdown* panel lists the five weighted terms for the selected pose, the sum of
   them, the production path's intermolecular value, the intramolecular scale, the
@@ -44,11 +63,24 @@ The project is pre-1.0. The `0.x` line is where the interfaces still move.
   one cube and sit in that one cloud, so framing either answers "where did the
   engine look", at the scale that made the pose unreadable. Clicking a site still
   does that.
-  - **Measured across all nine poses of the sample:** the pose's share of the frame
-    goes from **0.12% to 2.57%** (1.66–3.93% spread, a 12.5× improvement at the
-    median), the contacting receptor's from 5.57% to 8.01%, and the contact overlay
-    from **1 108 to 8 700 px** (7.9×) — the overlay is the deliverable of a
-    selection.
+  - **Measured across all nine poses of the sample, and transcribed rather than
+    reproducible here.** The pose's share of the frame goes from **0.12% to 2.57%**
+    (1.66–3.93% spread, a 12.5× improvement at the median) and the contacting
+    receptor's from 5.57% to 8.01%, and the contact overlay goes from **1 108 to
+    8 700 px** (7.9×) — the overlay being the deliverable of a selection. **What
+    kind of claim each figure is, because they are not one kind.** `framing_selection_check.py`
+    carries 0.12%, 5.57% and 1 108 px in its own module docstring, as a captured run
+    against `examples/1crn_prep.pdbqt` with `examples/crambin_pose.pdbqt` at 1251x989,
+    and carries 1.66–3.93% (median 2.64%) in the same docstring, with 1.66% and the
+    12.5× also typed into the detail string of its section 6 checks. **Not one of
+    them is printed by a run.** Sections 6 to 8 are that file's framebuffer
+    instruments and they `skip()` on a machine with no OpenGL context, which is what
+    this one has: a run here ends `32 checks: 22 passed, 0 failed, 10 skipped`, and
+    the ten skipped checks are exactly those three sections. **2.57%, 8.01%, 8 700 px
+    and 7.9× have no producer anywhere in this tree** — not in `scripts/`, not in
+    `dock-py/`, not in `dock-core/`, not in `docs/`. They are kept because the
+    decision they justified is still the shipped one, and they are recorded here as
+    transcribed figures with no traceable producer rather than as measurements.
   - **The site cloud steps aside for a pose selection.** It is drawn with depth
     testing off and covers 9× the pose's footprint, and with it on, the pose is not
     findable in the screenshot at all. This is the project's own measurement
@@ -69,6 +101,18 @@ The project is pre-1.0. The `0.x` line is where the interfaces still move.
     - **Given up, deliberately: element identity on the selected pose**, in every
       representation, whenever a pose is selected. It is still readable in the
       contact table and in the ligand view.
+    - **What kind of claim these figures are.** 23 092 px and the **60th percentile**
+      are typed literals inside the *printed detail string* of
+      `framing_selection_check.py`'s section 8 checks (and 23 092 px is typed into
+      `workbench_interaction_check.py`'s the same way); that section is one of the
+      three that skip on a machine with no OpenGL context, so the run prints no
+      pixel count and no percentile here — it computes the live value and interpolates
+      it, and the two numbers above are prose baked into the message. **99.9%, 13.6%,
+      the 80th percentile, −6.8%, +0.2% and +77.3% have no producer in this tree
+      either**: they appear in this file and in one row of `docs/VERIFICATION.md`,
+      which is a document and not an instrument. They are the measured margins of a
+      run this file cannot reproduce, kept as recorded margins rather than presented
+      as a figure some named script prints.
     - The guard discriminates in both directions. Reverting to element colours
       gives a margin of **−6.8%**; painting the *whole scene* the pose's colour
       gives **+0.2%**, which an absolute floor alone would have passed; restored,
@@ -78,18 +122,32 @@ The project is pre-1.0. The `0.x` line is where the interfaces still move.
     nine poses** (measured spread 5.18%–12.13%, median 7.93%) — a receptor's share
     is a fact about how much protein surrounds a given pose, not about the framing.
     The question it proxied is now asked directly, by a containment bound over the
-    projected fill (0.72–0.82 for all nine, required inside the frame), which
+    projected fill (**0.72–0.82 for all nine, required inside the frame**), which
     answers *yes* on all eight poses the old floor rejected, including the worst
     one at 5.18%. That makes the new bound more **specific**, not strictly
     stronger: the two bound different quantities and no subset relation between
-    them is claimed.
+    them is claimed. **The two figures here are not the same kind of claim.** The
+    0.72–0.82 range *is* printed — `framing_selection_check.py` reports "the measured
+    range over the nine poses is 0.72-0.82" on its camera-side path, which needs no
+    framebuffer. **Five of the nine, 5.18%–12.13% and the 7.93% median are not**:
+    they come from the same skipped framebuffer section as the figures above, and
+    the script's own detail string describes the receptor's nine-pose spread as
+    4.73%–11.96%, not 5.18%–12.13%. Both numbers are kept — the eight-of-nine
+    rejection is what the floor's replacement was measured against — and the
+    sentence above says which is reproduced and which is transcribed.
   - **Three instruments were wrong before the measurement was.** The camera fit
     ignored perspective, so a pose that projected long along the view axis reached
-    `|ndc| 3.89` — outside the very frame built to contain it. The screenshot
-    helper looped `processEvents`, which does not advance a wall-clock `QTimer`, so
-    **up to 75% of the frame differed between two identical grabs** while the
-    camera moved. Two assertions sampled values the sampler structurally could not
-    observe. Fixed, and the noise floor is now 0.000%.
+    `|ndc| 3.89` — outside the very frame built to contain it. That figure *is*
+    printed: `framing_selection_check.py` reports "measured, that put pose 3's own
+    atoms at |ndc| 3.89" from its camera-side arithmetic, which needs no
+    framebuffer. The screenshot helper looped `processEvents`, which does not
+    advance a wall-clock `QTimer`, so **up to 75% of the frame differed between two
+    identical grabs** while the camera moved, and two assertions sampled values the
+    sampler structurally could not observe. Fixed, and the noise floor is now
+    0.000%. **Those two are not printed by any run of that file** — they are typed
+    into the prose of the check that reports them, in one of the three framebuffer
+    sections that skip without a GL context — so they are the *noise floor this file
+    recorded* and not a measurement a reader can re-observe here.
 
 - **`precalculate_terms()` and `score_conformation_terms()` expose the score
   term by term.** `TermBreakdown` reports each contribution separately, so a
@@ -123,15 +181,20 @@ The project is pre-1.0. The `0.x` line is where the interfaces still move.
     "independent" here means independent of the *code*, not of the *project*.
   - **Verified:** apolar heavy-atom pair energies track the written spec to a mean
     **0.0045 kcal/mol** over 35 points, minima agreeing to 0.03 Å, and the five
-    weights match the engine's own runtime description. The 0.0207 kcal/mol floor
+    weights match the engine's own runtime description (all three figures from
+    `scripts/scoring_cross_check.py`'s own stdout). The 0.0207 kcal/mol floor
     is the 0.375 Å grid the engine interpolates on, not model error.
   - **It falsified one of our own published numbers.** `docs/VERIFICATION.md`
     §3.2.1 reports the apolar C···C minimum at 3.00 Å / −0.050. The engine gives
-    **+0.514 at 3.00 Å** — inside the repulsive wall — with its minimum at
-    **4.30 Å / −0.0692**. Under our own weights, repulsion alone is +0.538 at that
-    distance while the three attractive terms together cannot exceed 0.076, so
-    −0.050 is arithmetically out of reach. The table has been corrected and the
-    discrepancy recorded rather than smoothed over.
+    **+0.514132 at 3.00 Å** — inside the repulsive wall — with its minimum at
+    **4.250 Å / −0.07262**, re-measured on the current build by
+    `scripts/docs_claims_check.py`. Under our own weights, repulsion alone is +0.538
+    at that distance while the three attractive terms together cannot exceed 0.076,
+    so −0.050 is unreachable **at that separation** — and reachable elsewhere, since
+    the curve rises from −0.0726 through zero at 3.63 Å, so "out of reach" was the
+    wrong claim and only the narrower one is true. The two §3.2.1 table cells are
+    struck and marked falsified rather than overwritten with a number this round
+    cannot re-derive; the discrepancy is recorded, not smoothed over.
   - **Two findings are open, not closed.** A C···H pair crosses zero at 3.74 Å,
     which implies a hydrogen interaction radius near 1.84 Å where §3.2.1 states
     H is 0. And a polar donor–acceptor pair at 2.8 Å scores **exactly zero** on
@@ -142,8 +205,9 @@ The project is pre-1.0. The `0.x` line is where the interfaces still move.
   anything true.** Neither is a CI gate and neither will be — a corpus result has
   no ground truth, and gating one would be asserting the internet. What *is*
   gateable, and is now, is that every number each prints is the number its own line
-  says it is (`scripts/benchmark_check.py`, 33 checks, offline in about a second
-  with `urlopen` stubbed).
+  says it is (`scripts/benchmark_check.py`, offline in about a second with
+  `urlopen` stubbed). The total is that gate's own `EXPECTED_CHECKS` and is not
+  copied here — a copy in a changelog is a second place for it to rot unnoticed.
   - **`pocket_benchmark.py` printed "cost per 1000 atoms" while dividing by the
     atom count** — milliseconds *per atom* under a per-1000 heading. A 17.6 s
     search over 4779 atoms read **"4HHB 4 ms"**, and 1CRN rounded to **"0 ms"**.
@@ -206,7 +270,7 @@ The project is pre-1.0. The `0.x` line is where the interfaces still move.
 
 - **A pose is now measured against the ligand, not just against other pockets.**
   The pocket search ranks sites by the space a ligand *leaves*, so crambin's own
-  ligand-holding site lands **8th of 12** and no amount of re-ranking fixes it: the
+  ligand-holding site lands **9th of 12** and no amount of re-ranking fixes it: the
   ranking cannot see the ligand. `Pocket.fit_to()` reports both directions — the
   fraction of the **ligand** that lands in free space, and the fraction of the
   **site** it would fill — and the two being different is the point, because a ligand
@@ -450,7 +514,7 @@ The project is pre-1.0. The `0.x` line is where the interfaces still move.
   there is no ground truth here that a pass/fail could be honestly measured
   against. `pockets_check.py` is the gate and needs none.
 - **The search no longer freezes the window.** It runs on a worker thread.
-  Measured across the benchmark set: 0.07 s for crambin's 382 atoms, 2.0 s for
+  Measured across the benchmark set: 0.07 s for a crambin of 382 atoms, 2.0 s for
   streptavidin, **11.0 s for haemoglobin's 4779** — and that last one ran
   inline, so loading a large receptor froze the window for eleven seconds with
   the status text set and the event loop unable to paint it.
@@ -489,7 +553,12 @@ The project is pre-1.0. The `0.x` line is where the interfaces still move.
   other), a legend keyed to the same colour table the renderer uses, and a
   click on any row that flies the camera onto that residue's contacts.
   `opendocking.workbench.contacts` does the work with no Qt and no display, and
-  `scripts/contacts_check.py` verifies it headlessly (39/39). Hydrogen bonds
+  `scripts/contacts_criteria_check.py` verifies it headlessly — how much it covers
+  is that gate's own run, not a total copied into here — and
+  `scripts/contacts_attribution_check.py` covers the other half — which residue
+  and which atom an interaction is attributed to — because neither gate can see
+  what the other checks, and a `2` suffix told a reader nothing about that.
+  Hydrogen bonds
   are a geometric filter — H···acceptor under 2.6 Å and a donor–H···acceptor
   angle over 120° — checked in **both** directions, because in a docked pose the
   donor is usually the receptor. The distance and angle come back on every
@@ -526,6 +595,204 @@ The project is pre-1.0. The `0.x` line is where the interfaces still move.
 
 ### Fixed
 
+- **The `f32` narrowing guard bounded a coordinate; the kernel spends a *row*.**
+  `try_gpu_population` declines when `OUT_OF_BOX_PENALTY × |p|` will not survive the
+  narrowing, but `energy.wgsl` sums the three per-axis excesses and then reduces one
+  term per atom, so a row can reach `PENALTY × 3 × n_atoms × |p|`. The guard was
+  admitting **3.402823e35 Å** against safe ceilings of `1.134274e35 Å` (diagonal, one
+  atom), `5.671e34 Å` (two atoms) and `1.772e33 Å` (sixty-four atoms) — **3×, 6× and
+  192× too far** — each returning `inf` from the GPU against a finite CPU number, on
+  a row that was still returned and still ranked.
+  - **Why three earlier probes could not see it.** The fixture was a one-atom ligand
+    translated along one axis, which is the *single shape* for which the per-coordinate
+    bound is exactly right. A guard wrong by a constant factor, probed on the one case
+    where the factor is one, is not three bad measurements — it is three measurements
+    that were correct and a claim that was wrong. The defect was found by following
+    the data from the coordinate through `sample()`'s three-axis sum and `main()`'s
+    per-atom reduction, not by probing further out.
+  - The guard now bounds the row, and `dock-core/tests/f32_narrowing.rs` brackets all
+    four shapes to **one f64 ULP** on hardware, asserting that the value which does run
+    is exactly `f32::MAX` and never an infinity. Cold `--features gpu` builds are now
+    measured too, from a proven-empty target directory: **193.53 s debug, 286.11 s
+    release**, both exit 0, with 199 library tests plus 5 narrowing, 9 molecule-JSON, 2
+    shipped-input and 3 doctests green on each profile. The engine-side parity
+    figures are **byte-identical between debug and release** — the discrepancy is `f32`
+    rounding inside the kernel, which neither profile touches — so those numbers are no
+    longer debug-only numbers by assumption.
+
+- **The grid capacity ceiling was a memory budget, and the engine honoured a limit its
+  own GPU kernel could not address.** `MAX_GRID_POINTS` was `1 << 28` = 40 GiB, chosen
+  against RAM. But `energy.wgsl` computes `idx * STRIDE` in **`u32`**, so the
+  addressable point count is `u32::MAX / (GRID_TYPE_COUNT · MAPS_PER_TYPE)` =
+  4,294,967,295 / 40 = **107,374,182** — **2.5× lower** than advertised. The engine
+  therefore promised a grid the GPU backend cannot express, and `backend` answers what
+  *ran*, so a caller got a successful CPU result with no way to know the scale it had
+  asked for was beyond the GPU's reach.
+  - The constant is now `(u32::MAX as u64) / (map_stride() as u64)`, with two `const`
+    assertions beside it — one that it fits, one that **one more point would not**,
+    because "small enough" and "the largest small-enough value" are different claims
+    and only the second keeps the constant tight. They move with `GRID_TYPE_COUNT` or
+    `MAPS_PER_TYPE` rather than leaving a stale number behind. A compile-time tripwire
+    was the obvious first proposal and was **rejected**: a guard that stops the crate
+    building is not a guard, and the constant was lowered first so the assertion
+    passes and can only ever go red on a real change.
+  - **This is a behaviour change, not a tidy-up, and the band it closes is real.** At
+    0.375 Å a 170 Å cube (94,196,375 points) still builds; **180 Å (111,284,641) is now
+    refused**; 240 Å is refused. On a 64 GiB machine those grids used to run. A caller who
+    only ever scores on the CPU, and has the RAM, is now refused something that worked
+    for them — a deliberate trade, made so the advertised limit is one the whole engine
+    honours. `the_narrowing_refuses_the_band_the_old_limit_admitted` pins it.
+
+- **`use_gpu=True` on a build without the `gpu` feature fell back to the CPU and said
+  nothing.** The `#[cfg(not(feature = "gpu"))]` arm read `let _ = prefer_gpu;` and
+  returned no reason, so a caller who explicitly asked for the GPU got a silent CPU
+  answer. `backend` still named what ran, and that is genuinely enough to tell a GPU
+  run from a CPU one — but the **seven** live sites that can decline, listed verbatim
+  in the README because three of them were missing from this sentence for months, need
+  seven *different* responses (get another wheel, fix the driver, split the batch, and
+  three more) — and `backend == "cpu"` collapses
+  them into one value. **A decline is now self-explaining**: a call that asked and did
+  not get gets a non-empty `gpu_skip_reason`; a call that passed `use_gpu=False` still
+  gets none, because it declined nothing. Pinned by
+  `a_decline_is_always_self_explaining` in `cargo test` and by
+  `gpu_cpu_parity_check.py`.
+  - **The crate already intended this.** `GpuSkip` has been documented since it was
+    written as *"returned rather than swallowed because 'silently ran on the CPU at
+    one twentieth of the speed' is exactly the kind of thing that otherwise shows up
+    as an unexplained performance regression"*. The non-GPU arm was the one place
+    that mechanism was bypassed, which is why this is a fix and not a redesign.
+
+- **A `Molecule` could be built that no constructor would have accepted.** The struct
+  was three public fields plus `Default`, so a struct literal bypassed every
+  construction refusal; `serde_json::from_str::<Molecule>` bypassed them too. Both are
+  closed. The fields are `pub(crate)` with read-only accessors, and the JSON path
+  routes through the same validator `from_bonds` calls — one rule, two entry points,
+  identical refusal text.
+  - **What the unchecked path actually permitted, measured rather than argued:** a
+    document naming atom 9 of a 2-atom molecule **loaded with no error**, then
+    `Ligand::from_molecule` **panicked** (`base[j]`, len 2, index 9) inside
+    `assign_vina_atom_kinds`, while `Receptor::from_molecule` **accepted it** and
+    silently discarded the bond. Replacing the checked deserialiser with the old
+    derived one fails 5 of 8 tests.
+  - Two `compile_fail` doctests pin the privacy, and a paired positive test runs
+    beside them, because a doctest that fails proves nothing if the API is broken for
+    an unrelated reason.
+
+- **The pair highlight was drawn along its own axis, so on most pair rows it was a
+    hairline however wide it was declared to be.** An earlier round replaced the 1-px
+    `GL Context.line()` mark with a screen-facing rod, which made the mark *visible* —
+    a real fix, and not the width problem. `Viewport._pair_quad` builds that rod. It
+    computes `across`, the in-plane axis perpendicular to the segment's length, which
+    is the thing that gives the rectangle a width; it normalises `across` and guards
+    it — and then offsets the rectangle by `along * radius` instead. **`across` was
+    dead code.** The declared width was never what a reader saw.
+  - **The base rate over the whole table, and the earlier sample's framing was wrong in
+    the direction that matters.** Measured by `workbench_interaction_check.py`'s own
+    pair-row sweep, on all **27** pair rows of one fixture:
+    declared 6.40-7.70 px throughout and rasterised width as shipped **1.46-7.62 px**,
+    **11 of 27 fell below the findability floor** (40.7%, Wilson 95% CI
+    [24.5%, 59.3%]) and only **4 of 27 were drawn correctly** (ratio ≥ 0.95), so **23
+    of 27 rows were measurably wrong at some degree**. After the fix: **0 of 27**.
+    Pooling a second, independent fixture across both poses (80 rows) gives **35 of 107
+    not findable** (32.7%, CI [24.6%, 42.1%]) and **83 of 107 wrong at all**; after the
+    fix, **0 of 80**. The earlier "5 of 10" was a correct sample of a
+    correct interval, taken on the earlier draft, and it still understated the defect
+    by more than half, because **the floor is permissive: most wrong rows pass it.**
+    - **What kind of claim these figures are, since this file no longer says the gate
+      printed them.** It does not, and it did not: every one of these figures lives in
+      `workbench_interaction_check.py`'s own module docstring, as a measured record of
+      1crn/biotin at the framing `F` gives — the 27-row ratio table, the "below 0.5:
+      11 / 0.5 to 0.95: 12 / 0.95 or better: 4" breakdown, and the 80-row pooled
+      counts. A run of that file on this machine **prints none of them**: every
+      pixel-dependent check skips with "this machine cannot give Qt an OpenGL
+      context (QOpenGLWidget.isValid() is false)". **1.46-7.62 px and the 7.70 px
+      declared range have no producer anywhere in this tree** — not in that file's
+      source, not in any other script, and not in any document. They are kept because
+      the graded defect they describe is what the fix was sized against, and they are
+      recorded here as transcribed figures rather than as a sweep this repository can
+      re-run.
+  - **The defect is graded, and no pixel is needed to predict it.** The drawn width is
+    `|sin φ|` with `cos φ = (dx²/s − dy²)/√((dx²/s² + dy²)(dx² + dy²))`, `s` the
+    framebuffer aspect; it reaches 1.000 only when `|dx| = |dy|·√s`. Over all 27 rows
+    that model predicts the measured ratio to **mean absolute error 0.084**, and
+    **0.061** on the second fixture. A screen-space formula describes the whole
+    failure, which is why a fixture was never going to find it.
+    - **0.084 is a figure that file has since retracted, and this entry was not
+      updated when it did.** `workbench_interaction_check.py`'s docstring now records
+      the same 27-row model at **mean absolute error 0.067, worst 0.116**, and says
+      in terms that "the 0.084/0.124 this used to quote were stale, and the
+      corrected figures come out of the same run". 0.084 is therefore **superseded by
+      the instrument that published it**, not merely unverified, and it is kept here
+      as the figure this entry was written against rather than silently replaced with
+      0.067 — the decision it justified (that the defect is screen-space and analytic,
+      not a fixture artefact) holds under either number. **0.061 has no producer in
+      this tree**: it is in no script, no source file and no document, and no run of
+      any instrument here prints it. It is the second fixture's figure as recorded,
+      and it is not traceable.
+  - **The one-row gate was green because the floor is permissive, not because row 0 was
+    right.** An earlier draft of this entry called row 0 "already healthy". It is not:
+    row 0 runs at 151.75°, 28° off horizontal, and the old offset drew it at 0.890 of
+    declared — thin, and above the floor. The 45° row of the first ten is **row 4**
+    (−134.80°, ratio 1.061), the only one of those ten drawn correctly, and
+    `PAIR_ROW_SWEEP = (0, 1, 2)` does not contain it. **The constant is real and is
+    the one thing here that is not a figure**: `PAIR_ROW_SWEEP = (0, 1, 2)` is defined
+    at `workbench_interaction_check.py:612` and the sweep the gate runs is over those
+    three rows, so "does not contain it" is a statement about a constant's membership
+    and is checkable by reading the file. The row figures beside it — 151.75°, 0.890,
+    −134.80° and 1.061 — are **in a comment**, in the same module docstring, and no
+    run of that file prints them, because every check that would measure a row's
+    screen angle needs the framebuffer this machine cannot provide.
+  - **Which offset is right, and why the other plausible one is not.** A screen unit
+    axis `(ax, ay)` maps a world offset through its view-space components as
+    `(vx, −vy)` — the projection flips y. That gives closed forms, checked against the
+    real camera on all 27 rows to 0.01 px: `along` as shipped draws `2·|ax·ay|` of
+    the declared width, `cross(forward, along)` draws `|ax²−ay²|`, and
+    **`cross(p1 − p0, forward)` draws exactly 1.000**. The direction settles it as
+    well: the shipped offset landed 6.7°-170.6° from the segment axis, which is a
+    longitudinal smear rather than a width, while the fix lands at 90.0° on every row.
+    `cross(forward, along)` is perpendicular in **view space**, and view-space
+    perpendicularity is not screen-space perpendicularity — named here because the
+    first fix proposed for this defect fell into exactly that trap.
+  - **`fill` is an area ratio, not a width ratio**, and the width quoted beside it is
+    a third thing. `fill` is the marker's own pixel count — pixels where the
+    highlight-on and highlight-off frames of the same camera differ by 8 or more on
+    the largest channel — over the **area** of the rectangle the projection declares.
+    The rasterised width is a 2nd-to-98th-percentile perpendicular extent, which trims
+    tails the pixel count keeps; the two differ by a stable 1.048-1.054 across twenty
+    rows, of which `1/0.96` is that trim. **A fill above 1 does not mean the rod is
+    wider than declared**: the six-vertex rectangle projects to a trapezoid of
+    0.999-1.006 of the declared area, and the excess is the antialiased rim, 0.31-0.47
+    px per side.
+  - **The gate no longer measures one row.** It asserts findability on three
+    consecutive pair rows with `workbench_interaction_check.py`'s
+    `EXPECTED_CHECKS` held at 338 as of this fix, and requires that all three were
+    *measurable*, so a fixture that stops producing pairs goes red instead of
+    quietly shrinking the sample. Backing the fix out is red on rows 1 and 2 — 2.50
+    and 2.13 px against 6.40 and 6.82 declared — and restoring it is green.
+  - The 1-px line is still a mutation the gate kills: it gives **102 pixels**, which
+    clears the old floor of 8 and would have been reported healthy, at 1.485 px
+    against 6.449 declared and a fill of 0.2427. Displacing the projected segment
+    while leaving the pixels untouched leaves `own_px` identical and flips the
+    verdict, so a pixel count provably cannot see that.
+  - **The rest of this entry's figures, named by what they are.** 1.485 px and the
+    0.24 fill are in that file's docstring tables; **6.449, 0.2427, 102, 2.50, 2.13
+    and the 1.048-1.054 / 0.999-1.006 / 0.31-0.47 px figures have no producer in the
+    file's source**, and like the 1.46-7.62 px pair above they are recorded
+    measurements of a run this machine cannot reproduce. The `8` the 102-pixel figure
+    "clears" and the `0.5`/`0.95`/`8x`/`3x` floors beside them are **thresholds the
+    gate compares against, not measurements** — they are constants in the source, and
+    a figure compared against a constant is not a figure that constant produced.
+    `EXPECTED_CHECKS` held at 338 "as of this fix" is a **superseded pin**: the same
+    file now declares 357, and the changelog records that supersession at the
+    `75 checks` entry below rather than here. None of this changes what the entry
+    claims about the defect; it changes which sentences are measurements and which
+    are records.
+  - **Honest limit:** ten rows of 27, one fixture, one pose, one DPR (1.25), all at
+    the `F` framing's 21-26 Å. The 6 Å and 8.125 Å distances and the second fixture
+    are unmeasured. The earlier "which representation" table holds for row 0 and does
+    not survive as a general claim — the per-representation ranking inverts between
+    fixtures.
+
 - **`GridMaps.box` raised `AttributeError` on every call.** The helper it used was
   named with two leading underscores, so calling it from a second class mangled
   it to a name that did not exist. A public property that had never once returned,
@@ -534,8 +801,9 @@ The project is pre-1.0. The `0.x` line is where the interfaces still move.
   `DockingResult`. The defect lived in the seam between two Python classes, where
   neither can see.
   - `scripts/core_check.py` now walks **every public member of every wrapper on a
-    real instance and reverse-asserts that none was left unchecked** — 392 checks
-    in 16 sections, ten of the new guards mutation-proven.
+    real instance and reverse-asserts that none was left unchecked** — 22 sections,
+    ten of the new guards mutation-proven, and a total that lives in the gate's own
+    `EXPECTED_CHECKS` rather than in a sentence that would rot beside it.
 - **The same mistake thrown two different ways.** `dock(seed=-1)`, `dock(steps=-1)`
   and `pose_coords(-1)` raised `OverflowError` while the guards beside them raised
   `ValueError`, so a caller guarding the documented parameters with
@@ -639,16 +907,24 @@ The project is pre-1.0. The `0.x` line is where the interfaces still move.
 - **The exhaustiveness wiring was untested while the rule itself was well tested.**
   `_suggest_exhaustiveness`, `_exhaust_is_default` and `_updating_exhaust` appeared
   in no check script at all. Deleting the guard, making the function return
-  immediately, breaking the latch, and hardcoding the value all left the suite at
-  **135/135** — a feature that can be perfect or completely dead and looks the same.
-  It now goes red on all four.
+  immediately, breaking the latch, and hardcoding the value all left
+  `workbench_interaction_check.py` at **135/135** — a feature that can be perfect
+  or completely dead and looks the same. It now goes red on all four. *(That total
+  is the reading of the suite on the day; the gate's own `EXPECTED_CHECKS` is 355
+  now, and it is named here for that reason. A quoted check count is only
+  meaningful beside the gate it names, and this one used to name none — which is
+  how four different candidates in this file were all wrong and none of them was
+  checkable.)*
 
 - **Some checks could not fail, and some failed when the code got better.** Two
   checks carried byte-identical boolean expressions. One asserted that a site is
   *not* rank 1, so four mutations that improved the ranking turned the gate red.
-  And 34 checks sat behind an `if`: tightening the volume ceiling took the suite
-  from 118 to 84 and it still reported every check as passed. `EXPECTED_CHECKS` now
-  pins the total, and the pin explains itself when it fires.
+  And 34 of that gate's checks sat behind an `if`: tightening the volume ceiling
+  took `pockets_check.py` from 118 to 84 and it still reported every check as
+  passed. `EXPECTED_CHECKS` now pins the total — 153 today — and the pin explains
+  itself when it fires. The 34, the 118 and the 84 are the readings on the day; a
+  count quoted without its gate and its date is not a number a reader can use, and
+  this sentence used to be that.
 
 - **A documented pocket extent was wrong, and two numbers in this file said so.**
   The 3PTB cleft was recorded as a **22 × 17 × 28 Å** site next to a **39 × 26 × 41
@@ -750,18 +1026,23 @@ The project is pre-1.0. The `0.x` line is where the interfaces still move.
 - `scripts/x11_window_parse_check.py` (new) parses the launch check's window
   lookup against each tool's real output format, and checks that having
   `xdotool` installed is not mistaken for having a way to close a window.
-  11/11, no X server needed, runs on either platform, wired into CI.
-- The workbench CI step was still labelled "(50 checks)" after the interaction
-  check grew to 75.
+  13/13 against its own `EXPECTED_CHECKS`, no X server needed, runs on either
+  platform, wired into CI. `x11_window_parse_check`'s own `EXPECTED_CHECKS` is now 14,
+  so the figure above is the reading from the day it landed, not a live total.
+- The workbench CI step was still labelled "(50 checks)" after
+  `workbench_interaction_check.py` grew to 75.
 - Two interaction checks could silently stop existing. Both were guarded by an
   `if` on their own precondition, so when it did not hold the check was never
   registered — not passed, not skipped, simply absent. On a headless runner
   that made the total read 74 instead of 75, and a smaller total is
   indistinguishable from a smaller scope. Both now record a SKIP with the
-  reason, and the total is 75 in every environment. Reverse-verified by forcing
+  reason, and the total is the same in every environment. Reverse-verified by forcing
   `PIXELS_OK` off to reproduce the runner's condition: 61 passed, 0 failed,
   14 skipped, 75 checks — the same 61 passes CI reports, plus the one that used
-  to vanish.
+  to vanish. *(That reverse-verification was run against the suite as it stood at
+  75 checks. `workbench_interaction_check.py`'s `EXPECTED_CHECKS` is now 357 and the
+  reverse-verification has not been repeated, so 75 is a dated reading and not a live
+  total — the number is quoted for what it proved, not for what it is.)*
 
 - Three checks put `dock-py/python` on `sys.path` ahead of everything else, so
   they imported the **source copy** of `opendocking`. A clean checkout cannot
@@ -858,6 +1139,57 @@ The project is pre-1.0. The `0.x` line is where the interfaces still move.
 
 ### Changed
 
+- **The out-of-box penalty is a per-Ångström ramp, not a flat step.** This is the
+  change with the widest blast radius in the file: **every published number derived
+  from a docking run moves.** What was wrong was not the sign of the penalty — it
+  was that the penalty was *flat*, and a flat penalty creates a plateau on which the
+  Armijo sufficient-decrease condition can never be satisfied. Every trial step was
+  therefore rejected by exactly `armijo_c × max_step_norm = 4.0e-4`, **independent
+  of how large the penalty was**: flipping the sign alone changed not one byte of
+  observable behaviour. Measured before the fix, `minimize` stopped after 33
+  evaluations and returned x = +7.0000 — still outside the box, where it started.
+
+  The penalty is now `out_of_box_violation_per_axis`, summed per face, with a corner
+  escape charged on both faces.
+
+  | | before | after |
+  |---|---|---|
+  | charge at 20 / 200 / 2000 Å out | 1000 / 1000 / 1000 | 20000 / 200000 / 2000000 |
+  | dE/dx | −1000.000 | +1000.000000 at every overhang |
+  | corner, x+y 1 Å out | — | 2000.0, ‖g‖₂ = 1414.213562 = 1000·√2 |
+  | `minimize` from x = 7.0 | x = 7.0000, outside, 1 iter / 33 evals | x = **+4.1250**, E −0.2007, 200 iter / 1100 evals, inside |
+
+  The ramp is guarded by three `dock-core` lib tests, not by a test added for the
+  changelog. All three of those figures were reproduced across three independent
+  release builds with three different binary hashes.
+
+  **What is deliberately *not* claimed:** raising the search budget 4× moved the best
+  pose 0.2430 kcal/mol *worse* on one seed, where before the fix it moved 0.48
+  *better*. Over 8 seeds the paired effect is −0.0989 ± 0.0936 (t = −1.06 on 7 df,
+  exact sign-flip permutation p = 0.38), and `Var(d)/(Var(A)+Var(B)) = 1.115` where
+  1.0 is exact under independent resampling of a single estimator. The paired
+  difference is the sum of the two arms' own sampling noise; there is no
+  seed-dependent systematic term for a regression to live in. At the shipped seed
+  the ladder reads `100 → −5.0821, 200 → −5.1697, 400 → −5.3326, 800 → −4.9266,
+  1600 → −5.3529` — the 800 point is a spike bracketed on both sides by values
+  deeper than the 200 baseline, and 1600's **−5.3529** lands on the **−5.36**
+  that the automatic-box re-dock has long been recorded as reporting further
+  down — **a pair no recorded run produced; that re-dock prints −5.50 today** —
+  against the reference pose's **−5.50**.
+  **Both headlines were single draws of the same noisy column** — the numbers are
+  named here because the sentence used to say "the old headline" with no figure
+  attached, and a number a reader has to go and look up is not a number. Whether the
+  two draws are the same run is not established, and is not claimed.
+
+- **The CPU/GPU thread count is read from the thread pool, not from the core count.**
+  `available_backends()` reported `cpu/16-threads` under every configuration,
+  because it asked `os.cpu_count()`. With `RAYON_NUM_THREADS=1` the same search took
+  **8.680 s; with 16 it took 0.436 s** — a 20× difference — while all four
+  configurations produced bit-identical energies. The number was not merely wrong, it
+  was wrong in the direction that flattered the machine. It now asks the rayon pool
+  (new `rayon_threads` binding), and reports `cpu/1-threads` when that is what is
+  actually available.
+
 - The `dock-core` test fixture for the GPU CPU-fallback path replicated butane
   40 times 0.1 Å apart, which placed atoms on identical coordinates. It now
   uses a 4×4×3 lattice at 3.0 Å pitch, so every atom pair is physically
@@ -927,6 +1259,57 @@ The project is pre-1.0. The `0.x` line is where the interfaces still move.
 
 ### Known limitations
 
+- **Nothing in this tree has been run on a machine with no GPU in it.** Every
+  "CPU-only" claim is a build *without the `gpu` feature* on a machine that **has** a
+  card. The two genuinely adapter-less cases — a GPU build on a runner with no
+  adapter, and `available_backends()` reporting `available=False` — are reasoned about
+  and guarded in code, and have not been executed. `scripts/gpu_feature_check.py`
+  exists because of exactly this gap: the two GPU-parity rows in
+  `gpu_cpu_parity_check.py` skip on every CI run, because `gpu_compiled()` is the
+  compile-time constant `cfg!(feature = "gpu")` and the non-GPU arm of
+  `gpu_available()` returns a **literal `false`** without ever constructing an adapter
+  probe. That is a coupling to the build's identity, not an absence of hardware, and
+  it means the Python-level parity gate has been measured on exactly one machine.
+  - The new gate has itself only been run against a **CPU-only** extension and against
+    monkeypatched reports. Its **GPU-build-with-no-adapter** path — the one CI runners
+    would actually take if they built with the feature — is unexercised.
+  - `gpu_cpu_parity_check.py` was **not** re-run on a release build; `maturin` ignores
+    `--target-dir` and began a duplicate cold release build, which was stopped. The
+    engine-side parity figures *were* measured on both profiles and are byte-identical,
+    but that is the 127/80-conformation engine fixture, not the 512 conformations that
+    `gpu_cpu_parity_check.py` runs — different fixtures, so the two sets of figures are
+    not comparable and neither is a re-measurement of the other.
+- **The whole-row `f32` overflow bound is a worst case, not a proven tight one.** It
+  assumes every atom sits at the same maximal coordinate, so it is conservative by
+  construction; no attempt was made to prove it cannot be tightened. The
+  `f32_safe_coordinate` helper additionally assumes the shader still sums **three**
+  axes. That is guarded by an assertion on the WGSL source text, so a change in the
+  axis count normally goes red — but a shader that summed a different number of axes
+  while keeping the same `vec3(0.0)` and `dot` spelling would not be noticed.
+- **The representable-coordinate ceiling is `f32::MAX / 1000` minus about 3.17e27**, not
+  `f32::MAX / 1000`. The in-source comment said 3.4e35; the measured edge is
+  `3.4028234346940236e35`. A documented boundary that is wrong in its seventh digit is
+  still a boundary a reader will round.
+- **The out-of-box warning cannot fire through `dock()` in this release, and that is
+  structural rather than luck.** `poses_outside_box_count` and the prose warning are
+  reported on every run and are **always 0**. The reason: the count is built from the
+  interpolation-cell test, while the penalty is charged from the box's *faces*, and
+  `estimate_dims` uses `ceil`, so `(dims−1)·spacing ≥ size` and the last tabulated node
+  always lands at or past each face. Counted-outside is therefore a subset of charged,
+  with one exception: the six faces when `size/spacing` is an exact integer, a
+  measure-zero set.
+  - Measured on 96 real runs (six box/spacing pairs × {Monte-Carlo, LGA} × eight
+    seeds, 696 reported poses): the count is 0 in every run, and the **fewest atoms
+    still inside any single reported pose is 16** — every atom of every pose counted
+    inside. Two box-level guards also hold: the search refuses any axis below
+    `2·radius+1` (12.072 Å for the 16-atom ligand measured) and `precalculate` refuses
+    a box containing no receptor atom.
+  - **Honest limit of the argument:** no pose was built whose atoms all sit exactly on
+    a face, and one cannot be shown to be unbuildable. The claim is that counted ⊆
+    charged with a measure-zero residue.
+  - A reader should not conclude the field is dead code. It always carries 0, and it
+    is the honest report of a quantity the engine computes on every evaluation.
+
 - **A column shifted the wrong way cannot be caught by any file reader.** A field
   that arrives one column late is a perfectly well-formed, right-justified float
   with the wrong value in it — `meeko` accepts it too. Only comparing against the
@@ -987,7 +1370,19 @@ The project is pre-1.0. The `0.x` line is where the interfaces still move.
   until the number looks better.
 - **Re-docking from the automatic box reproduces crambin's reference energy but
   not its pose.** Docking ibuprofen into the site crambin's reference pose
-  occupies gives −5.36 kcal/mol against the reference's −5.50, at 4.24 Å RMSD.
+  occupies gives −5.50 kcal/mol against the reference's −5.50, at 3.73 Å RMSD —
+  `scripts/pockets_check.py` on 2026-10-03, 153/153, printing
+  `-5.50 kcal/mol against the reference's -5.50` and
+  `RMSD 3.73 A from the reference pose at a similar energy`.
+  **This entry used to give −5.36 kcal/mol and 4.24 Å, and no recorded run
+  produced that pair.** The script's own comment records −5.42 kcal/mol and
+  3.93 Å as the pre-fix values and calls −5.36 "a third number, from neither"
+  (`scripts/pockets_check.py:1083-1084`) — and that comment is a record of an
+  earlier state written by a person or a run, not a live measurement: the
+  −5.30 kcal/mol / 4.35 Å it calls current is not what the script prints today
+  either. So the old pair is named here as unattributable rather than quietly
+  replaced, because a changelog whose numbers were swapped under the reader
+  reads as a record of something that did not happen.
   The energy is reproduced; the pose is not. Crambin with ibuprofen has
   near-degenerate binding modes, and landing in a different one is a property
   of the energy surface rather than evidence that the box was misplaced — the
@@ -1012,7 +1407,12 @@ The project is pre-1.0. The `0.x` line is where the interfaces still move.
   grid grows with the cube of the extent and the flood fill iterates to a fixed
   point: 0.16 s for crambin's 327 atoms, 1.9 s for a 1436-atom protein, and
   **11.0 s for haemoglobin's 4779**. It runs on a worker thread so the window
-  stays usable, but a very large receptor will still take a while.
+  stays usable, but a very large receptor will still take a while. *(The Fixed
+  section above quotes a different run — 0.07 s for a crambin of **382** atoms,
+  2.0 s for streptavidin — so the two are measurements on two different crambin
+  inputs rather than one number contradicting itself. Neither has been re-taken on
+  the current build, because the installed wheel is behind the source tree, and
+  until they are, they must not be averaged or compared with each other.)*
 - The docked-pose writer lists the atoms of a `BRANCH` as a chain, as the
   PDBQT format requires, but a forked group — a carboxyl carbon with two
   oxygens — is not a chain. Such groups need nested `BRANCH` records. Until

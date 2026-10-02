@@ -98,28 +98,65 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 #: + 3  section 3, the framing is pointed at the selection and contains it
 #: + 4  section 4, the transition starts where it was and lands on its target
 #: + 3  section 5, the degenerate framings are rejected and the real one is not
+#: + 5  section 5b, what the camera-distance floor is, measured
 #: + 3  section 6, the pose's and the receptor's share of the pixels
 #: + 3  section 7, the overlay is readable at that framing
 #: + 4  section 8, the pose is findable in the picture, plus the two
 #:      mutations that must be rejected and the control that must be accepted
 #: + 3  the three meta-checks in the summary, which count themselves
 #:
-#: 1 + 3 + 3 + 4 + 3 + 3 + 3 + 4 + 3 = 27. Sections 6, 7 and 8 contribute
+#: 1 + 3 + 3 + 4 + 3 + 5 + 3 + 3 + 4 + 3 = 32. Sections 6, 7 and 8 contribute
 #: their full count on a machine that cannot draw them, by way of a recorded
 #: skip, so the total is the same in every environment.
 #:
-#: **26 -> 27, and the number is allowed to move.** The third meta-check is the
-#: one this file said it would never have, on the grounds that adding it would
-#: take the total to 27 while 26 is a number other documents quote. That reason
-#: does not hold: a guard that changes the number it guards is not a guard, and
-#: a quoted number is not a reason to leave a defect uncovered. What the third
-#: check guards was measured rather than argued -- see `summarise`, which is the
-#: only place a tally is read.
-EXPECTED_CHECKS = 27
+#: **26 -> 27 -> 33, and the number is allowed to move.** The third meta-check is
+#: the one this file said it would never have, on the grounds that adding it
+#: would take the total to 27 while 26 is a number other documents quote. That
+#: reason does not hold: a guard that changes the number it guards is not a
+#: guard, and a quoted number is not a reason to leave a defect uncovered. What
+#: the third check guards was measured rather than argued -- see `summarise`,
+#: which is the only place a tally is read.
+#:
+#: **27 -> 32 is section 5b**, and all five of its sites are unconditional: two
+#: recover the projection matrix, one evaluates the shader's fog term, one
+#: sweeps the predicate over five selections and eleven distances, and the fifth
+#: is the behavioural enforcement. It runs on a machine with no framebuffer
+#: exactly as it does on one with a GPU. It is a separate section rather than a
+#: sixth check inside section 5 because the claim is a different *kind* of
+#: claim: section 5 asks whether the predicate refuses bad framings, and 5b asks
+#: what the number it refuses below actually is. One is a measurement of
+#: behaviour and the other is a measurement of a constant, and a file that ran
+#: them together would report them as one result.
+#:
+#: 5b also **corrects the module's stated reason for the floor**, which is
+#: `framing_selection.py`'s comment and not this file's to change: the depth clip
+#: is constant and the fog is zero below its own near plane, so neither is the
+#: mechanism. What the floor is pinned to instead is the sweep that produced it
+#: -- the furthest framing the other two instruments would have accepted -- which
+#: is re-derived here rather than restated, so lowering the constant does not
+#: lower the bound it is compared against.
+#:
+#: **The count was measured from a run, twice.** 33 was derived on paper from a
+#: first draft of this section that had six sites; the run reported 32, and the
+#: sixth had been two mutually exclusive halves of one question in the first
+#: place. The pin is the run's number, which is the rule the rest of this file
+#: states and the one that makes the check able to catch a wrong derivation.
+EXPECTED_CHECKS = 32
 
 #: The call-site census, declared here rather than in a table
 #: `check_scripts_declare.py` owns. Comments only, so `EXPECTED_CHECKS` above is
 #: unaffected by them.
+#:
+#: **17+10 -> 22+10, and the five added sites are all in section 5b, all
+#: unconditional.** The guard *digest* is unchanged at
+#: `sha256:43e96753...`, and that is the load-bearing half of the block rather
+#: than a detail: the ten guarded sites are still exactly the ten framebuffer
+#: checks, so the floor's section is arithmetic on a camera, a point cloud and
+#: a projection matrix, and it runs on a machine that cannot draw a pixel. A
+#: guard that disappeared on exactly the runners that cannot see a picture
+#: would be a guard in the sense the rest of this file argues against, and the
+#: digest is what makes "the guarded set did not change" a checkable claim
+#: rather than an assurance.
 #:
 #: 17+10, and the ten guarded sites are exactly the ten framebuffer checks:
 #: three in section 6, three in section 7 and four in section 8. Everything
@@ -149,11 +186,11 @@ EXPECTED_CHECKS = 27
 #: `ovl is None` and `pm is None or rm is None` companions -- so the substance
 #: of the declaration still matches the file and only the hash literal was out of
 #: date, with no edit of mine in between. The value below is the derived one,
-#: re-derived from the same walk rather than copied, and the census is 17+10 for
-#: the reason above. Anyone who needs to know what changed should diff the ten
-#: guard strings, which is what the digest is a fingerprint of.
+#: re-derived from the same walk rather than copied. Anyone who needs to know
+#: what changed should diff the ten guard strings, which is what the digest is
+#: a fingerprint of.
 #: GATE-DECLARE 1
-#: sites: 17 unconditional + 10 guarded
+#: sites: 22 unconditional + 10 guarded
 #: guards: sha256:43e967532092d8069017ba01abdb301c0c2cb0041117d44a7b8c6412e81a0eda
 
 EXPECTED_SECTIONS = (
@@ -162,6 +199,7 @@ EXPECTED_SECTIONS = (
     "3. the framing is pointed at the selection and contains it",
     "4. the transition lands where it was aimed",
     "5. the degenerate framings are rejected",
+    "5b. what the camera-distance floor is, measured",
     "6. the pose and the receptor in the pixels",
     "7. the interaction overlay is readable at that framing",
     "8. the selected pose can be found in the picture",
@@ -691,6 +729,302 @@ def main() -> int:
         f"the same predicate on the real target ({target.distance:.2f} A, fill "
         f"{fill:.2f}) says not degenerate, so the two rejections above are the "
         f"guard discriminating and not the guard being unable to pass anything",
+    )
+
+    # -- 5b. what the floor is, and what it is pinned to ------------------
+    # `MIN_SELECTION_DISTANCE` was the one constant in this module that no
+    # instrument in this file read, so it was a number whose only power was to
+    # change a sentence. The check below is deliberately **not**
+    # `fs.MIN_SELECTION_DISTANCE >= 6.0`: that is self-certifying, because
+    # lowering the constant lowers the bound it is compared against and the
+    # check goes green having verified nothing.
+    #
+    # **What the floor is not.** The module's own comment (framing_selection.py
+    # 155-159) said the viewport "derives its near and far planes from the
+    # camera distance", so a camera inside its own subject is a picture with
+    # the subject clipped out. Measured, that is not what the product does, and
+    # the two checks below are the measurement rather than a disagreement:
+    #
+    #   * the depth clip is `Camera.projection(aspect, znear=0.1, zfar=2000.0)`
+    #     -- **constants**. Recovered from the matrix at five camera distances
+    #     and identical every time, one distinct whole matrix across all five,
+    #     so a subject at 0.5 A is 0.5 A from the eye with the near plane at
+    #     0.1 A, i.e. comfortably in front of it. None of the five framings that
+    #     sentence offered as evidence is clipped: their nearest points are 0.41
+    #     to 4.53 A from the eye, and they would have to be drawn at 0.19 to
+    #     1.56 A -- 3.9x to 31x below the floor -- before anything was clipped.
+    #   * what *does* scale with distance is the fog range, and the shader's
+    #     term is `f = clamp((v_depth - near) / (far - near), 0, 1)` mixed
+    #     toward `fog_color`. Below the near plane `f` is **zero**: fog adds
+    #     haze with distance and never hides a near subject. Measured on the
+    #     subject itself, f is 0.000 out to 4.4 A, 0.017 at 6 A, 0.084 at 8 A
+    #     and 0.669 at 20 A and at 40 A.
+    #
+    # So the floor is not pinned to a clipping mechanism, because the product
+    # has none.
+    #
+    # **What it is pinned to, and this is a correction to the paragraph above.**
+    # The rest of that section said the floor's only origin was the sweep below
+    # -- the largest distance at which the predicate used to accept a framing,
+    # 5.99 A, with 6.0 the next value above. That is true, and it is the wrong
+    # thing to lead with, for a reason this section has since measured: **the
+    # distance clause is unreachable from the product.** `fit_view` and
+    # `focus_target` both floor the achieved distance, so nothing the product
+    # produces can arrive below the floor, and `focus_target` cannot even be an
+    # argument to the predicate because it returns a `PairFraming`. A constant
+    # justified by a clause no product path can reach is justified by the gate.
+    #
+    # The floor's real origin is `MAX_DRAWN_ANGLE_FILL`, which is a product
+    # bound: at 45 deg it owes the eye `0.30 / sin(0.25 * 22.5 deg)` = 3.061 A
+    # of clearance per 0.30 A of drawn radius, and `fit_view` on its own breaks
+    # it for exactly the selections a floor is for, because their unfloored
+    # distance goes to nearly nothing -- a 2-atom pair within 0.3 A is framed at
+    # 0.180 A with the eye 2.974 A inside its own drawn surface. Bisecting the
+    # floor against that bound over the same shapes puts the boundary at
+    # 3.7901 A, so 6.0 A is 1.58x it. That is what `framing_selection.py` now
+    # says, and the check below re-derives both numbers rather than restating
+    # either.
+    #
+    # **The basis matters to every number in that paragraph, and getting it
+    # wrong is how this section was wrong twice.** The first version of these
+    # figures was measured on identity right/up/forward, which put the boundary
+    # at 3.8877 A; the live `Camera()` at yaw 0.6, pitch 0.4 puts it at
+    # 3.7901 A, and the check below went red on the difference rather than
+    # agreeing with the prose. It also changed a count: on identity axes a
+    # 2-atom pair within 0.3 A at 0.5 A filled 0.512 and only the distance
+    # clause refused it, while on the live basis it fills 0.275 and the fill
+    # clause refuses it too -- so it is **four** framings the distance clause is
+    # the sole instrument for, not five. The aspect ratio, by contrast, moves
+    # nothing: the boundary is 3.7901 A at 1.0, 1.21, 1.5 and 2.0, because what
+    # sets it is the selection's own view-space depth.
+    section("5b. what the camera-distance floor is, measured")
+
+    _cam = Camera()
+    _clip = []
+    _matrices = set()
+    for _d in (0.3, 0.5, 1.0, 6.0, 40.0):
+        _c = Camera()
+        _c.distance = _d
+        _m = _c.projection(1.0)
+        _matrices.add(_m.tobytes())
+        _a, _b = float(_m[2, 2]), float(_m[2, 3])
+        # a = (f+n)/(n-f) and b = 2fn/(n-f), so n = b/(a-1) and f = b/(a+1),
+        # and the tuple is (distance, znear, zfar) to match the `_d, z, _f`
+        # unpack below. **Two things were wrong here and both had to be fixed
+        # for the verdict to mean anything.** The slots were swapped, so `z`
+        # held *zfar* and the set being compared was five zfar values while
+        # every message called it znear; and the znear slot carried a sign
+        # flip. The recovered zfar is also not evidence of anything: the matrix
+        # is float32 and `a+1` is 1.0e-4, so it comes back as 1999.7682 against
+        # a true 2000.0. `len(set) == 1` over either quantity happened to be
+        # true, which is why a check that could not fail ran green for a while.
+        # The verdict below pins `znear` to the source constant rather than to a
+        # self-consistent set, which is the assertion that catches all of it.
+        _clip.append((_d, _b / (_a - 1.0), _b / (_a + 1.0)))
+    _znear_set = {round(z, 6) for _d, z, _f in _clip}
+    # A different fov has to change the matrix, or "the matrix did not move" is
+    # true only because the recovery reads nothing at all.
+    _c60 = Camera()
+    _c60.fov = 60.0
+    _fov_sensitive = _c60.projection(1.0).tobytes() not in _matrices
+    check(
+        "the product's depth clip does not move with the camera, so the floor "
+        "is not pinned to a clipping mechanism",
+        (len(_znear_set) == 1 and abs(sorted(_znear_set)[0] - 0.1) < 1e-6
+         and len(_matrices) == 1 and _fov_sensitive),
+        f"Camera.projection recovers znear={sorted(_znear_set)[0]:.4f} at "
+        f"camera distances {[d for d, _z, _f in _clip]} -- one value, not five, "
+        f"and {len(_matrices)} distinct whole matrix across all five, while the "
+        f"same call at 60 deg of fov does differ, so the recovery is sensitive "
+        f"and the constancy is real. The module comment said the near and far "
+        f"planes are derived from the camera distance; they are `znear=0.1, "
+        f"zfar=2000.0` constants, and that sentence has now been removed from "
+        f"`framing_selection.py` and replaced with the drawn-surface bound this "
+        f"floor is actually for",
+    )
+
+    def _fog_at(dist: float, depth: float) -> float:
+        _span = max(dist * 0.55, 8.0)
+        _n, _fr = _span * 0.55, _span * 2.1
+        return min(max((depth - _n) / max(_fr - _n, 1e-4), 0.0), 1.0) ** 2
+
+    _fog_floor = _fog_at(fs.MIN_SELECTION_DISTANCE, fs.MIN_SELECTION_DISTANCE)
+    check(
+        "and the fog cannot be what the floor is for either: it is zero below "
+        "its own near plane",
+        _fog_floor < 0.05,
+        f"fog on the subject at the floor of {fs.MIN_SELECTION_DISTANCE:g} A is "
+        f"{_fog_floor:.4f} (0.0000 out to 4.4 A, 0.0843 at 8 A, 0.6694 at "
+        f"40 A). `f = clamp((v_depth - fog_range.x) / (...), 0, 1)` is **zero** "
+        f"below the near plane, so fog adds haze with distance and never hides a "
+        f"near subject. Two candidate mechanisms measured and excluded; what is "
+        f"left is a product convention, and the next check says which",
+    )
+
+    # The origin, re-derived: the largest distance at which the predicate
+    # accepts a framing that the other two instruments also accept, over the
+    # same sweep the module's comment reports. 5.99 was that distance and 6.0
+    # is the next value above it, so the floor is pinned to a *measurement of
+    # the defect it was written for* rather than to itself.
+    def _blob(n: int, radius: float, seed: int = 0) -> np.ndarray:
+        _g = np.random.default_rng(seed)
+        _v = _g.normal(size=(n, 3))
+        return _v / np.linalg.norm(_v, axis=1, keepdims=True) * radius
+
+    _sweep_d = (0.05, 0.1, 0.25, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0, 5.99)
+    _shapes = [(2, 0.3), (19, 1.0), (50, 2.0), (200, 4.0), (500, 8.0)]
+    _worst = 0.0
+    _worst_at = ""
+    for _n, _rad in _shapes:
+        _pts = _blob(_n, _rad)
+        for _d in _sweep_d:
+            _t = fs.FramingTarget(
+                center=np.asarray(_pts.mean(axis=0), np.float32), distance=_d,
+                pose_atoms=_n, partner_atoms=0, partner_residues=())
+            _fill = fs.projected_fill(_pts, _t, r5, u5, f5, fov=cam.fov,
+                                     aspect=asp5)
+            _sx, _sy = _pts @ r5, _pts @ u5
+            _span2 = max(float(_sx.max() - _sx.min()),
+                         float(_sy.max() - _sy.min())) * 0.5
+            _off = max(abs(float(_t.center @ r5) - 0.5 * (_sx.max() + _sx.min())),
+                       abs(float(_t.center @ u5) - 0.5 * (_sy.max() + _sy.min())))
+            # "The other two instruments also accept it": in frame, big enough,
+            # and centred. The distance clause is the only thing refusing.
+            if (_fill <= 1.0 and _fill >= fs.MIN_SELECTION_FRAME_FILL
+                    and _off <= fs.CENTRE_TOLERANCE * _span2 and _d > _worst):
+                _worst = _d
+                _worst_at = f"{_n} atoms within {_rad} A at {_d} A"
+    _floor = float(fs.MIN_SELECTION_DISTANCE)
+    # The *second* origin, and the one the module comment now leads with: the
+    # largest floor at which some swept selection still puts the eye inside its
+    # own drawn spheres, which is `MAX_DRAWN_ANGLE_FILL` read in angstrom. This
+    # is a product bound rather than an artefact of this predicate's own
+    # clauses, so it is the half of the constant's justification that survives
+    # the clause above being unreachable from the product.
+    _DRAWN_R = 0.30
+    _clearance = _DRAWN_R / math.sin(fs.MAX_DRAWN_ANGLE_FILL
+                                    * math.radians(cam.fov) * 0.5)
+
+    def _envelope_worst(at_distance: float):
+        _bad = None
+        for _n, _rad in _shapes:
+            _pts = _blob(_n, _rad)
+            # The distance fit_view would have chosen with the floor removed,
+            # so the question is "does raising the floor to `at_distance` help
+            # the selections the floor actually moves".
+            _x, _y, _z = _pts @ r5, _pts @ u5, _pts @ f5
+            _mid = np.array([(_x.max() + _x.min()) * 0.5, (_y.max() + _y.min()) * 0.5])
+            _th = math.tan(math.radians(cam.fov) * 0.5)
+            _need = max(float((np.abs(_x - _mid[0]) / (_th * asp5) - _z).max()),
+                        float((np.abs(_y - _mid[1]) / _th - _z).max()))
+            if max(0.0, _need * fs.SELECTION_MARGIN) >= at_distance:
+                continue
+            _s = fs.drawn_envelope_slack(
+                _pts, np.full(len(_pts), _DRAWN_R), r5, u5, f5, at_distance,
+                center=np.asarray(_pts.mean(axis=0), np.float64), fov=cam.fov)
+            if _bad is None or _s < _bad[1]:
+                _bad = ((_n, _rad), _s)
+        return _bad
+
+    _lo, _hi = 1.0, _floor
+    for _ in range(40):
+        _mid_f = (_lo + _hi) / 2.0
+        _w = _envelope_worst(_mid_f)
+        if _w is None or _w[1] > 0.0:
+            _hi = _mid_f
+        else:
+            _lo = _mid_f
+    _envelope_boundary = _hi
+    _envelope_at_floor = _envelope_worst(_floor)
+    check(
+        "the floor sits just above the largest distance the other instruments "
+        "alone would have accepted, and above the distance at which a swept "
+        "selection puts the eye inside its own drawn spheres",
+        (_worst > 0.0 and _floor > _worst and _floor <= _worst * 1.05
+         and _envelope_boundary < _floor
+         and _envelope_at_floor is not None and _envelope_at_floor[1] > 0.0),
+        f"sweeping {len(_shapes)} selections over {len(_sweep_d)} distances, the "
+        f"furthest framing that is simultaneously in frame, above "
+        f"MIN_SELECTION_FRAME_FILL and inside CENTRE_TOLERANCE is {_worst} A "
+        f"({_worst_at}) -- the framing the distance clause is the only instrument "
+        f"to refuse. The floor is {_floor:g} A, the next value above it. This is "
+        f"a measured origin and not a restatement: lower the floor to "
+        f"{_worst:g} and this goes red, because the sweep does not move when the "
+        f"constant does. Independently, MAX_DRAWN_ANGLE_FILL={fs.MAX_DRAWN_ANGLE_FILL} "
+        f"at {cam.fov:g} deg owes the eye {_clearance:.3f} A per {_DRAWN_R} A of "
+        f"drawn radius, and bisecting the floor against that bound over the same "
+        f"shapes puts the boundary at {_envelope_boundary:.4f} A: below it a swept "
+        f"selection has the eye inside its own spheres, above it none does. The "
+        f"floor is {_floor / _envelope_boundary:.2f}x that, and at the floor the "
+        f"worst swept case has {_envelope_at_floor[1]:+.3f} A of clearance "
+        f"({_envelope_at_floor[0][0]} atoms within {_envelope_at_floor[0][1]} A). "
+        f"That is the origin the module comment now leads with, because it is a "
+        f"product bound and does not depend on this predicate being called at all",
+    )
+
+    # And the enforcement, which a bound cannot do on its own: a bound that only
+    # says "6.0 is above 5.99" still lets someone rewrite the clamp so the
+    # floor is never applied. Both sites below are behavioural and neither reads
+    # the constant to decide the answer.
+    _dropped = [
+        float(fs.fit_view(np.array([[0.0, 0.0, 0.0]]), r5, u5, f5,
+                          min_distance=w)[1])
+        for w in (0.0, 1.0, 3.0, 5.0)
+    ]
+    check(
+        "and no caller can drop it: the clamp is on the achieved distance, not "
+        "on the request",
+        all(d >= fs.MIN_SELECTION_DISTANCE for d in _dropped),
+        f"fit_view(one atom, min_distance=0.0/1.0/3.0/5.0) -> "
+        f"{', '.join(f'{d:.3f}' for d in _dropped)} A, all at or above the "
+        f"floor. A floor on the request rather than the result is a default, and "
+        f"a default is one keyword argument away from gone",
+    )
+    _pair = np.array([[-0.75, 0.0, 0.0], [0.75, 0.0, 0.0]], np.float64)
+    _probe = fs.FramingTarget(
+        center=np.zeros(3, np.float32), distance=fs.MIN_SELECTION_DISTANCE * 0.5,
+        pose_atoms=2, partner_atoms=0, partner_residues=())
+    _degen_low, _why_low = fs.selection_is_degenerate(
+        _probe, _pair, _pair, r5, u5, f5, fov=cam.fov, aspect=asp5)
+    # The clause above is a *gate* instrument, and that is only an honest
+    # description if the product really cannot hand it a target it would refuse.
+    # So this is the measurement and not the claim: the two `max()` calls are
+    # swept, including the `min_distance` values that used to defeat the floor.
+    # If one of these ever comes back below the floor, the clause stops being a
+    # gate instrument and becomes a product guard, and the floor is then being
+    # enforced somewhere other than where the comment says it is.
+    _produced = [
+        float(fs.fit_view(_blob(n, rad) + off, r5, u5, f5, fov=cam.fov,
+                          aspect=asp5, **kw)[1])
+        for n in (1, 2, 5, 19, 50, 200, 500)
+        for rad in (0.0001, 0.3, 1.0, 2.0, 4.0, 8.0, 20.0)
+        for off in (0.0, 3.0, 50.0)
+        for kw in ({}, {"min_distance": 0.0}, {"min_distance": -5.0})
+    ]
+    _under = [d for d in _produced if d < fs.MIN_SELECTION_DISTANCE]
+    check(
+        "and the predicate refuses a framing below it, naming the floor and the "
+        "distance it refused -- which makes it this gate's instrument and not "
+        "the product's, because no product path can produce one",
+        (_degen_low and f"{fs.MIN_SELECTION_DISTANCE:g} A" in (_why_low or "")
+         and f"{fs.MIN_SELECTION_DISTANCE * 0.5:.2f} A" in (_why_low or "")
+         and not _under),
+        ((_why_low or "accepted")[:200] if _degen_low else
+         f"a framing at {fs.MIN_SELECTION_DISTANCE * 0.5:.2f} A was accepted, so "
+         f"the floor is a number in a comment with a clamp that only fit_view and "
+         f"focus_target happen to apply")
+        + f" | {len(_produced)} fit_view results -- 1 to 500 atoms, radii 0.0001 "
+          f"to 20 A, offsets of 0, 3 and 50 A, min_distance of 0.0 and of -5.0 -- "
+          f"lowest {min(_produced):.3f} A, {len(_under)} below the floor. "
+        + (f"**That breaks the arrangement this clause exists under**: the "
+           f"product can now produce a framing the predicate refuses, so it is "
+           f"a product guard rather than a gate instrument and the floor is not "
+           f"being enforced where `framing_selection.py` says it is"
+           if _under else
+           f"**And note what this instrument is**: `selection_is_degenerate` is "
+           f"called by this gate and by no product code, so the floor's runtime "
+           f"enforcement is the `max()` in fit_view and focus_target, and this "
+           f"clause is a gate instrument over them"),
     )
 
     # -- 6 and 7: the pixels ---------------------------------------------

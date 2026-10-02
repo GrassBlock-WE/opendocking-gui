@@ -251,9 +251,31 @@ impl Conformation {
     }
 
     /// Unpack from a flat vector produced by [`Self::as_slice`].
+    ///
+    /// # Why a non-finite value is refused rather than scored
+    ///
+    /// The interpolation this conformation feeds returns `None` for an atom it
+    /// cannot place, and the scorer treats that as *outside the box* — which is
+    /// a large finite penalty, not an error. A `NaN` in the position vector
+    /// therefore does not fail; it silently becomes a number, and the number is
+    /// a wrong answer to a question the caller believed was answered. The
+    /// Python bindings already refuse this at their three entry points for
+    /// exactly that reason, which left this constructor as the one route in
+    /// Rust that did not.
+    ///
+    /// It uses [`crate::types::first_non_finite`], the same definition the
+    /// coordinate checks use, rather than a fourth spelling of the test.
     pub fn from_slice(s: &[f64]) -> Result<Conformation> {
         if s.len() < 6 {
             return Err(DockError::molecule("conformation needs at least 6 values"));
+        }
+        if let Some(i) = crate::types::first_non_finite(s) {
+            return Err(DockError::molecule(format!(
+                "conformation[{i}] is {}: every degree of freedom must be finite, \
+                 because a non-finite one is scored as the large finite penalty \
+                 for being outside the box rather than as the mistake it is",
+                s[i]
+            )));
         }
         Ok(Conformation {
             position: [s[0], s[1], s[2]],

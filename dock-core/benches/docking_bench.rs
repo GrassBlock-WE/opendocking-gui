@@ -57,13 +57,13 @@ fn synthetic_receptor(n: usize) -> Molecule {
             kind: AtomKind::Hydrophobic,
         });
     }
-    // A scattered lattice has no bonds, so the neighbour table is empty.
-    let count = atoms.len();
-    Molecule {
-        atoms,
-        bonds: Vec::new(),
-        neighbors: vec![Vec::new(); count],
-    }
+    // A scattered lattice has no bonds, so the neighbour table is empty --
+    // and `from_bonds` is what builds that table now, so the empty adjacency
+    // is a consequence of the call rather than a field set by hand. This used
+    // to be a struct literal over private fields; it stopped compiling when
+    // `Molecule`'s fields were made `pub(crate)`, which is the point: the
+    // literal was a door, and a benchmark is no exception to that.
+    Molecule::from_bonds(atoms, &[]).expect("a bondless lattice is a valid molecule")
 }
 
 fn main() {
@@ -87,7 +87,7 @@ fn main() {
     );
 
     // --- 2. Trilinear interpolation (energy only) -------------------------
-    let weights = scoring.atom_weights(&receptor.atoms[0]);
+    let weights = scoring.atom_weights(receptor.atoms().first().expect("a receptor with atoms"));
     let probes: Vec<[f64; 3]> = (0..20_000)
         .map(|i| {
             let t = i as f64 * 0.001_037;

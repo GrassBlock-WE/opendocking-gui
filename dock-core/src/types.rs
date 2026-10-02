@@ -519,14 +519,76 @@ impl Bond {
 }
 
 /// A structure: atoms, the covalent graph, and derived interaction classes.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+///
+/// # Why the fields are private
+///
+/// They were three `pub` fields and a `Default`, and that combination made
+/// [`Self::from_atoms`] advisory. A caller could write the struct literal — or
+/// `Molecule::default()` — and hand a molecule straight to
+/// [`crate::ligand::Ligand::from_molecule_with`], skipping every check the
+/// constructor makes. Nothing downstream noticed, because nothing downstream
+/// was inconsistent: `bonds` and `neighbors` are independent fields, so a
+/// literal with atoms but no bonds is a *valid* molecule. It has no torsions,
+/// no ring membership and no intramolecular partner pairs, and it docks to a
+/// ranked, timed, `rc=0` result describing a bag of independent atoms. That is
+/// the same failure shape as the declared-`TORSDOF` ligand this crate already
+/// refuses: the run reports success for work it did not do.
+///
+/// The fix is that there is no longer a public way to skip the constructors.
+/// `from_atoms` perceives the graph; [`Self::from_bonds`] takes a
+/// caller-supplied one and validates it. There is no `Default`, because an
+/// empty molecule is not a structure — it is the absence of one, and
+/// `Molecule::default()` is precisely the door that produced a receptor or
+/// ligand the engine then had to refuse further down.
+///
+/// # What this does not close, and what it now does
+///
+/// One door is shut, and one is named here because it is still open:
+///
+/// * **In-crate literals.** The fields are `pub(crate)`, so code *inside*
+///   `dock-core` can still write one — `from_atoms` does, and so do the unit
+///   tests. What is shut is the door that a *caller* of the crate could walk
+///   through, which is the one that was open in the first place.
+/// * **`Deserialize` is now checked.** It used to be derived, which meant
+///   `serde_json::from_str::<Molecule>(..)` built one from arbitrary JSON with
+///   no validation at all — the same bypass the private fields closed, wearing
+///   a file extension. `Molecule` no longer derives it. See the `Deserialize`
+///   impl below for what it does instead and what a caller now sees.
+///
+/// The accessors below are read-only, and there is deliberately no public
+/// mutating accessor: a caller that can edit `bonds` in place can put the
+/// struct into a state neither constructor produces, which is the same bypass
+/// with extra steps.
+///
+/// # The doors are asserted shut, not merely documented shut
+///
+/// ```compile_fail
+/// use dock_core::Molecule;
+/// // No `Default`: there is no public empty molecule.
+/// let _m = Molecule::default();
+/// ```
+///
+/// ```compile_fail
+/// use dock_core::Molecule;
+/// // Private fields: no struct literal from outside the crate.
+/// let _m = Molecule { atoms: vec![], bonds: vec![], neighbors: vec![] };
+/// ```
+///
+/// A `compile_fail` block proves the snippet does not build. It does **not**
+/// prove *why* it does not build, so a doctest with a typo in it would satisfy
+/// these two gates while the doors stood open. That is why the constructors'
+/// own happy path is asserted too, by
+/// `a_molecule_can_be_built_and_read_back_from_outside_the_crate`: a crate that
+/// fails to build at all turns these two green and that one red, so the pair
+/// cannot both be satisfied by a broken API.
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Molecule {
     /// Atoms in file order.
-    pub atoms: Vec<Atom>,
+    pub(crate) atoms: Vec<Atom>,
     /// Covalent bonds.
-    pub bonds: Vec<Bond>,
+    pub(crate) bonds: Vec<Bond>,
     /// Adjacency: for each atom, the indices of its bonded partners.
-    pub neighbors: Vec<Vec<usize>>,
+    pub(crate) neighbors: Vec<Vec<usize>>,
 }
 
 impl Molecule {
@@ -540,9 +602,25 @@ impl Molecule {
     /// Bond orders are not required by the Vina-family scoring functions, so
     /// perception uses a simple covalent-radius distance criterion — the same
     /// approach used by many open-source PDBQT front-ends.
+    ///
+    /// # Why the finiteness check lives here and not only in the parser
+    ///
+    /// [`crate::pdbqt::parse_pdbqt`] refuses a non-finite coordinate, and for
+    /// a long time that was the only place the rule existed. This constructor is
+    /// the other way into a molecule — the RDKit front-end's
+    /// `Ligand.from_arrays`, and any Rust caller holding a table of atoms — and
+    /// it accepted one: a `NaN` broke distance-based bond perception so the
+    /// derived torsion count silently dropped, and an infinity was skipped by
+    /// the grid cutoff as if the atom were simply far away. The check is
+    /// [`non_finite_coordinate_refusal`], shared with the parser and with both
+    /// prepared-structure constructors, so the rule cannot be present on one
+    /// path and absent on the next.
     pub fn from_atoms(atoms: Vec<Atom>) -> Result<Self> {
         if atoms.is_empty() {
             return Err(DockError::molecule("structure contains no atoms"));
+        }
+        if let Some(err) = non_finite_coordinate_refusal("structure", &atoms) {
+            return Err(err);
         }
         let mut mol = Molecule {
             atoms,
@@ -593,7 +671,19 @@ impl Molecule {
     }
 
     fn push_bond(&mut self, i: usize, j: usize) {
-        self.bonds.push(Bond::new(i, j));
+        self.push_bond_with(i, j, false);
+    }
+
+    /// [`Self::push_bond`] with the caller's own `rotatable` flag carried
+    /// through, for the paths that arrive with bond *records* rather than with
+    /// geometry to perceive them from.
+    fn push_bond_with(&mut self, i: usize, j: usize, rotatable: bool) {
+        self.bonds.push(Bond {
+            i,
+            j,
+            rotatable,
+            in_ring: false,
+        });
         self.neighbors[i].push(j);
         self.neighbors[j].push(i);
     }
@@ -721,6 +811,123 @@ impl Molecule {
         }
     }
 
+    /// Build a molecule from atoms and a caller-supplied covalent graph.
+    ///
+    /// This is the way in for a caller that already knows the chemistry — the
+    /// RDKit front-end, or any tool with a real bond table — and it is the only
+    /// way to set `bonds` other than perceiving them from geometry. The graph
+    /// is *the caller's*, so it replaces anything the distances would have
+    /// implied: appending would leave every bond twice, and a duplicated
+    /// rotatable bond makes the cluster graph cyclic, which breaks the
+    /// invariant that one torsion owns exactly one child cluster.
+    ///
+    /// # Why a bad bond is refused rather than dropped
+    ///
+    /// This function used to exist inline in the Python binding, as
+    /// `if i < n && j < n && i != j { ..push.. }`, which quietly threw away
+    /// any bond the guard rejected. A dropped bond is not a missing *result*,
+    /// it is a different molecule: the bond's atoms stop being neighbours, so
+    /// rotatable-bond perception loses a torsion, ring membership loses a ring,
+    /// and the intramolecular partner list is computed over the wrong graph.
+    /// Every number that comes back is finite and plausible, and nothing in the
+    /// result says the chemistry was silently different from what the caller
+    /// asked for. The same argument as the declared-`TORSDOF` refusal in
+    /// [`crate::ligand::Ligand::from_parsed`]: there is no honest weaker claim
+    /// to report instead, because a caller cannot weigh "the molecule you gave
+    /// me is not the molecule I built" — it is a mistake in their hand.
+    ///
+    /// A bond listed twice is the one exception, and it is *not* an error: it
+    /// names one covalent bond twice, so it is stored once. That is the
+    /// caller's table being redundant, not wrong.
+    ///
+    /// The message wording is the same as the Python layer's own
+    /// ("refers to atom N, and this molecule has M atoms") so a caller sees
+    /// one phrasing whichever entry point it used.
+    pub fn from_bonds(atoms: Vec<Atom>, bonds: &[(usize, usize)]) -> Result<Self> {
+        let records: Vec<Bond> = bonds.iter().map(|&(i, j)| Bond::new(i, j)).collect();
+        Molecule::from_bond_records(atoms, &records)
+    }
+
+    /// The one implementation of "atoms plus a caller's bond table".
+    ///
+    /// Three callers reach a molecule through bond records rather than through
+    /// geometry: [`Self::from_bonds`] (an RDKit bond table), the checked
+    /// `Deserialize` impl below (a JSON file), and the constructors'
+    /// own callers inside this crate. They share one validator on purpose —
+    /// the reason is recorded in [`first_non_finite`]: a rule written once per
+    /// entry point is a rule that ends up honoured at two of them, and the
+    /// entry point that was missed is the one nobody tests.
+    ///
+    /// `bonds` is the caller's, so it replaces anything the distances would
+    /// have implied. `rotatable` is carried through verbatim because nothing
+    /// derives it — [`Self::from_atoms`] and this function both leave it
+    /// `false` and it is read by no production path. `neighbors`, `in_ring` and
+    /// every [`Atom::kind`] are *derived*, and are derived here rather than
+    /// believed, so a molecule cannot arrive with a cached copy of them
+    /// disagreeing with the graph that actually produces them.
+    fn from_bond_records(atoms: Vec<Atom>, bonds: &[Bond]) -> Result<Self> {
+        // The same two entry rules `from_atoms` applies, and by the same
+        // shared definition, so a structure cannot be valid on one path and
+        // not on the other.
+        if atoms.is_empty() {
+            return Err(DockError::molecule("structure contains no atoms"));
+        }
+        if let Some(err) = non_finite_coordinate_refusal("structure", &atoms) {
+            return Err(err);
+        }
+        let n = atoms.len();
+        let mut mol = Molecule {
+            atoms,
+            bonds: Vec::new(),
+            neighbors: vec![Vec::new(); n],
+        };
+        for bond in bonds {
+            let (i, j) = (bond.i, bond.j);
+            if i >= n || j >= n {
+                let offending = if i >= n { i } else { j };
+                return Err(DockError::molecule(format!(
+                    "bond ({i}, {j}) refers to atom {offending}, and this molecule has \
+                     {n} atoms: the caller's bond table does not match its atom table, \
+                     and dropping the bond would dock a different molecule from the \
+                     one that was described"
+                )));
+            }
+            if i == j {
+                return Err(DockError::molecule(format!(
+                    "bond ({i}, {j}) is a self-bond: an atom cannot be bonded to \
+                     itself, and a bond to one atom makes the cluster graph cyclic"
+                )));
+            }
+            if mol.neighbors[i].contains(&j) {
+                continue; // the same bond twice in the caller's table
+            }
+            mol.push_bond_with(i, j, bond.rotatable);
+        }
+        // Ring membership drives rotatable-bond perception, so it has to be
+        // recomputed now that the graph is final -- and the kinds depend on it.
+        mol.assign_ring_membership()?;
+        mol.assign_vina_atom_kinds();
+        Ok(mol)
+    }
+
+    /// The atoms, in file order.
+    ///
+    /// Read-only by design; see the struct documentation for why there is no
+    /// public mutating counterpart.
+    pub fn atoms(&self) -> &[Atom] {
+        &self.atoms
+    }
+
+    /// The covalent bonds, each as an index pair into [`Self::atoms`].
+    pub fn bonds(&self) -> &[Bond] {
+        &self.bonds
+    }
+
+    /// For each atom, the indices of its bonded partners.
+    pub fn neighbors(&self) -> &[Vec<usize>] {
+        &self.neighbors
+    }
+
     /// Number of atoms.
     pub fn len(&self) -> usize {
         self.atoms.len()
@@ -765,6 +972,174 @@ impl Molecule {
         }
         (lo, hi)
     }
+}
+
+/// The wire shape of a [`Molecule`], read without validating it.
+///
+/// Private on purpose, and only ever used by the `Deserialize` impl below: a
+/// caller that could name this type could build the unvalidated value it
+/// describes, which is the entire reason the impl exists.
+#[derive(Deserialize)]
+struct MoleculeFields {
+    /// Atoms in file order. Authoritative.
+    atoms: Vec<Atom>,
+    /// Covalent bonds. Authoritative.
+    bonds: Vec<Bond>,
+    /// Cached adjacency, in the shape `Serialize` writes.
+    ///
+    /// Still **required**, and still read: giving it a default would widen the
+    /// set of inputs this crate accepts, and the accepted language is
+    /// deliberately the one [`Serialize`] produces. The value is then
+    /// discarded and recomputed from `bonds` — see the impl below.
+    neighbors: Vec<Vec<usize>>,
+}
+
+impl<'de> Deserialize<'de> for Molecule {
+    /// Reads the raw shape, then validates it exactly as a constructor would.
+    ///
+    /// # Why this is not a derive
+    ///
+    /// A derived `Deserialize` cannot refuse anything: it fills in whatever
+    /// the file says. For a struct whose three fields are a table, a graph and
+    /// a cache of that graph's adjacency, "whatever the file says" is a
+    /// molecule that can have a bond naming atom 99 of a 3-atom table, an
+    /// adjacency that disagrees with its own bond list, or a `NaN` coordinate —
+    /// and every one of those reached the engine through a path that reported
+    /// success. Handing the two authoritative tables to
+    /// [`Molecule::from_bond_records`] is what makes a molecule built from a
+    /// file indistinguishable from one built in Rust.
+    ///
+    /// # What is authoritative, and what is recomputed
+    ///
+    /// `atoms` and `bonds` are the file's. `neighbors`, `in_ring` and every
+    /// [`Atom::kind`] are *derived*, and are recomputed rather than believed:
+    /// a cached copy that disagrees with the graph is either a file from a
+    /// version of this crate with different typing rules or a lie, and neither
+    /// is a caller whose disagreement is worth honouring — the alternative,
+    /// trusting them, is the hole. Refusing on disagreement instead would be
+    /// strictly worse: it would make a molecule unloadable the moment this
+    /// crate changed a rule, which is not a validation failure but a version
+    /// skew. `Bond::rotatable` is the one field carried through verbatim,
+    /// because nothing derives it and no production path reads it.
+    ///
+    /// # What a caller sees for a bad file
+    ///
+    /// A `serde_json::Error`, because that is the only error a `Deserializer`
+    /// can return — and it is what the *derived* impl returned too, so no
+    /// caller is switching error type. Measured on `serde_json` 1.0.151 as this
+    /// workspace builds it, the refusal a caller gets is:
+    ///
+    /// ```text
+    /// invalid molecule: bond (0, 9) refers to atom 9, and this molecule has 2
+    /// atoms: the caller's bond table does not match its atom table, and
+    /// dropping the bond would dock a different molecule from the one that was
+    /// described
+    /// ```
+    ///
+    /// `err.classify()` is `Category::Data` — the same category a structural
+    /// error has always had — and `err.line()`/`err.column()` are **0 and 0**:
+    /// the refusal is raised after the document has been read, so serde has no
+    /// position to attach. That is a real cost and it is paid on purpose,
+    /// because the message names the offending atom index, bond and atom count
+    /// while a line number would not: a JSON document has no one atom per line
+    /// to point at.
+    ///
+    /// The two things a caller cannot do are worth stating plainly.
+    /// `err.downcast_ref::<DockError>()` is always `None`, because the error is
+    /// serde's; the refusal text is the only thing that survives, which is why
+    /// the text is the constructor's own rather than a new summary. And a
+    /// chemically impossible file is now an error at all, where previously it
+    /// deserialized successfully — so a caller whose code path *assumed* such a
+    /// file loaded will now see an error it has no arm for. That is the intended
+    /// break: the alternative was a ligand with an unreachable bond table.
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = MoleculeFields::deserialize(deserializer)?;
+        let MoleculeFields {
+            atoms,
+            bonds,
+            neighbors: _cached_adjacency,
+        } = raw;
+        Molecule::from_bond_records(atoms, &bonds).map_err(serde::de::Error::custom)
+    }
+}
+
+/// The index of the first value in `values` that is not finite, if any.
+///
+/// **The single definition of "this number is not a coordinate".** Every way a
+/// number can enter the engine as a position goes through it: the PDBQT record
+/// parser ([`crate::pdbqt::parse_pdbqt`]), [`Molecule::from_atoms`],
+/// [`crate::ligand::Ligand::from_molecule_with`],
+/// [`crate::receptor::Receptor::from_molecule`] and
+/// [`crate::kinematics::Conformation::from_slice`].
+///
+/// It is one function because it was four spellings of
+/// `!x.is_finite() || !y.is_finite() || !z.is_finite()`. A rule written once per
+/// entry point is a rule that ends up honoured at three of them, and the entry
+/// point that was missed is the one nobody tests: the file parser's copy was
+/// reached by `from_pdbqt`, and a caller who assembles atoms in memory never
+/// went near it. See [`non_finite_coordinate_refusal`] for why the check is a
+/// refusal at all.
+#[must_use]
+pub fn first_non_finite(values: &[f64]) -> Option<usize> {
+    values.iter().position(|v| !v.is_finite())
+}
+
+/// The first atom coordinate in `atoms` that is not finite, as
+/// `(atom index, axis index, offending value)`.
+///
+/// The structure-level form of [`first_non_finite`]: it exists so the refusal
+/// can name *which atom* is at fault, which is the difference between a message
+/// a caller can act on and a number they have to go and find.
+#[must_use]
+pub fn first_non_finite_coordinate(atoms: &[Atom]) -> Option<(usize, usize, f64)> {
+    atoms
+        .iter()
+        .enumerate()
+        .find_map(|(i, a)| first_non_finite(&a.coord).map(|axis| (i, axis, a.coord[axis])))
+}
+
+/// The refusal every structure constructor makes for a non-finite coordinate,
+/// or `None` when every atom is where it says it is.
+///
+/// One definition of the message as well as of the test, because the three
+/// constructors that call it are three places a rule could drift, and the
+/// message is the part a caller reads.
+///
+/// # Why a refusal and not a counted degradation
+///
+/// This is the same judgement [`crate::pdbqt::parse_atom_line`] records, and the
+/// measurement in its module comment is the reason it transfers unchanged to a
+/// molecule that never came from a file. A `NaN` fails every comparison, so the
+/// `r2 > far * far` cutoff in [`crate::grid::GridMaps::precalculate`] cannot
+/// discard the atom and it poisons every grid point; an **infinity** passes that
+/// cutoff cleanly, so the atom is skipped as if it were too far away to matter.
+/// That second case is the one with no honest weaker claim: a 30-atom receptor
+/// with one coordinate overwritten to `inf` was measured to dock and report
+/// −5.52 kcal/mol against a clean reference of −5.66 — a 2.5% error in a
+/// perfectly normal-looking result, with no field in `DockingResult` able to say
+/// the receptor was short one atom. There is nothing to weigh and nothing to
+/// count, so there is nothing to report instead.
+///
+/// # Why the caller cannot see it for themselves
+///
+/// [`crate::receptor::Receptor`] exposes `num_atoms` and
+/// `unknown_atom_types`, so a caller can audit those. They cannot audit
+/// "is this atom where it says it is" without re-walking the array, and a
+/// receptor is 30–30000 atoms. The check is linear and runs once, at
+/// construction.
+pub fn non_finite_coordinate_refusal(what: &str, atoms: &[Atom]) -> Option<DockError> {
+    let (i, axis, value) = first_non_finite_coordinate(atoms)?;
+    Some(DockError::molecule(format!(
+        "{what} atom {i} has a non-finite {} coordinate ({value}): a NaN or infinite \
+         position is not a location, and an atom at one cannot be placed and \
+         cannot be scored — as a receptor atom it is silently missing from the \
+         maps, and as a ligand atom it makes every pose unusable, while the run \
+         still returns a ranked result and a summary that says the run succeeded",
+        ["x", "y", "z"][axis],
+    )))
 }
 
 /// Euclidean distance between two cartesian points.
@@ -851,6 +1226,75 @@ mod tests {
             Atom::new(2, [1.54, 0.0, 0.0], Element::C, AtomType::CH),
         ])
         .expect("ethane perceives one bond")
+    }
+
+    #[test]
+    fn a_molecule_can_be_built_and_read_back_from_outside_the_crate() {
+        // The other half of the two `compile_fail` gates on the struct. Those
+        // prove the doors are shut; this proves the crate still builds a
+        // molecule for someone standing outside it, using only `pub` items. A
+        // doctest with a typo would satisfy the negative gates on its own, so
+        // the two are asserted together: a crate that fails to compile at all
+        // turns these green and this one red.
+        //
+        // It reads back through the accessors rather than the fields, which is
+        // the point -- those are the only spellings an external caller has.
+        let mol = Molecule::from_atoms(vec![
+            Atom::new(1, [0.0, 0.0, 0.0], Element::C, AtomType::CH),
+            Atom::new(2, [1.54, 0.0, 0.0], Element::C, AtomType::CH),
+        ])
+        .expect("ethane perceives one bond");
+        assert_eq!(mol.atoms().len(), 2);
+        assert_eq!(mol.bonds().len(), 1);
+        assert_eq!(mol.neighbors()[0], vec![1]);
+        assert_eq!(mol.len(), 2);
+        assert_eq!(mol.bond_count(), 1);
+    }
+
+    #[test]
+    fn a_caller_supplied_graph_is_validated_rather_than_thinned() {
+        // The behaviour `from_arrays` used to have inline, where a rejected
+        // bond vanished. Two atoms, and every way the table can disagree with
+        // itself: past the end, and onto itself.
+        let atoms = vec![
+            Atom::new(1, [0.0, 0.0, 0.0], Element::C, AtomType::CH),
+            Atom::new(2, [1.54, 0.0, 0.0], Element::C, AtomType::CH),
+        ];
+        let ok = Molecule::from_bonds(atoms.clone(), &[(0, 1)]).expect("one real bond");
+        assert_eq!(ok.bond_count(), 1);
+
+        let out_of_range = Molecule::from_bonds(atoms.clone(), &[(0, 99)])
+            .expect_err("a bond past the last atom must be refused, not dropped");
+        let message = out_of_range.to_string();
+        assert!(message.contains("refers to atom 99"), "message: {message}");
+        assert!(message.contains("has 2 atoms"), "message: {message}");
+
+        let self_bond = Molecule::from_bonds(atoms.clone(), &[(1, 1)])
+            .expect_err("an atom cannot be bonded to itself");
+        let message = self_bond.to_string();
+        assert!(message.contains("self-bond"), "message: {message}");
+
+        // A reversed pair is the same bond, not a self-bond: `contains` is
+        // symmetric because `push_bond` fills both directions.
+        let reversed = Molecule::from_bonds(atoms.clone(), &[(1, 0)]).expect("(1, 0) is a bond");
+        assert_eq!(reversed.bond_count(), 1);
+        assert_eq!(reversed.neighbors()[0], vec![1]);
+
+        // Redundant, not wrong: the same bond twice is stored once.
+        let doubled = Molecule::from_bonds(atoms.clone(), &[(0, 1), (1, 0)])
+            .expect("a bond listed twice is one bond");
+        assert_eq!(doubled.bond_count(), 1);
+        assert_eq!(doubled.neighbors()[0], vec![1]);
+
+        // The entry rules are `from_atoms`'s, by the same shared definition, so
+        // a structure cannot be valid on one path and not the other.
+        assert!(Molecule::from_bonds(Vec::new(), &[]).is_err());
+        let mut nan = atoms.clone();
+        nan[1].coord[0] = f64::NAN;
+        let err = Molecule::from_bonds(nan, &[(0, 1)])
+            .expect_err("a non-finite coordinate is refused on this path too")
+            .to_string();
+        assert!(err.contains("non-finite"), "message: {err}");
     }
 
     #[test]
@@ -966,6 +1410,129 @@ mod tests {
     #[test]
     fn empty_molecule_is_rejected() {
         assert!(Molecule::from_atoms(vec![]).is_err());
+    }
+
+    /// A butane chain with `x` replaced by `x_bad` on every atom.
+    fn butane_with_x(x_bad: impl Fn(f64) -> f64) -> Vec<Atom> {
+        (0..4)
+            .map(|i| {
+                Atom::new(
+                    i + 1,
+                    [x_bad(0.9 * i as f64), 1.1 * i as f64, -0.4 * i as f64],
+                    Element::C,
+                    AtomType::CH,
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_non_finite_coordinate_is_refused_at_the_constructor() {
+        // The hole this closes. The rule existed only in `parse_pdbqt`, so a
+        // caller assembling atoms in memory -- the RDKit front-end's
+        // `from_arrays`, or any Rust caller with a table -- got a molecule with
+        // a NaN in it, and the search either produced nothing (a ligand, where
+        // the NaN broke bond perception) or quietly dropped the atom (a
+        // receptor, where an infinity passes the `r2 > far * far` cutoff).
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let atoms = butane_with_x(|x| if x == 1.8 { bad } else { x });
+            let err = match Molecule::from_atoms(atoms) {
+                Ok(_) => panic!("a {bad} x coordinate must be refused"),
+                Err(e) => e.to_string(),
+            };
+            // The message has to name the atom: a caller looking at a 30000-atom
+            // receptor cannot go looking for "a coordinate somewhere".
+            assert!(err.contains("atom 2"), "message: {err}");
+            assert!(err.contains('x'), "message: {err}");
+        }
+    }
+
+    #[test]
+    fn a_non_finite_coordinate_is_refused_on_every_axis() {
+        // Not just x. A mutation that only checked `coord[0]` would leave y and
+        // z open, and those are exactly the axes a coordinate-transformation bug
+        // tends to produce.
+        for axis in 0..3usize {
+            for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+                let atoms: Vec<Atom> = (0..4)
+                    .map(|i| {
+                        let mut c = [0.9 * i as f64, 1.1 * i as f64, -0.4 * i as f64];
+                        c[axis] = if i == 2 { bad } else { c[axis] };
+                        Atom::new(i + 1, c, Element::C, AtomType::CH)
+                    })
+                    .collect();
+                assert!(
+                    Molecule::from_atoms(atoms).is_err(),
+                    "axis {axis} with a {bad} value must be refused"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_finiteness_rule_is_finiteness_and_not_a_magnitude() {
+        // The accept direction, and the one that decides whether this is a check
+        // or a threshold. A structure far from the origin is perfectly legal --
+        // a receptor is routinely in the 40 A range, and a whole-protein input
+        // runs to thousands -- so a check written as a distance-from-origin
+        // limit would refuse working inputs while still missing `NaN`.
+        let far = Molecule::from_atoms(butane_with_x(|x| x + 12_345.0))
+            .expect("a structure 12,345 A from the origin is legal");
+        assert_eq!(far.len(), 4);
+        // And the same shape with no offset, so this also covers the ordinary
+        // near-origin case the rest of the suite builds.
+        assert_eq!(
+            Molecule::from_atoms(butane_with_x(|x| x))
+                .expect("a structure at the origin is legal")
+                .len(),
+            4
+        );
+        // The smallest legitimate numbers there are, and the largest finite
+        // doubles, because a rule written as `v.abs() < BIG` would pass the NaN
+        // case only by accident and the huge case not at all.
+        for big in [f64::MIN_POSITIVE, f64::MAX] {
+            let mut atoms = butane_with_x(|x| x);
+            atoms[1].coord = [big, 0.0, 0.0];
+            assert!(
+                Molecule::from_atoms(atoms).is_ok(),
+                "{big} is finite and must be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn a_real_molecule_is_still_accepted() {
+        // The blunt accept direction: if the shared rule ever rejected ordinary
+        // geometry, essentially every other test in this file would fail, and
+        // this one says so in the place where the rule is defined.
+        assert!(Molecule::from_atoms(butane_with_x(|x| x)).is_ok());
+        assert!(first_non_finite(&[0.0, 1.0, -1.0]).is_none());
+        assert_eq!(first_non_finite(&[0.0, f64::NAN, 1.0]), Some(1));
+        assert_eq!(first_non_finite(&[f64::INFINITY, f64::NAN]), Some(0));
+        assert_eq!(first_non_finite(&[]), None);
+    }
+
+    #[test]
+    fn the_refusal_names_the_offending_atom_and_axis() {
+        // `non_finite_coordinate_refusal` is the one definition three
+        // constructors share, so this asserts the *definition*, not one caller's
+        // copy of it: each caller supplies only its own noun.
+        let mut atoms = butane_with_x(|x| x);
+        atoms[3].coord[1] = f64::NEG_INFINITY;
+        for what in ["structure", "ligand", "receptor"] {
+            let err = non_finite_coordinate_refusal(what, &atoms)
+                .unwrap_or_else(|| panic!("{what} must refuse"));
+            // `DockError`'s `Display` wraps the message in its variant name, so
+            // this is a containment check and not a prefix one.
+            let m = err.to_string();
+            assert!(m.contains(what), "{what}: {m}");
+            assert!(m.contains("atom 3"), "{what}: {m}");
+            assert!(m.contains('y'), "{what}: {m}");
+            // And the noun has to come before the atom index, or a reader gets
+            // told which atom without being told what it is an atom of.
+            assert!(m.find(what) < m.find("atom 3"), "{what}: {m}");
+        }
+        assert!(non_finite_coordinate_refusal("structure", &butane_with_x(|x| x)).is_none());
     }
 
     #[test]

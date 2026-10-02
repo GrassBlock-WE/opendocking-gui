@@ -11,23 +11,25 @@ numbers, which were all correct.
 
 It does not assert any pocket geometry: site count, box size and burial are
 printed for a human to read. It *does* assert that the frames it says it wrote
-were written and are not flat, because otherwise the script is a diagnostic that
-cannot fail:
+were written, are not flat, and are the only frames it can have written —
+because otherwise the script is a diagnostic that cannot fail:
 
 * `QImage.save` returns a success flag, and it used to be discarded, so a frame
   that could not be encoded still printed "wrote ...".
-* This script writes **three** frames, two of them only when the pocket table
-  has a second row. That condition used to be an `if` with no `else`, so a
-  search that found one site printed "done" having written one picture out of
-  three and nothing said so. Each frame is now recorded, and a frame that was
-  not taken is named.
+* This script writes the frames named in `FRAME_LABELS`, all of them but the
+  first only when the pocket table has a second row. That condition used to be
+  an `if` with no `else`, so a search that found one site printed "done" having
+  written one picture out of the set and nothing said so. Each frame is now
+  recorded against its label, every label is accounted for, and a frame that
+  was not taken is named.
 
 A machine that cannot give the viewport an OpenGL context is a **SKIP with a
 reason** taken from `odgui --check`, and produces no frame — which is reported
 as producing no frame, not as success.
 
 Exit codes: ``0`` every frame this run expected was written and is not flat,
-``1`` a frame was missing or blank, ``2`` did not finish or produced nothing.
+``1`` a frame was missing, unaccounted for, or blank, ``2`` did not finish or
+produced nothing.
 """
 
 from __future__ import annotations
@@ -39,7 +41,7 @@ ROOT = Path(__file__).resolve().parent.parent
 # Prefer the installed `opendocking`; only fall back to the source tree when the
 # installed one is missing. Putting `dock-py/python` on the path unconditionally
 # shadows the working package with a copy that cannot import, because a clean
-# checkout has no compiled `_dockpy` there. Same note as `contacts_check.py`.
+# checkout has no compiled `_dockpy` there. Same note as `contacts_criteria_check.py`.
 try:  # noqa: SIM105
     import opendocking  # noqa: F401
 except ImportError:  # pragma: no cover - only on an uninstalled checkout
@@ -68,14 +70,36 @@ EXIT_INCOMPLETE = 2
 #: painted nothing has one colour in it.
 MIN_COLOURS = 5
 
-#: How many frames this script produces when the pocket table has a second row
-#: to select. Counted here rather than written into the summary text, so the
-#: number in the summary and the number of `save_frame` calls cannot drift apart.
-TOTAL_FRAMES = 3
+#: The frames this script can produce, by the label `save_frame` is handed, and
+#: the only place the count in the summary comes from.
+#:
+#: **This was a number, and the number was the bug.** `TOTAL_FRAMES = 3` sat
+#: here under a comment saying that counting it here rather than typing it into
+#: the summary meant the number in the summary and the number of `save_frame`
+#: calls "cannot drift apart". Nothing compared it to anything: it was read in
+#: three places, every one of them inside an f-string in a `print`, and an
+#: f-string cannot fail. Add a fourth `save_frame` call and the run printed
+#: "4 of 3 frames were written" and exited 0.
+#:
+#: The counting instinct was right and it was aimed at the wrong subject — it
+#: wanted the number derived, and what it got was a number *typed in a place
+#: that derives nothing*. A set of labels is the shape that can be wrong about
+#: something: `save_frame` refuses a label that is not in here, `skip_frame`
+#: does the same for a frame this run could not take, and `summarise` requires
+#: every label to be one or the other. So a frame nobody declared is a FAIL at
+#: the moment it is taken rather than a subtraction in the last line, and the
+#: number in the summary is `len()` of the set that was checked.
+FRAME_LABELS = ("overview", "site", "no-cloud")
 
-#: The frames this run wrote, so the summary can say how many there were rather
-#: than counting checks and calling them frames.
-FRAMES: list[str] = []
+#: The frames this run wrote, as (label, filename). The pair is what lets the
+#: summary say how many there were -- rather than counting checks and calling
+#: them frames -- and what lets a label be checked against `FRAME_LABELS` on the
+#: way in instead of after the fact.
+FRAMES: list[tuple[str, str]] = []
+
+#: The labels this run named as not taken. A frame that is not written has to be
+#: named, or this run is a green one about less than it says.
+SKIPPED_FRAMES: list[str] = []
 
 RESULTS: list[tuple[str, str, str]] = []
 
@@ -96,6 +120,23 @@ def bad(name: str, reason: str) -> bool:
 
 def skip(name: str, reason: str) -> bool:
     return record("SKIP", name, reason)
+
+
+def skip_frame(label: str, reason: str) -> bool:
+    """A frame this run could not take: named, and held to the same label set.
+
+    The label is checked against `FRAME_LABELS` for the same reason
+    `save_frame` checks its own: a skip that names a label nobody declared is a
+    frame the summary will not be able to account for, and a SKIP line is
+    exactly the kind of green-looking output that nobody reads twice.
+    """
+    if label not in FRAME_LABELS:
+        bad(f"{label} frame",
+            f"no label {label!r} in FRAME_LABELS {FRAME_LABELS}, so this skip "
+            f"cannot be counted against the set the summary prints")
+        return False
+    SKIPPED_FRAMES.append(label)
+    return skip(f"{label} frame", reason)
 
 
 def _no_context_reason(viewport) -> str:
@@ -145,6 +186,14 @@ def _colours(pix) -> int:
 
 def save_frame(win, path: Path, label: str) -> None:
     """Grab the whole window, write it, and say whether that worked."""
+    if label not in FRAME_LABELS:
+        bad(f"{label}: frame written",
+            f"no label {label!r} in FRAME_LABELS {FRAME_LABELS}, so the summary "
+            f"could not account for this frame: add the label to FRAME_LABELS, "
+            f"or take the call out. A frame written under a label nothing "
+            f"counts is a frame the summary will report as missing while the "
+            f"file is sitting in dist/")
+        return
     pix = win.grab()
     if pix.isNull():
         bad(f"{label}: frame written", "the window grab returned nothing")
@@ -157,7 +206,7 @@ def save_frame(win, path: Path, label: str) -> None:
         return
     colours = _colours(pix)
     size = path.stat().st_size
-    FRAMES.append(path.name)
+    FRAMES.append((label, path.name))
     print(f"wrote {path}  ({size} bytes, {colours} distinct colours)")
     if colours < MIN_COLOURS:
         bad(
@@ -226,8 +275,8 @@ def main() -> int:
     reason = _no_context_reason(vp)
     if reason:
         print(f"\n  no OpenGL context, so no frame can be produced: {reason}")
-        for label in ("overview", "site", "no-cloud"):
-            skip(f"{label} frame", reason)
+        for label in FRAME_LABELS:
+            skip_frame(label, reason)
         win.close()
         return summarise()
 
@@ -264,15 +313,47 @@ def main() -> int:
         why = (f"the pocket table has {win.pocket_table.rowCount()} row(s); this "
                "script needs a second one to select a site")
         for label in ("site", "no-cloud"):
-            skip(f"{label} frame", why)
+            skip_frame(label, why)
 
     win.close()
     app.processEvents()
     return summarise()
 
 
+def unaccounted_frames() -> list[str]:
+    """One sentence per label in `FRAME_LABELS` this run did not account for.
+
+    The summary's claim is "N of M", and M is only worth printing if every
+    label in it is either written or named. A frame that goes missing quietly
+    -- a `save_frame` that returned early, a path that forgot a `skip_frame` --
+    used to be invisible here, because the only record of the set was the
+    number typed into the sentence below. Two problems are named separately
+    because they are two different mistakes: a label nobody reached, and a
+    label the run both took and said it had not.
+    """
+    written = [label for label, _name in FRAMES]
+    problems = []
+    for label in FRAME_LABELS:
+        if label in written and label in SKIPPED_FRAMES:
+            problems.append(f"{label} was both written and skipped")
+        elif label not in written and label not in SKIPPED_FRAMES:
+            problems.append(
+                f"{label} was neither written nor named as skipped, so the "
+                f"count in the summary below would be about less than this "
+                f"file can produce")
+    return problems
+
+
 def summarise(incomplete: str = "") -> int:
     """Counts, and the verdict, on every path including a crash."""
+    if not incomplete:
+        # Asked before the counts are taken, so a frame that went missing is in
+        # `nfail` and moves the exit code rather than only adding a line under
+        # the summary. Not asked on the crash path: an exception that escaped
+        # is already reported as a run that did not finish, and a second FAIL
+        # for the same interruption would be two findings for one event.
+        for problem in unaccounted_frames():
+            bad("every frame this file can produce is accounted for", problem)
     npass = sum(1 for tag, _, _ in RESULTS if tag == "PASS")
     nfail = sum(1 for tag, _, _ in RESULTS if tag == "FAIL")
     nskip = sum(1 for tag, _, _ in RESULTS if tag == "SKIP")
@@ -283,8 +364,8 @@ def summarise(incomplete: str = "") -> int:
         if tag in ("FAIL", "SKIP"):
             print(f"    {tag} {name}: {reason}")
     if nskip:
-        print(f"    {len(FRAMES)} of {TOTAL_FRAMES} frames were written; the rest "
-              "are named above")
+        print(f"    {len(FRAMES)} of {len(FRAME_LABELS)} frames were written; "
+              "the rest are named above")
     if incomplete:
         print(f"RESULT: DID NOT FINISH — {incomplete}")
         return EXIT_INCOMPLETE
@@ -297,8 +378,8 @@ def summarise(incomplete: str = "") -> int:
         print("RESULT: DID NOT FINISH — no frame was produced, so there is "
               "nothing here to look at")
         return EXIT_INCOMPLETE
-    print(f"RESULT: PASS — {len(FRAMES)} of {TOTAL_FRAMES} frame(s) written and "
-          "not flat: " + ", ".join(FRAMES))
+    print(f"RESULT: PASS — {len(FRAMES)} of {len(FRAME_LABELS)} frame(s) written "
+          "and not flat: " + ", ".join(name for _label, name in FRAMES))
     return EXIT_OK
 
 

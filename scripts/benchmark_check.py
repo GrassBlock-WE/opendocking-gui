@@ -69,6 +69,33 @@ from opendocking.workbench import pockets as P  # noqa: E402
 FAILURES: list[str] = []
 CHECKS = 0
 
+#: How many checks this file records, **counted by running this file** and not
+#: derived from the source above.
+#:
+#: `F:\python310\python.exe scripts\benchmark_check.py` with
+#: `PYTHONIOENCODING=utf-8` and `PYTHONPATH=dock-py\python`: **`33 checks
+#: passed`, exit 0**, in 1.0 s. The pin is that run's 33 plus the tally check
+#: below, so 34, and the run that has to agree with the pin is the *second* run
+#: of this file rather than the one the 33 came from.
+#:
+#: **This is the one gate of the six where the site census and the run count are
+#: the same number, and the two are not the same claim.** All 33 `check()` sites
+#: here are bare statements at the top level of `main`: none sits in a loop, an
+#: `if`, a `try`, or anything derived from the data, so there is no branch this
+#: file can take that runs a different number of them. That is why the number is
+#: safe to pin at all -- and it is a property of the *shape*, established by
+#: walking the syntax tree, not something the run demonstrated. The run
+#: established only that 33 is what the shape produces on this tree today, and
+#: it is the tally check that turns "today" into something that has to be
+#: re-decided when a site moves.
+#:
+#: The two things that would move it, and both are edits rather than
+#: environments: a `check()` added or deleted, and a check site wrapped in a
+#: branch. Neither can happen without this file changing, which is the property
+#: a pin is for. Nothing about the network, the corpus, the clock or the machine
+#: is in this number, because nothing about them is in the count.
+EXPECTED_CHECKS = 34
+
 
 def check(name, ok, detail=""):
     global CHECKS
@@ -690,13 +717,21 @@ def main() -> int:
         "is asserted anywhere in either script",
     )
 
+    # The pin, asserted on the way out rather than only in the declaration. The
+    # `+ 1` is this check, which has not been counted yet when the comparison is
+    # built. Placed before the failure report so a wrong tally is reported as a
+    # failed check rather than only as a number in the summary.
+    check("this file's own count is the count it declares",
+          CHECKS + 1 == EXPECTED_CHECKS,
+          f"{CHECKS} ran before this one and {EXPECTED_CHECKS} are declared")
+
     print()
     if FAILURES:
         print(f"{len(FAILURES)} check(s) failed:")
         for f in FAILURES:
             print(f"  - {f}")
         return 1
-    print(f"{CHECKS} checks passed")
+    print(f"{CHECKS} checks passed (expected {EXPECTED_CHECKS})")
     print("\nNot gated here, on purpose: whether any of these numbers is good. A "
           "corpus result has no ground truth to gate on, which is why neither "
           "benchmark is a CI gate, and a check that asserted a corpus number "

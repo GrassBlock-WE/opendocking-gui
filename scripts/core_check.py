@@ -90,6 +90,12 @@ except ImportError:  # pragma: no cover - only on an uninstalled checkout
     import opendocking as _od
 
 _RESOLVED = Path(_od.__file__).resolve().parent
+#: Whether the package resolved from a `site-packages` directory, which decides
+#: how a child process has to be pointed at it -- see `sec_output_modes`, where
+#: prepending that directory is a way of breaking the child rather than of
+#: choosing its copy of the package. Named once so the label below and that
+#: section cannot disagree about which copy this run measured.
+_IN_SITE_PACKAGES = "site-packages" in _RESOLVED.parts
 # Three copies of this package can be reachable at once, and a two-way label is
 # not enough to describe them. This file computes `SRC` as *this checkout's*
 # `dock-py/python`, which is the release copy that `_sync_release.py` keeps
@@ -106,7 +112,7 @@ _RESOLVED = Path(_od.__file__).resolve().parent
 # compiled extension and raised before a single check ran.
 if _RESOLVED == (SRC.resolve() / "opendocking"):
     _IMPORT_SOURCE = f"the source tree at {_RESOLVED}"
-elif "site-packages" in _RESOLVED.parts:
+elif _IN_SITE_PACKAGES:
     _IMPORT_SOURCE = f"the installed wheel at {_RESOLVED}"
 else:
     _IMPORT_SOURCE = (
@@ -118,6 +124,78 @@ from opendocking import core  # noqa: E402
 
 FAILURES: list[str] = []
 CHECKS = 0
+
+#: How many checks this file records, **counted from a run and not derived from
+#: the source above**.
+#:
+#: `F:\python310\python.exe scripts\core_check.py` with
+#: `PYTHONIOENCODING=utf-8` and `PYTHONPATH=dock-py\python`: **`509/509 passed`,
+#: exit 0**, the run reporting `measured: the source tree at
+#: ...\dock-py\python\opendocking`. The pin is that run's 509 plus the tally
+#: check below, so 510, and the run that has to agree with the pin is the
+#: *second* run rather than the one the 509 came from.
+#:
+#: **361 call sites produce 509 checks, and the two are not derivable from one
+#: another.** What is known, measured rather than assumed:
+#:
+#:   * six loops each turn one site into several checks. The reachability table
+#:     is 63 members across 6 classes; the exhaustiveness ladder is 7 literal
+#:     box sizes; `sec_estimate` and `sec_result` are 3 literal items each.
+#:   * the two sites in the reachability table's `try`/`else` are **one** check
+#:     per member, not two: the `else` runs when the call works and the
+#:     `except` when it raises, so 2 sites produce 63 checks.
+#:   * `raises()` holds 4 `return check(...)` sites and is called 73 times, so
+#:     those 4 sites produce 73 checks.
+#:   * `main()`'s section loop holds one crash-site that fires **zero** times
+#:     on a clean run, and 22 sections is its literal length.
+#:
+#: **The arithmetic does not close on paper, and that is recorded rather than
+#: tidied.** Those five facts account for most of the gap between 361 and 509
+#: and the remainder was not traced, so a reader must not treat this note as an
+#: equation that reproduces 510. It is the measured pair and the mechanisms that
+#: are known to move a site into several checks -- the same reason
+#: `check_scripts_declare.py` says it re-reads its own number from the run every
+#: time instead of showing the sum: a comment that displayed a closed total
+#: would make the values that did not close look deliberate.
+#:
+#: **One multiplier is not this file's to decide, and it is the reason this pin
+#: is not a closed number.** `sec_output_modes` loops over `warned`, which is
+#: built by running a regex over `dock-py/python/opendocking/core.py` to find
+#: every `if self.<name>:` guard in `DockingResult.summary` -- 3 today. So a
+#: change to the product's summary table moves this count, by exactly the number
+#: of warnings added or removed, and the tally check will go red and say the
+#: count moved. That is the intended reading: the product grew a warning the
+#: table can print, the gate is supposed to test that the wrapper exposes it,
+#: and the count is the evidence that it did. The fix is to read what the red
+#: says, not to widen this constant.
+#:
+#: **What else takes a run below the pin, and why each of those is a finding
+#: rather than a nuisance.** A section that raises is caught by `main()` and
+#: recorded as a failed `section <name> completed` check, and the tally goes red
+#: as well -- a second red about one cause, which is the shape the comment above
+#: `sec_output_modes` already complained about. So the tally's detail names the
+#: sections that crashed, and the two reds are one diagnosis rather than two
+#: bare numbers. The other path is `if not records: return` in the same section:
+#: a child that emitted no JSON record skips four checks, the tally names the
+#: shortfall, and again the cause is in the output already.
+#:
+#: **What the prose does and does not say about this number, checked rather than
+#: assumed.** An earlier version of this note claimed that "the 509 the prose
+#: quotes for this gate is now checkable, and it is wrong by one". It is not
+#: true, and the way it is untrue is worth recording: no live figure in
+#: `README.md`, `README.en.md` or `CHANGELOG.md` quotes this gate's *check
+#: total*. Running `provenance_appendix.py` against a tree with this pin in place
+#: resolves exactly one live figure to `core_check` -- `CHANGELOG.md:718`,
+#: `'22 sections'` -- and that figure is compared against the number of
+#: `section()` call sites read out of this file's AST (22), not against
+#: `EXPECTED_CHECKS`, and it matches. So this pin changes no verdict in the
+#: prose today. What it buys is that the *next* figure quoted for this gate has
+#: something to contradict it, and that the file's own total is asserted inside
+#: the file rather than only declared in a comment. A pin whose value is
+#: "nothing in the tree can check this yet" is still a pin: it is the count the
+#: tally check compares against on every run, and it is read by
+#: `provenance_appendix.py` with `ast` the moment any figure does name it.
+EXPECTED_CHECKS = 510
 
 
 def check(name, ok, detail=""):
@@ -239,10 +317,17 @@ def sec_surface():
           f"core.dock publishes {sig_params}; not mentioned in both core.py and "
           f"the binding: {unforwarded}. A keyword that stops being forwarded is a "
           f"parameter the user can set that does nothing")
-    check("dock's published surface is the nine it is documented to have",
-          len(sig_params) == 9,
+    # The tenth keyword arrived deliberately rather than quietly, which is what
+    # this tripwire asks for: `min_contact_distance` is
+    # `DockingConfig::min_contact_distance`, a field `dock()` itself reads in
+    # the clash partition (`docking.rs:257`) and one the binding did not publish,
+    # so every Python `dock()` was silently fixed at 2.0 A while its own
+    # documentation told callers to set 0.0. It is pinned for real in
+    # `sec_contact_distance`, which drives the clash partition through it.
+    check("dock's published surface is the ten it is documented to have",
+          len(sig_params) == 10,
           f"core.dock publishes {len(sig_params)} keywords {sig_params}. Not a "
-          f"number to protect so much as a tripwire: a tenth keyword is either a "
+          f"number to protect so much as a tripwire: an eleventh keyword is either a "
           f"new promise or a new gap, and either way it should arrive with a "
           f"decision rather than quietly")
 
@@ -300,6 +385,13 @@ def sec_reachability():
             ("raw_data", lambda: maps.raw_data),
             ("num_points", lambda: maps.num_points),
             ("memory_mb", lambda: maps.memory_mb),
+            # The maps' own unrecognised-atom count. `Receptor` and
+            # `DockingResult` have both carried it and the engine has held it on
+            # `GridMaps` since the field was added, so this class was the one
+            # place in the chain that could not be asked -- and the maps are
+            # exactly the object that outlives the receptor. Its two directions
+            # are pinned in `sec_maps`.
+            ("unknown_atom_types", lambda: maps.unknown_atom_types),
             # The one that was broken for the life of the file.
             ("box", lambda: maps.box),
             ("write_map_files", lambda: _write_maps(maps)),
@@ -351,6 +443,14 @@ def sec_reachability():
             ("elapsed_seconds", lambda: res.elapsed_seconds),
             ("raw_pose_count", lambda: res.raw_pose_count),
             ("rejected_pose_count", lambda: res.rejected_pose_count),
+            ("unknown_atom_types", lambda: res.unknown_atom_types),
+            # The out-of-box pose count. It was carried from the engine through
+            # the binding and reachable only by reaching into `res._res`, which
+            # is not a surface a caller has: `hasattr(DockingResult, ...)` was
+            # False, so the one number that says "this run describes no binding
+            # mode" was invisible to the person the run was for. Its two
+            # directions are pinned in `sec_result`.
+            ("poses_outside_box_count", lambda: res.poses_outside_box_count),
             ("scoring_function", lambda: res.scoring_function),
             ("pose_coords", lambda: res.pose_coords(0)),
             ("pose_conformation", lambda: res.pose_conformation(0)),
@@ -445,6 +545,54 @@ def sec_gridbox():
     raises("contains refuses an empty point", ValueError, lambda: b.contains(()), "3 values")
     raises("contains refuses a 1-value point", ValueError, lambda: b.contains((1.0,)), "3 values")
     check("contains arity message names the count it got", True)
+
+    # --- the two constructors are not interchangeable, and the trap is silent
+    # `GridBox(a, b)` reads a as a *corner* and b as a *corner*.
+    # `GridBox.from_center_size(a, b)` reads a as a *centre* and b as a *span*.
+    # Same arity, same types, opposite meaning for the first argument, and the
+    # boxes are half a span apart. This was the finding behind the class
+    # docstring, and it is pinned here because a reader's memory is not a guard.
+    corners = core.GridBox((0.0, 0.0, 0.0), (14.0, 14.0, 14.0))
+    centred = core.GridBox.from_center_size((0.0, 0.0, 0.0), (14.0, 14.0, 14.0))
+    check("the two constructors agree on edge length", corners.size == centred.size == (14.0, 14.0, 14.0),
+          f"corners {corners.size} against centred {centred.size}")
+    offset = tuple(m - n for m, n in zip(centred.min_corner, corners.min_corner))
+    check("and still put the box half a span apart, on every axis",
+          offset == (-7.0, -7.0, -7.0),
+          f"corners span {corners.min_corner}..{corners.max_corner}, centred spans "
+          f"{centred.min_corner}..{centred.max_corner}: an offset of {offset}. Same "
+          f"numbers, no error either way")
+    # The dangerous half of the same mistake, pinned as it behaves today: a span
+    # handed to the corner path is *accepted* whenever it happens to be forward.
+    # Only the inverted one is refused, because `!(max > min)` rejects it.
+    misuse = core.GridBox((0.0, 0.0, 0.0), (2.0, 14.0, 14.0))
+    check("a span handed to the corner path is silently accepted",
+          misuse.size == (2.0, 14.0, 14.0),
+          f"(0,0,0),(2,14,14) builds a {misuse.size} box with no complaint. Pinned as "
+          f"a fact, not endorsed: it is why the docstring tells you to prefer the "
+          f"keyword forms")
+    # The advice the docstring gives, pinned so it stays true.
+    raises("the corner path refuses the keyword the class docstring recommends instead",
+           TypeError,
+           lambda: core.GridBox(center=(0.0, 0.0, 0.0), size=(14.0, 14.0, 14.0)),
+           "center")
+    # And the docstring itself, because a documented asymmetry that the
+    # documentation does not mention is the state this section was written for.
+    # The slice is the `Parameters` block specifically, not the prose above it:
+    # an earlier version of this check took everything before "Examples" and was
+    # satisfied by the comparison table alone, so deleting the Parameters entry
+    # left it green. The entry is what a reader of a signature is looking at.
+    gridbox_doc = core.GridBox.__doc__ or ""
+    parameters = ""
+    if "Parameters" in gridbox_doc:
+        parameters = gridbox_doc.split("Parameters", 1)[1].split("Examples", 1)[0]
+    check("the class docstring's Parameters block names both constructors",
+          "min_corner" in parameters and "from_center_size" in parameters,
+          f"the Parameters block is {parameters.strip()[:70]!r}...; it names "
+          f"min_corner: {'min_corner' in parameters}, from_center_size: "
+          f"{'from_center_size' in parameters}. It used to name only the first, "
+          f"with the second mentioned solely in the comparison table above and in "
+          f"the Examples")
 
 
 def sec_gridbox_engine():
@@ -841,6 +989,42 @@ def sec_maps():
     check("memory_mb is 3.72 MB", abs(MAPS.memory_mb - 3.721466064453125) < 1e-12, f"got {MAPS.memory_mb!r}")
     check("repr reports dims and spacing", "dims=(29, 29, 29)" in repr(MAPS) and "spacing=0.5" in repr(MAPS), repr(MAPS))
 
+    # The maps' own unrecognised-atom count, pinned in both directions.
+    #
+    # Why this is on GridMaps and not only on the two classes that already had
+    # it: the receptor is the object that goes *out of scope* the moment maps
+    # exist -- precalculate, drop the receptor, hold maps, dock. The engine has
+    # carried the number on the maps since the field was added, and `Receptor`
+    # and `DockingResult` both surfaced it, but this wrapper did not, so from
+    # Python the count existed in the binding's dependency and was unreachable
+    # on the one object a caller keeps.
+    #
+    # Direction one, the zero, or the non-zero direction below is vacuous.
+    check("maps.unknown_atom_types is zero for a clean receptor",
+          MAPS.unknown_atom_types == 0, f"got {MAPS.unknown_atom_types}")
+    check("it is an int and not a bool, so == 0 is a real comparison",
+          isinstance(MAPS.unknown_atom_types, int)
+          and not isinstance(MAPS.unknown_atom_types, bool),
+          f"got {type(MAPS.unknown_atom_types).__name__}")
+    check("the maps and the receptor they were tabulated from agree",
+          MAPS.unknown_atom_types == REC.unknown_atom_types,
+          f"maps {MAPS.unknown_atom_types} vs receptor {REC.unknown_atom_types}")
+
+    # Direction two, the non-zero, on the same appended-`ZZ` fixture the result
+    # section uses for the same reason: it is the only difference between this
+    # receptor and REC, so a count of 1 cannot be explained by anything else.
+    exotic_rec = core.Receptor.from_pdbqt_str(
+        (EX / "rec_prep.pdbqt").read_text(encoding="utf-8")
+        + "ATOM      5  X1  ALA A   3       4.000   4.000   3.100  1.00  0.00     0.000 ZZ\n"
+    )
+    exotic_maps = exotic_rec.precalculate(BOX, "vina", 0.5)
+    check("an unrecognised type is counted on the maps, not only the receptor",
+          exotic_maps.unknown_atom_types == 1,
+          f"got {exotic_maps.unknown_atom_types}")
+    check("and the clean maps report 0, so it is not a constant",
+          exotic_maps.unknown_atom_types != MAPS.unknown_atom_types,
+          f"exotic {exotic_maps.unknown_atom_types} vs clean {MAPS.unknown_atom_types}")
+
     # GridMaps.box was dead for the life of the file: it called
     # GridBox.__new_from from inside GridMaps, which mangles to
     # GridBox._GridMaps__new_from, a name that has never existed.
@@ -957,6 +1141,43 @@ def sec_ligand():
            lambda: core.Ligand.from_arrays(["C"] * 2, [0.0] * 2, chain[:2], [(-1, 0)]), "refers to atom -1")
     raises("from_arrays refuses a self-bond past the end", ValueError,
            lambda: core.Ligand.from_arrays(["C"], [0.0], chain[:1], [(0, 5)]), "refers to atom 5")
+
+    # A self-bond that is *in range* is the case the two above do not cover,
+    # and it is the one that was silently dropped on both paths. The brief for
+    # this round said `core.py` "already refuses both" an out-of-range and a
+    # self-referential bond; the first is true and the second was not. The
+    # existing check above is named "past the end" because it tests `(0, 5)`
+    # with one atom -- out of range, *not* self-referential -- so nothing
+    # anywhere asserted `(0, 0)`, and the engine's `i != j` guard threw it away.
+    # A dropped bond is a different molecule rather than a missing result: the
+    # atoms stop being neighbours, so a torsion and a ring membership can both
+    # be lost, and every energy that comes back is finite and plausible.
+    raises("from_arrays refuses an in-range self-bond", ValueError,
+           lambda: core.Ligand.from_arrays(["C"], [0.0], chain[:1], [(0, 0)]),
+           "self-bond")
+
+    # The accept direction, so the refusal above is a check and not a ban on
+    # the whole argument. A bond is a *pair*: `(1, 0)` names the same covalent
+    # bond as `(0, 1)`, and a table listing it twice is redundant rather than
+    # wrong. Both were dropped-then-accepted before; if either is now refused
+    # the caller has a table the engine will not take for no stated reason.
+    check("a reversed pair is the same bond, and is accepted",
+          core.Ligand.from_arrays(["C"] * 2, [0.0] * 2, chain[:2], [(1, 0)]).num_atoms == 2)
+    doubled = core.Ligand.from_arrays(["C"] * 2, [0.0] * 2, chain[:2], [(0, 1), (1, 0)])
+    check("a bond listed twice is stored once, not refused and not doubled",
+          doubled.num_atoms == 2,
+          f"num_atoms {doubled.num_atoms}")
+    # The duplicated-bond hazard this guards: a rotatable bond present twice
+    # makes the cluster graph cyclic, which breaks the invariant that one
+    # torsion owns exactly one child cluster. Two carbons are one terminal bond
+    # and so zero torsions either way, so the count is asserted only to be
+    # equal between the single and doubled tables rather than to be any
+    # particular number.
+    check("doubling a bond does not change the derived flexibility",
+          doubled.num_torsions
+          == core.Ligand.from_arrays(["C"] * 2, [0.0] * 2, chain[:2], [(0, 1)]).num_torsions,
+          f"doubled {doubled.num_torsions}")
+
     raises("from_arrays refuses a 1-D coords array", ValueError,
            lambda: core.Ligand.from_arrays(["C"], [0.0], np.array([0.0, 0, 0])), "(n, 3)")
     raises("from_arrays refuses (n, 2) coords", ValueError,
@@ -1288,9 +1509,144 @@ def sec_result():
           f"all pairwise: {[round(v, 4) for v in pairwise]}")
     check("raw_pose_count is larger than num_poses", r.raw_pose_count > n, f"{r.raw_pose_count} vs {n}")
     check("rejected_pose_count is zero for a clean box", r.rejected_pose_count == 0)
+    # The unrecognised-atom count, pinned in both directions. The reachability
+    # table is what noticed it: it was added to the wrapper in the same change
+    # that added it to the engine, and "declared in the source but absent from
+    # the table" is exactly the state that table exists to catch. It answers
+    # "it is there"; the two directions below answer "it is right".
+    #
+    # Direction one, the zero: a clean fixture must report 0, or the positive
+    # direction is vacuous. This is the same trap the Rust test
+    # `the_unrecognised_atom_count_reaches_the_result` guards against in prose.
+    check("unknown_atom_types is zero for a clean receptor",
+          r.unknown_atom_types == 0, f"got {r.unknown_atom_types}")
+    check("it is an int and not a bool, so == 0 is a real comparison",
+          isinstance(r.unknown_atom_types, int) and not isinstance(r.unknown_atom_types, bool),
+          f"got {type(r.unknown_atom_types).__name__}")
+    check("the result and the receptor it docked against agree",
+          r.unknown_atom_types == REC.unknown_atom_types,
+          f"result {r.unknown_atom_types} vs receptor {REC.unknown_atom_types}")
+
+    # Direction two, the non-zero, and the reason the check above is not a
+    # constant with a comment. `ZZ` is not an AutoDock type; the engine counts
+    # it, reports it, and still docks. The receptor is built from the same
+    # checked-in file the rest of this script uses, plus one appended line, so
+    # the only difference between this receptor and REC is the exotic atom.
+    exotic_text = (EX / "rec_prep.pdbqt").read_text(encoding="utf-8") + (
+        "ATOM      5  X1  ALA A   3       4.000   4.000   3.100  1.00  0.00     0.000 ZZ\n"
+    )
+    exotic_rec = core.Receptor.from_pdbqt_str(exotic_text)
+    check("an unrecognised type is counted on the receptor",
+          exotic_rec.unknown_atom_types == 1, f"got {exotic_rec.unknown_atom_types}")
+    check("and only that one: the clean file contributes none",
+          exotic_rec.num_atoms == REC.num_atoms + 1
+          and exotic_rec.unknown_atom_types - REC.unknown_atom_types == 1,
+          f"{exotic_rec.num_atoms} vs {REC.num_atoms} atoms")
+    exotic_maps = exotic_rec.precalculate(BOX, "vina", 0.5)
+    exotic_result = core.dock(IG, exotic_maps, exhaustiveness=4, num_modes=3, seed=42)
+    check("and the count survives onto the result, which is the whole point",
+          exotic_result.unknown_atom_types == 1,
+          f"got {exotic_result.unknown_atom_types}")
+    check("the same run against the clean maps reports 0, so it is not a constant",
+          exotic_result.unknown_atom_types != r.unknown_atom_types,
+          f"exotic {exotic_result.unknown_atom_types} vs clean {r.unknown_atom_types}")
+    check("the exotic run still returns poses: it is reported, not refused",
+          exotic_result.num_poses == r.num_poses,
+          f"got {exotic_result.num_poses} against {r.num_poses}")
     check("scoring_function is what was asked for", r.scoring_function == "vina", f"got {r.scoring_function}")
     check("elapsed_seconds is a positive float", isinstance(r.elapsed_seconds, float) and r.elapsed_seconds > 0)
     check("repr reports the pose count and the best energy", repr(r).startswith("DockingResult(num_poses=3, best="), repr(r))
+
+    # --- the out-of-box count, on the wrapper -------------------------------
+    #
+    # Reachability first, and as a *class* attribute, because that is the
+    # defect this closes: the number was computed, carried from Rust through
+    # the binding, and reachable only as `res._res.poses_outside_box_count`.
+    # A caller has no `_res`; the wrapper hides it behind `__slots__` and the
+    # name is private by convention. `hasattr` on the instance would have
+    # passed the whole time this was broken only if the attribute existed --
+    # so the gate is on the class, which is what `hasattr(core.DockingResult,
+    # ...)` in a user's shell would report.
+    check("DockingResult exposes poses_outside_box_count on the class",
+          hasattr(core.DockingResult, "poses_outside_box_count"))
+    check("and it is a property, not a method that needs calling",
+          isinstance(getattr(core.DockingResult, "poses_outside_box_count", None), property))
+    check("reading it needs no argument", r.poses_outside_box_count is not None)
+    check("it is an int and not a bool, so == 0 below is a real comparison",
+          isinstance(r.poses_outside_box_count, int)
+          and not isinstance(r.poses_outside_box_count, bool),
+          f"got {type(r.poses_outside_box_count).__name__}")
+    check("and it is the same number the private path gave",
+          r.poses_outside_box_count == r._res.poses_outside_box_count,
+          f"wrapper {r.poses_outside_box_count} vs _res {r._res.poses_outside_box_count}")
+    check("it is within range for any result: 0 to num_poses",
+          0 <= r.poses_outside_box_count <= r.num_poses,
+          f"{r.poses_outside_box_count} of {r.num_poses}")
+
+    # Direction one, the zero. A clean box must report 0, or the non-zero
+    # direction is vacuous and a property that always returned 9 would pass
+    # every other check in this section.
+    check("poses_outside_box_count is zero for a clean box",
+          r.poses_outside_box_count == 0, f"got {r.poses_outside_box_count}")
+
+    # Direction two, the non-zero, and the reason the line above is not a
+    # constant with a comment. The engine refuses a box that holds no receptor
+    # atom and refuses one smaller than the ligand, so the count is not
+    # reachable by pointing a box at the wrong place -- which is the honest
+    # answer to "how often is this number non-zero": on a fixture chosen to
+    # make it so, it still was not. So the non-zero direction is exercised on
+    # the *object*, not by hunting for a run: a stand-in result whose engine
+    # field is set to a non-zero count, which is the only way to reach the
+    # branch without a search that misbehaves. What that proves is the branch
+    # and the wording; it proves nothing about the engine producing that count,
+    # and the two claims are kept apart on purpose.
+    class _Stub:
+        """A DockingResult stand-in carrying only what `summary()` reads.
+
+        `summary()` reads six properties and nothing else, so this is the
+        smallest object that can exercise its warning branches. It is a stub
+        rather than a monkeypatch because it cannot perturb the real class.
+        """
+
+        def __init__(self, outside, rejected=0, unknown=0, poses=3):
+            self.num_poses = poses
+            self.raw_pose_count = 81
+            self.elapsed_seconds = 1.0
+            self.scoring_function = "vina"
+            self.energies = np.array([-6.1, -6.0, -5.9])
+            self.intermolecular_energies = np.array([-6.1, -6.0, -5.9])
+            self.rmsds = np.array([0.0, 1.5, 2.5])
+            self.rejected_pose_count = rejected
+            self.unknown_atom_types = unknown
+            self.poses_outside_box_count = outside
+
+        summary = core.DockingResult.summary
+
+    for outside, want_line in ((0, False), (1, True), (3, True)):
+        stub = _Stub(outside)
+        text = core.DockingResult.summary(stub)
+        has = "no atom at all inside the search box" in text
+        check(f"summary prints the out-of-box line iff the count is {outside}",
+              has == want_line,
+              f"count {outside} -> line present {has}; "
+              f"{text.splitlines()[-1][:60]!r}")
+    full = core.DockingResult.summary(_Stub(2, rejected=1, unknown=3, poses=4))
+    out_of_box_line = next(
+        (ln for ln in full.splitlines() if "inside the search box" in ln), "(no such line)")
+    check("a count of 2 of 4 is stated as a fraction of the poses, not alone",
+          "2 of 4 reported poses" in out_of_box_line,
+          out_of_box_line)
+    check("all three warnings can appear together, and each names its count",
+          full.count("WARNING") == 3
+          and "2 of 4" in full and "1 of 4" in full and "3 receptor atom(s)" in full,
+          f"{full.count('WARNING')} WARNING lines")
+    # The trade-off, pinned as behaviour rather than left to the comment: a zero
+    # count prints no line at all. That is the decision, and this is what
+    # "the line is absent" has to mean -- it is *not* evidence of a clean run
+    # beyond the fact that the count was zero.
+    check("a zero count prints no out-of-box line, by decision",
+          "search box" not in core.DockingResult.summary(_Stub(0)),
+          "printed something for a zero count")
 
     apc = r.all_pose_coords()
     check("all_pose_coords is (n_poses, n_atoms, 3)", apc.shape == (n, 16, 3), f"got {apc.shape}")
@@ -1352,9 +1708,20 @@ def sec_writers():
         text = (p / "poses.pdbqt").read_text(encoding="utf-8", errors="replace")
         check("write_pdbqt writes one MODEL per pose", text.count("MODEL") == RESULT.num_poses,
               f"{text.count('MODEL')} vs {RESULT.num_poses}")
+        # Counted as *records*, not as the substring "ATOM". A substring count
+        # was good enough until the file grew a record whose text mentions the
+        # word -- `REMARK OD_ATOM_ORDER ... SERIAL = ATOM INDEX` mentions it
+        # twice, and the count came out 54 against 48 atoms. The name of this
+        # check is "one atom line per atom per pose", so it counts lines whose
+        # record field is ATOM, which is also what the parser downstream does.
+        atom_lines = sum(1 for l in text.splitlines()
+                         if l.split()[:1] and l.split()[0] in ("ATOM", "HETATM"))
         check("write_pdbqt writes one atom line per atom per pose",
-              text.count("ATOM") + text.count("HETATM") == RESULT.num_poses * IG.num_atoms,
-              f"{text.count('ATOM') + text.count('HETATM')} vs {RESULT.num_poses * IG.num_atoms}")
+              atom_lines == RESULT.num_poses * IG.num_atoms,
+              f"{atom_lines} ATOM/HETATM records vs {RESULT.num_poses * IG.num_atoms} "
+              f"atoms over {RESULT.num_poses} pose(s); the file also contains "
+              f"{text.count('ATOM')} occurrences of the word, which is not the "
+              f"same thing")
         check("write_pdbqt is not empty", (p / "poses.pdbqt").stat().st_size > 0)
 
         RESULT.write_xyz(p / "poses.xyz")
@@ -1366,6 +1733,128 @@ def sec_writers():
               == _write_str(RESULT, "write_pdbqt", "t.pdbqt"))
     raises("write_pdbqt refuses a missing directory", BaseException,
            lambda: RESULT.write_pdbqt(Path(tempfile.gettempdir()) / "od_core_check_absent" / "x.pdbqt"))
+
+    # --- what a pose file means, and how a reader has to read it ---------------
+    #
+    # The file carries the poses the API reports, and it has always done so:
+    # indexed by the serial column, the coordinates reproduce `pose_coords(i)`
+    # to the writer's 3-decimal precision. What the file does *not* do is write
+    # its ATOM records in that order -- the rigid root goes first, so the serials
+    # run out of sequence -- and until this section nothing in the file said so.
+    # A reader that took the n-th record for the n-th atom therefore got a
+    # permuted molecule, 3.99 A RMSD away on ibuprofen, while the workbench
+    # described it with numbers belonging to the unpermuted one.
+    #
+    # So the claims here are: the file and the API agree **once the serial is
+    # used**; the file says to use it; and the two orders really are different
+    # for this ligand, so the declaration is describing a distinction that
+    # exists rather than one it has forgotten to check.
+    with tempfile.TemporaryDirectory() as td:
+        pf = Path(td) / "order.pdbqt"
+        RESULT.write_pdbqt(pf)
+        text = pf.read_text(encoding="utf-8", errors="replace")
+
+    models, cur = [], None
+    for line in text.splitlines():
+        if line.startswith("MODEL"):
+            cur = []
+        elif line.startswith("ENDMDL"):
+            models.append(cur or [])
+            cur = None
+        elif line.startswith("ATOM") and cur is not None:
+            cur.append((int(line[6:11]), float(line[30:38]),
+                        float(line[38:46]), float(line[46:54])))
+
+    check("one MODEL per reported pose, as before", len(models) == RESULT.num_poses,
+          f"{len(models)} MODELs for {RESULT.num_poses} reported poses")
+
+    # 1. the file and the API agree, once the serial is used. This is the
+    #    assertion that goes red if the *writer* starts writing something else.
+    worst_serial = 0.0
+    worst_order = 0.0
+    for i, m in enumerate(models):
+        by_serial = np.array([[c[1], c[2], c[3]] for c in sorted(m, key=lambda c: c[0])])
+        if by_serial.shape != RESULT.pose_coords(i).shape:
+            continue
+        worst_serial = max(worst_serial, float(np.sqrt(
+            ((by_serial - RESULT.pose_coords(i)) ** 2).sum(axis=1).mean())))
+        by_order = np.array([[c[1], c[2], c[3]] for c in m])
+        worst_order = max(worst_order, float(np.sqrt(
+            ((by_order - RESULT.pose_coords(i)) ** 2).sum(axis=1).mean())))
+    check("read by the serial column, the file carries pose_coords(i) exactly",
+          worst_serial < 1e-3,
+          f"worst RMSD {worst_serial:.6f} A over {len(models)} MODELs. The writer "
+          f"keeps 3 decimal places, so 1e-3 is the floor, not a tolerance chosen "
+          f"to pass")
+
+    # 2. the file declares its order. Inert to other tools, like the
+    #    REMARK VINA RESULT and the OD_NBONDS records it already carries.
+    check("and every MODEL declares the order, so a reader cannot be misled",
+          text.count("REMARK OD_ATOM_ORDER") == RESULT.num_poses,
+          f"{text.count('REMARK OD_ATOM_ORDER')} declarations for "
+          f"{RESULT.num_poses} MODELs. Without one, a reader has to know a "
+          f"convention only this writer breaks")
+
+    # 3. and the two orders really differ here, so 1 and 2 are not vacuous: a
+    #    writer that started emitting serial order would leave 2 describing a
+    #    distinction that no longer exists, and this has to notice.
+    first = [c[0] for c in models[0]] if models else []
+    check("the declared order is not the order the records happen to be in",
+          first != sorted(first) and worst_order > worst_serial,
+          f"MODEL 1 serials in file order {first}. Read in file order that is "
+          f"{worst_order:.4f} A from pose_coords(0); read by serial it is "
+          f"{worst_serial:.6f} A. The gap between those two numbers is the size "
+          f"of the mistake this declaration exists to prevent")
+
+    # 4. and the project's *own* reader accepts the file its writer just wrote.
+    #    A pose file is several poses of one molecule, and the reader that
+    #    builds a molecule used to append every MODEL's atoms to one list: the
+    #    nine poses of `examples/poses.pdbqt` parsed as a single 144-atom
+    #    molecule in which atoms from two different poses sat 0.06 A apart, and
+    #    the duplicate-atom check refused it. So `write_pdbqt` produced a file
+    #    that `Ligand.from_pdbqt` could not read -- the round trip did not close.
+    with tempfile.TemporaryDirectory() as td:
+        rt = Path(td) / "roundtrip.pdbqt"
+        RESULT.write_pdbqt(rt)
+        rtext = rt.read_text(encoding="utf-8", errors="replace")
+        rmodels, rcur = [], None
+        for line in rtext.splitlines():
+            if line.startswith("MODEL"):
+                rcur = []
+            elif line.startswith("ENDMDL"):
+                rmodels.append(rcur or [])
+                rcur = None
+            elif line.startswith("ATOM") and rcur is not None:
+                rcur.append((int(line[6:11]), float(line[30:38]),
+                             float(line[38:46]), float(line[46:54])))
+        n_atoms_in_file = sum(len(m) for m in rmodels)
+        got_n, back = None, None
+        try:
+            back = core.Ligand.from_pdbqt(rt)
+            got_n = back.num_atoms
+        except Exception as exc:  # noqa: BLE001
+            got_n = f"{type(exc).__name__}: {exc}"
+        check("the project's own reader accepts the file write_pdbqt wrote",
+              got_n == IG.num_atoms,
+              f"Ligand.from_pdbqt on a {len(rmodels)}-MODEL file holding "
+              f"{n_atoms_in_file} atom records returned {got_n}; the molecule has "
+              f"{IG.num_atoms} atoms. A reader that merges the poses reports "
+              f"{n_atoms_in_file}, or the duplicate-atom check rejects it outright")
+
+        # 5. and the atoms it hands back are in *serial* order, so the molecule
+        #    is not merely the right size but the right one. A count would pass
+        #    on a file whose atoms were permuted into the same number.
+        worst_back = None
+        if back is not None and rmodels:
+            by_serial = np.array([[c[1], c[2], c[3]] for c in sorted(rmodels[0],
+                                                                     key=lambda c: c[0])])
+            ref = np.asarray(back.reference_coords, dtype=float)
+            if by_serial.shape == ref.shape:
+                worst_back = float(np.sqrt(((by_serial - ref) ** 2).sum(axis=1).mean()))
+        check("and the reader hands the atoms back in serial order, not file order",
+              worst_back is not None and worst_back < 1e-3,
+              f"worst RMSD {worst_back} A between MODEL 1 read by serial and the "
+              f"reader's own reference_coords. Again 1e-3 is the write precision")
 
 
 def _write_str(res, method, name) -> int:
@@ -1430,23 +1919,583 @@ def sec_scoring():
           sorted(backend) == ["adapter", "backend", "gpu_skip_reason", "num_conformations"], f"got {sorted(backend)}")
     check("report_backend says which backend ran", backend["backend"] in ("cpu", "gpu"), f"got {backend['backend']}")
     check("report_backend counts the rows", backend["num_conformations"] == 1)
-    check("report_backend agrees with gpu_status",
-          (backend["backend"] == "gpu") == core.gpu_status()["available"])
+
+    # What `report_backend` is *for*, stated as two claims that hold on every
+    # machine, rather than the one this used to assert.
+    #
+    # It used to assert `(backend == "gpu") == gpu_status()["available"]`, which
+    # is not a property of the engine at all. `gpu_status()["available"]`
+    # answers "could a GPU be used here"; `backend` answers "what ran". The call
+    # above does not ask for a GPU -- `use_gpu` defaults to False, and the check
+    # two lines down pins that -- so `backend` is `"cpu"` by construction no
+    # matter what the machine has, and the equality holds only on a machine with
+    # no usable GPU. On any machine that has one it fails, which is the whole of
+    # its evidence: the assertion was true here for the wrong reason and red
+    # elsewhere for the right one. It shares a root cause with the earlier
+    # `gpu_skip_reason: None` finding -- the report's fields are indexed by
+    # "was the GPU requested", and this compared a request-keyed field against
+    # an availability-keyed one.
+    #
+    # The two claims that are actually true, and which fail if the report ever
+    # starts lying:
+    #
+    # 1. A run that did not request the GPU cannot have fallen back from one, so
+    #    it must report the CPU and must not name a skip reason. A skip reason
+    #    here would be the engine claiming a fallback that never happened.
+    # 2. A run that did request the GPU either used it, or fell back *and said
+    #    why*. `backend == "cpu"` with no reason is the one combination a
+    #    caller cannot act on, and it is the only thing this needs to forbid.
+    check("a run that did not ask for the GPU reports the CPU",
+          backend["backend"] == "cpu", f"got {backend['backend']}")
     check("a CPU run explains itself with no skip reason", backend["gpu_skip_reason"] is None)
+    check("nothing claimed a fallback that was never attempted",
+          not (backend["backend"] == "cpu" and backend["gpu_skip_reason"] is not None),
+          f"backend {backend['backend']!r} with skip reason "
+          f"{backend['gpu_skip_reason']!r}")
+    check("a skipped run names an adapter only when one ran",
+          (backend["adapter"] is None) == (backend["backend"] == "cpu"),
+          f"backend {backend['backend']!r}, adapter {backend['adapter']!r}")
+
+    asked: dict = {}
+    core.evaluate_conformations(IG, MAPS, conf.reshape(1, -1), use_gpu=True,
+                                report_backend=asked)
+    check("a run that asked for the GPU is answered in the same four keys",
+          sorted(asked) == ["adapter", "backend", "gpu_skip_reason", "num_conformations"],
+          f"got {sorted(asked)}")
+    check("asking for the GPU is answered, not ignored",
+          asked["backend"] in ("cpu", "gpu"), f"got {asked['backend']}")
+    # The claim that matters, and the one whose absence made this machine's
+    # green meaningless: whatever happened, the caller can tell whether a
+    # fallback occurred.
+    check("if it did not run on the GPU it says why, or the GPU was never compiled in",
+          asked["backend"] == "gpu" or asked["gpu_skip_reason"] is not None
+          or not core.gpu_status()["compiled"],
+          f"backend {asked['backend']!r}, skip {asked['gpu_skip_reason']!r}, "
+          f"compiled {core.gpu_status()['compiled']}")
+    # There is deliberately no assertion here that the GPU and CPU paths return
+    # equal energies. It is tempting and it is wrong: the kernel computes the
+    # intermolecular half in f32 and the CPU in f64, so the two cannot be
+    # bit-equal, and the only way to write the check is to invent a tolerance.
+    # `scripts/gpu_cpu_parity_check.py` owns that measurement, with a band it
+    # derives. Adding a second, differently-chosen band here would be a third
+    # answer to the same question.
     check("use_gpu=False is the default", core.evaluate_conformations.__defaults__[-2] is False)
 
 
+# ============================== the out-of-box penalty, as a caller sees it
+def sec_out_of_box():
+    section("a pose outside the box is charged per angstrom and walked back in")
+    # The engine used to charge one flat penalty per atom at every distance and
+    # hand the optimiser a gradient pointing away from the box centre, so a pose
+    # that had left the box was pushed further out while its energy never moved
+    # -- which left the line search with no step to take, and returned the pose
+    # exactly where it started. `dock-core` pins the corrected shape in Rust
+    # (`search::tests::the_out_of_box_penalty_is_per_angstrom_of_violation` and
+    # `an_out_of_box_atom_is_pulled_back_in_by_its_descent_direction`); this
+    # section asks the same question of the three numbers a caller outside the
+    # engine can see: the energy, the gradient, and the `out_of_box_penalty`
+    # field the breakdown panel shows.
+    #
+    # Three separate questions, because a magnitude-only assertion passes on the
+    # old code -- the old charge really was 1000 per atom. The figure is
+    # therefore pinned as a *difference* over one angstrom, which a flat step
+    # cannot show at all; the direction is pinned from the gradient; and the
+    # gradient is pinned as the derivative of the energy, which is the one
+    # comparison that is red under the old code and under a sign flip alone.
+    conf = RESULT.pose_conformation(0)
+    lo = np.asarray(BOX.min_corner)
+    hi = np.asarray(BOX.max_corner)
+
+    def at(x, y=0.0, z=0.0):
+        c = np.array(conf, dtype=np.float64)
+        c[0], c[1], c[2] = x, y, z
+        return c
+
+    def violation(c):
+        """Angstroms outside, summed over every atom and every axis."""
+        cc = core.conformation_coordinates(IG, c)
+        return float(np.maximum(0.0, np.maximum(cc - hi, lo - cc)).sum())
+
+    far = at(20.0)
+    cc = core.conformation_coordinates(IG, far)
+    n_out = int((cc[:, 0] > hi[0]).sum())
+    quiet = int((cc[:, 1:] < lo[1:]).sum() + (cc[:, 1:] > hi[1:]).sum())
+    check("the fixture pose is outside on every atom, and on one axis only",
+          n_out == cc.shape[0] and quiet == 0,
+          f"{n_out}/{cc.shape[0]} atoms past the +x face at {hi[0]:.1f}, and {quiet} "
+          f"past a y or z face. Every expected value below is "
+          f"{1000.0 * n_out:.0f} per angstrom of overhang")
+
+    e_far, g_far = core.score_conformation(IG, MAPS, far)
+    e_near, _ = core.score_conformation(IG, MAPS, at(19.0))
+    check("one angstrom further out costs one penalty per atom",
+          abs((e_far - e_near) - 1000.0 * n_out) < 1e-6,
+          f"E(20) - E(19) = {e_far - e_near:.6f} against {1000.0 * n_out:.6f}. A flat "
+          f"charge gives 0.0 here, and the old code gave exactly that")
+    t_far = core.score_conformation_terms(IG, MAPS, REC_TERMS, far)
+    check("the breakdown field is that same ramp, not a per-atom step",
+          abs(t_far["out_of_box_penalty"] - 1000.0 * violation(far)) < 1e-6,
+          f"out_of_box_penalty = {t_far['out_of_box_penalty']:.4f} against "
+          f"1000 x {violation(far):.4f} A. This is the number the breakdown panel "
+          f"prints, and it used to be {1000.0 * n_out:.0f} at any distance")
+    check("the breakdown still sums to the engine's own intermolecular",
+          abs(t_far["terms_total"] + t_far["out_of_box_penalty"] - t_far["intermolecular"]) < 1e-9,
+          f"{t_far['terms_total']:.4f} + {t_far['out_of_box_penalty']:.4f} against an "
+          f"intermolecular of {t_far['intermolecular']:.4f}. The two places the "
+          f"penalty is charged are not allowed to disagree about what a pose left "
+          f"the box by")
+    check("the gradient points further out, so -grad steps back toward the box",
+          g_far[0] > 0.0,
+          f"dE/dx = {g_far[0]:+.6f} at x = 20, so -grad is a step back toward the "
+          f"box. The old code put the full penalty on a unit vector toward the box "
+          f"*centre*: -1000.0 per outside atom when the pose sits just past a face "
+          f"(measured -1000.000000 at 1 A out), and -15863.931740 on x for this pose "
+          f"at x = 20, because a unit vector to the centre is not -x that far out. "
+          f"-grad was a step outwards either way")
+    check("an axis the pose never left alone contributes nothing",
+          abs(g_far[1]) < 1e-9 and abs(g_far[2]) < 1e-9,
+          f"({g_far[0]:+.6f}, {g_far[1]:+.3e}, {g_far[2]:+.3e}). A pull toward the "
+          f"box centre gave a large component on these two axes, which is how a "
+          f"pose leaves through one face and is shoved out of another")
+    e_hi, _ = core.score_conformation(IG, MAPS, at(20.5))
+    e_lo, _ = core.score_conformation(IG, MAPS, at(19.5))
+    check("the gradient is the gradient of the energy, not a number near it",
+          abs(g_far[0] - (e_hi - e_lo) / 1.0) < 1e-6,
+          f"analytic {g_far[0]:+.6f} against a central difference of "
+          f"{(e_hi - e_lo) / 1.0:+.6f} over 1.0 A, both ends of it fully outside. "
+          f"The old pair was -16000 against +0.0, and a sign flip on its own "
+          f"would be +16000 against +0.0")
+
+    # A corner escape: two axes wrong, and both are corrected in the same step.
+    # A per-pose penalty, or one taken from the box centre, would move the pose
+    # along a diagonal through the interior of the box instead.
+    corner = at(20.0, 20.0, 0.0)
+    e_corner, g_corner = core.score_conformation(IG, MAPS, corner)
+    check("a corner escape is corrected on both axes and on no other",
+          g_corner[0] > 0.0 and g_corner[1] > 0.0 and abs(g_corner[2]) < 1e-9,
+          f"({g_corner[0]:+.6f}, {g_corner[1]:+.6f}, {g_corner[2]:+.3e}) for a pose "
+          f"outside on x and y, inside on z")
+    check("the two axes are charged additively, not once for the pose",
+          abs((e_corner - core.score_conformation(IG, MAPS, at(20.0, 19.0))[0]) - 1000.0 * n_out) < 1e-6
+          and abs((e_corner - core.score_conformation(IG, MAPS, at(19.0, 20.0))[0]) - 1000.0 * n_out) < 1e-6,
+          f"walking each axis back by 1 A drops {e_corner - core.score_conformation(IG, MAPS, at(20.0, 19.0))[0]:.6f} "
+          f"and {e_corner - core.score_conformation(IG, MAPS, at(19.0, 20.0))[0]:.6f}, "
+          f"against {1000.0 * n_out:.0f} each")
+
+    # And the whole point of a gradient with a sign: a step along it descends.
+    # 0.01 conf units of translation, scaled so the step is a real one.
+    step = at(20.0)
+    step[0] = 20.0 - 0.01
+    e_step, _ = core.score_conformation(IG, MAPS, step)
+    check("a 0.01-unit step toward the box lowers the energy by the slope",
+          abs((e_far - e_step) - 0.01 * 1000.0 * n_out) < 1e-6,
+          f"{e_far:.4f} -> {e_step:.4f}, a drop of {e_far - e_step:.6f} against "
+          f"{0.01 * 1000.0 * n_out:.6f}. Before the fix the energy did not move at "
+          f"all over that step -- a flat charge cannot be descended, so Armijo "
+          f"accepted nothing and the pose came back exactly where it started")
+    # The published example poses are inside the box, so this change moves no
+    # reported energy: the penalty for a real docked pose is exactly nothing.
+    t_pose = core.score_conformation_terms(IG, MAPS, REC_TERMS, conf)
+    check("a docked pose is charged nothing, so the published energies stand",
+          t_pose["out_of_box_penalty"] == 0.0,
+          f"pose 0 scores {t_pose['out_of_box_penalty']} for the penalty and "
+          f"{t_pose['total']:.6f} overall")
+
+
+# ================================================== is the extension current
+def sec_extension_currency():
+    section("the extension this run imported is behaviourally current")
+    # Everything else in this file asks the engine whether it behaves. This asks
+    # the engine whether it is the engine the source describes.
+    #
+    # The hazard is real and was live on this machine while this was written:
+    # the extension installed under `F:\python310` was three generations behind
+    # the working tree, and this script measures the *installed* copy when
+    # `PYTHONPATH` does not point at the source tree. That run reported 410/415
+    # with four failures that were all one fact -- the binary predates the
+    # source -- and nothing in a tally would have said so. A gate that runs
+    # against a stale extension is green for the wrong reason, which is the one
+    # outcome a number cannot detect and a name can.
+    #
+    # **Not by size.** Two builds in one session differed in size while one of
+    # them was a deliberate mutation, so size proves nothing at all. **Not by
+    # timestamp.** The tree's extension carries a reproducible-build mtime of
+    # 1980-01-01, so mtime says nothing either. **Not by rebuilding.** A 46-second
+    # cargo build inside a check is a check nobody runs, and the parent's point
+    # is right: the honest form here is a cheap behavioural proxy, and the proxy
+    # is to ask the live object the question the source asks of it.
+    #
+    # The expectation is **derived**, never written down: every `self._raw.member`
+    # in `core.py` is a member some wrapper reads off a raw extension object, and
+    # if the extension does not have it the two are out of step. A new member
+    # joins the census when it is written, with no list to forget to update.
+    import re
+    # The expectation comes from the working tree's `core.py`, NOT from
+    # `__file__`. That asymmetry is the whole point: the hazard is the tree's
+    # source being *ahead* of the imported binary, so asking the imported
+    # `core.py` what it needs would be asking the stale side. (The first version
+    # of this read `__file__`, which is this script -- and its own comment
+    # containing the words `self._raw.member` matched the pattern, so it derived
+    # one phantom object, resolved none of the fixtures, checked **zero** members
+    # and was green. A check that checked nothing must be red; see the
+    # non-vacuity guard below.)
+    core_py = (SRC / "opendocking" / "core.py").read_text(encoding="utf-8")
+    wanted: dict[str, set[str]] = {}
+    for raw, member in re.findall(r"self\.(_[a-z_][a-z0-9_]*)\.([a-z_][a-z0-9_]*)", core_py):
+        wanted.setdefault(raw, set()).add(member)
+
+    fixtures = (BOX, REC, IG, MAPS, REC_TERMS, RESULT)
+    absent: list[str] = []
+    resolved = 0
+    for raw in sorted(wanted):
+        live = None
+        for f in fixtures:
+            candidate = getattr(f, raw, None)
+            if candidate is not None:
+                live = candidate
+                break
+        if live is None:
+            absent.append(f"{raw}: no fixture in this file holds an object with "
+                         f"that attribute, so its {len(wanted[raw])} expected "
+                         f"members went unchecked")
+            continue
+        resolved += len(wanted[raw])
+        for member in sorted(wanted[raw]):
+            if not hasattr(live, member):
+                absent.append(f"{raw}.{member}")
+    # The guard the first version needed: 46 member reads are derived from the
+    # current `core.py`, and a run that resolves far fewer has lost its inputs
+    # rather than found the engine short of anything.
+    check("the currency census resolved every object it derived",
+          resolved >= 40 and not absent,
+          f"{resolved} member reads derived from {len(wanted)} raw objects in the "
+          f"working tree's core.py, checked against the extension this run "
+          f"imported. Missing: {absent}. That is the signature of a binary older "
+          f"than the source: the source asks a question the extension cannot "
+          f"answer. Which copy was imported is printed under 'measured:' at the "
+          f"end of this run, and it is the fact to read first when the tally is "
+          f"lower than expected")
+
+    # The other direction, and it is aimed at the raw extension module rather
+    # than at `core`. The binding's own declared names must be in the extension
+    # it declares them in; whether `core` re-exports them under the same name is
+    # a separate question with its own answer (see the DockingResults check
+    # below). Deriving this by reading source text, it is blind to anything a
+    # macro or a build script would add, and it cannot see a symbol that was
+    # *removed* -- a stale binary keeps the old one, and only the member census
+    # above notices, and only if the Python side still asks for it.
+    import importlib
+    ext = importlib.import_module("opendocking._dockpy")
+    lib_rs = (ROOT / "dock-py" / "src" / "lib.rs").read_text(encoding="utf-8")
+    classes = sorted(set(re.findall(r'#\[pyclass\(name = "([A-Za-z_][A-Za-z0-9_]*)"', lib_rs)))
+    missing_classes = [c for c in classes if not hasattr(ext, c)]
+    check("every pyclass the binding declares is in the extension module",
+          not missing_classes and len(classes) >= 6,
+          f"derived {len(classes)} from dock-py/src/lib.rs: {classes}; missing "
+          f"from opendocking._dockpy: {missing_classes}. The pattern requires an "
+          f"explicit `name = \"...\"`, so a pyclass that takes its name from its "
+          f"Rust type is not counted; measured against the extension, not against "
+          f"core, because renaming on the Python side is a separate question")
+    # A third thing I expected to be a finding and measurement said was not. The
+    # extension's pyclass is named `DockingResults` and its Rust `__repr__`
+    # prints that name, while the exported Python class is `DockingResult`. I
+    # wrote this check as "a name in output a user cannot look up" and it went
+    # red, which looked like a fifth instance of the census's shape. It is not:
+    # the Python wrapper has its own `__repr__`, so a caller sees
+    # `DockingResult(...)` and can look that name up. The mismatched name is only
+    # reachable by reaching into a private attribute, which is not a user path.
+    # Kept, asserting the true claim, because "I expected a defect here" is worth
+    # a pin: the next reader should not have to re-derive it to find there is
+    # nothing there.
+    check("the class name a caller sees in a repr is one they can look up",
+          repr(RESULT).startswith("DockingResult(") and hasattr(core, "DockingResult")
+          and not hasattr(core, "DockingResults"),
+          f"repr(RESULT) begins {repr(RESULT)[:24]!r}; the exported class is "
+          f"DockingResult and the extension's own pyclass is DockingResults, which "
+          f"the wrapper renames and then overrides __repr__ for. So the mismatch is "
+          f"real in the source and invisible from Python, which is the correct "
+          f"outcome -- not a published name that does not resolve")
+
+
+# ============================================ the thread count that is reported
+def sec_thread_count():
+    section("available_backends: the pool's thread count, not the machine's")
+    # `available_backends()` used to interpolate `os.cpu_count()`, which is the
+    # machine's core count and not the size of the pool the search runs on. The
+    # two differ whenever `RAYON_NUM_THREADS` is set, and the difference is not
+    # cosmetic: a measured crambin/biotin run took 0.436 s on 16 threads and
+    # 8.680 s on one, with bit-identical energies. A user who set the variable
+    # to 1 -- the standard move when chasing a concurrency problem -- was told
+    # the engine would use 16 threads while the same call ran twenty times
+    # slower. This section pins the report to the pool.
+    import os
+    import subprocess
+
+    pool = core._core.rayon_threads()
+    check("available_backends reports the size of rayon's global pool",
+          core.available_backends()[-1] == f"cpu/{pool}-threads",
+          f"the pool has {pool} threads, so the report says "
+          f"{core.available_backends()[-1]!r}; it used to say "
+          f"'cpu/{{os.cpu_count()}}-threads'")
+
+    # The pool reads `RAYON_NUM_THREADS` when it is first built, so the only way
+    # to see the number move is a process that starts with the variable set. Each
+    # case below is therefore a subprocess, and it prints what a *caller* sees --
+    # `available_backends()`, not the pool size directly. Printing the pool size
+    # was the first version of this check and it could not see the bug at all: a
+    # regression that takes `available_backends` back to `os.cpu_count()` leaves
+    # the pool size exactly where it was, so the check went green on the very
+    # defect it was written for.
+    def reported(threads):
+        env = {**os.environ}
+        if threads is None:
+            env.pop("RAYON_NUM_THREADS", None)
+        else:
+            env["RAYON_NUM_THREADS"] = str(threads)
+        out = subprocess.run(
+            [sys.executable, "-c",
+             "import sys; sys.path.insert(0, %r);\n"
+             "from opendocking import core; print(core.available_backends()[-1])"
+             % str(SRC.parent)],
+            capture_output=True, text=True, env=env, encoding="utf-8", errors="replace",
+        )
+        return out.stdout.strip()
+
+    one = reported(1)
+    check("a process started with RAYON_NUM_THREADS=1 reports 1, not the core count",
+          one == "cpu/1-threads" and (os.cpu_count() or 1) != 1,
+          f"reported {one!r} on a machine with {os.cpu_count()} cores. This is the old "
+          f"bug exactly: the report said 'cpu/{os.cpu_count()}-threads' while the pool "
+          f"had one thread")
+    five = reported(5)
+    check("and a different value moves it again, so the number is not a constant",
+          five == "cpu/5-threads" and five != one,
+          f"1 gives {one!r}, 5 gives {five!r}. A report that could not move would "
+          f"satisfy the check above as happily as a real one")
+    unset = reported(None)
+    check("with the variable absent the report is the pool's own default",
+          unset == f"cpu/{pool}-threads",
+          f"unset gives {unset!r} against this process's cpu/{pool}-threads. Rayon "
+          f"falls back to the core count there, which is why the two agree only when "
+          f"nothing overrides it")
+
+
+# ====================================== min_contact_distance: the field, and the doc
+def sec_contact_distance():
+    section("min_contact_distance: the field the engine reads, and the doc that names it")
+    # `DockingConfig::min_contact_distance` is read by `dock()` itself, in the
+    # clash partition (`docking.rs:257`), and its doc says 0.0 disables the
+    # filter. Neither the binding nor `dock()` exposed it, so every Python
+    # `dock()` was silently fixed at 2.0 A and the instruction to set 0.0 was
+    # reachable only from Rust. That is not a dead knob -- it is a field the
+    # engine reads that the binding did not publish. Whether the omission was
+    # deliberate cannot be determined from this repository: there is no comment,
+    # changelog entry or document claiming it was exposed, which is an absence
+    # of evidence and not evidence of an absence.
+    import inspect
+    import re
+
+    params = inspect.signature(core.dock).parameters
+    check("dock() takes min_contact_distance",
+          "min_contact_distance" in params,
+          f"the published keywords are {list(params)[2:]}. Without it, every Python "
+          f"dock() is fixed at the engine's 2.0 A floor")
+    check("and it defaults to leaving the engine's default alone",
+          params["min_contact_distance"].default is None,
+          f"default is {params['min_contact_distance'].default!r}; None means the "
+          f"engine's own default, so 2.0 is not written down twice")
+
+    # Behaviour, because a keyword that is accepted and ignored is worse than one
+    # that is absent. A 10 A floor rejects every pose on this fixture, and the
+    # rejection is counted and reported rather than swallowed.
+    kw = dict(exhaustiveness=2, num_modes=3, seed=7)
+    default = core.dock(IG, MAPS, **kw)
+    strict = core.dock(IG, MAPS, min_contact_distance=10.0, **kw)
+    check("a 10 A floor really reaches the clash partition",
+          strict.rejected_pose_count > 0 and default.rejected_pose_count == 0,
+          f"the default rejects {default.rejected_pose_count} pose(s), a 10 A floor "
+          f"rejects {strict.rejected_pose_count}. A keyword that is accepted and "
+          f"dropped would report 0 for both")
+    off = core.dock(IG, MAPS, min_contact_distance=0.0, **kw)
+    check("0.0 is the documented way to disable the filter, and disables it",
+          off.rejected_pose_count == default.rejected_pose_count
+          and float(np.max(np.abs(off.energies - default.energies))) == 0.0,
+          f"0.0 gives energies {off.energies} against the default's "
+          f"{default.energies}; on a clean fixture the two are the same run, which "
+          f"is what 'disable' has to mean here")
+
+    # The document and the surface, in both directions. `docs/API.md` carries a
+    # Python `dock(...)` signature block, and that block is the place a reader
+    # looks; if the surface grows a keyword the block does not name, the
+    # documentation is stale again, and if the block names one the surface does
+    # not have, the documentation is promising something absent. Either way the
+    # two must agree, which is the whole point of checking them against each
+    # other rather than against a remembered list.
+    api = (ROOT / "docs" / "API.md").read_text(encoding="utf-8")
+    python_part = api.split("## Python: `opendocking`", 1)[1]
+    block = re.search(r"dock\(ligand, maps,.*?\) -> DockingResult", python_part, re.S)
+    documented = bool(block) and "min_contact_distance" in block.group(0)
+    check("docs/API.md's Python dock() signature names the keyword the surface has",
+          documented == ("min_contact_distance" in params),
+          f"the block says {block.group(0)[:90] if block else '(no block found)'!r}...; "
+          f"the signature has it: {'min_contact_distance' in params}, the document: "
+          f"{documented}. One without the other is the drift")
+    check("and the keyword is documented where a reader of dock() will find it",
+          "min_contact_distance" in (core.dock.__doc__ or ""),
+          f"help(core.dock) documents {len((core.dock.__doc__ or '').split())} words; "
+          f"it names the keyword: {'min_contact_distance' in (core.dock.__doc__ or '')}")
+
+
+# ============================== the two output modes of one command must agree
+def sec_output_modes():
+    section("the two output modes of `dock` report the same facts")
+    # The property that broke earlier in the project, in its general form: the
+    # JSON mode of a command and the prose mode of the *same* command described
+    # the same run differently -- the JSON returned three healthy poses while
+    # the prose mode exited 1. Nothing about that is specific to poses or to
+    # JSON: it is two output paths for one fact, and one of them was allowed to
+    # forget the fact.
+    #
+    # Which fields are affected is *derived*, never listed. Both sides are read
+    # out of the working tree:
+    #
+    #   * the prose side is every `if self.<name>:` guard in
+    #     `DockingResult.summary` -- each one is a count the table can warn
+    #     about, so each one is a fact a reader of the table might hold and a
+    #     reader of the JSON might not;
+    #   * the JSON side is every `"<key>":` in the record `cli.py` appends.
+    #
+    # Derived, because a hardcoded list is a list to forget: the disagreement
+    # this checks is *caused* by the two sides being maintained separately, and
+    # a list of the fields that currently agree re-asserts the agreement rather
+    # than the relation that produced it.
+    import re
+
+    core_py = (SRC / "opendocking" / "core.py").read_text(encoding="utf-8")
+    body = core_py.split("    def summary(self)", 1)[-1].split("\n    def ", 1)[0]
+    warned = sorted(set(re.findall(r"if self\.([a-z_][a-z0-9_]*):", body)))
+
+    cli_py = (SRC / "opendocking" / "cli.py").read_text(encoding="utf-8")
+    record = cli_py.split("records.append(", 1)[-1].split("\n        )", 1)[0]
+    keys = sorted(set(re.findall(r'"([a-z_][a-z0-9_]*)"\s*:', record)))
+
+    # The guard this section needs to not be vacuous: a regex that derived
+    # nothing would make every assertion below pass for the wrong reason --
+    # which is the failure mode the currency census in
+    # `sec_extension_currency` already documents for itself.
+    check("the derivation found the summary guards and the JSON keys",
+          len(warned) >= 3 and len(keys) >= 9,
+          f"{len(warned)} warning guards {warned}; {len(keys)} record keys {keys}. "
+          f"If either list is empty or tiny, the relation below is being asserted "
+          f"about nothing")
+    check("the two modes report the same facts: every warned count is a JSON key",
+          set(warned) <= set(keys),
+          f"the table can warn about {warned}; the record carries {keys}. "
+          f"In the JSON but not the table: {sorted(set(keys) - set(warned))}. "
+          f"In the table but not the JSON: {sorted(set(warned) - set(keys))} -- "
+          f"these are the fields a JSON consumer cannot see, which is the shape "
+          f"of the original defect")
+    for name in warned:
+        check(f"summary()'s {name} has a property of that name on DockingResult",
+              isinstance(getattr(core.DockingResult, name, None), property),
+              f"the table reads self.{name}, so the wrapper must expose it or the "
+              f"warning is printing a fact no caller can ask for")
+
+    # And the runtime half: the same ligand, box, spacing and seed through the
+    # command, so the JSON number is the *same run's* number and not merely a
+    # field of the right name. One docking run, at the fixture's own settings.
+    import json
+    import os
+    import subprocess
+    import sys
+
+    env = {**os.environ}
+    # Point the child at the same package this process imported -- but not by
+    # prepending `site-packages`, which is where that package usually lives.
+    #
+    # A `PYTHONPATH` entry is prepended to `sys.path`, ahead of the standard
+    # library, so naming the site-packages directory also promotes everything
+    # installed beside it. On this machine that is `pathlib` 1.0.1 -- the 2015
+    # backport -- which does `from collections import Sequence`, a name removed
+    # in Python 3.10. The child therefore died inside `import pathlib` at
+    # `opendocking/core.py:15`, before one line of docking code ran, and exited 1
+    # with an empty stdout. This section read that empty stdout as "no record
+    # emitted" and raised a second red, so one environment bug produced two
+    # failures and neither of them was about the engine.
+    #
+    # A child finds an *installed* package with no help at all, so the variable
+    # is set only when this process resolved from a tree: the case the original
+    # comment was written for, and the only one that needs it.
+    pkg = str(Path(_od.__file__).resolve().parent.parent)
+    if not _IN_SITE_PACKAGES:
+        env["PYTHONPATH"] = pkg + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+    cmd = [sys.executable, "-m", "opendocking", "dock",
+           "-r", str(EX / "rec_prep.pdbqt"),
+           "-l", str(EX / "ibuprofen_prep.pdbqt"),
+           "-e", "4", "-m", "3", "--seed", "42", "--spacing", "0.5",
+           "--center_x", "0", "--center_y", "0", "--center_z", "0",
+           "--size_x", "14", "--size_y", "14", "--size_z", "14",
+           "--json"]
+    proc = subprocess.run(cmd, capture_output=True, text=True, env=env,
+                          encoding="utf-8", errors="replace")
+    check("`dock --json` exits 0 on the fixture the library just docked",
+          proc.returncode == 0,
+          f"rc={proc.returncode}; stderr: {proc.stderr.strip()[:160]}")
+    records = json.loads(proc.stdout) if proc.stdout.strip() else []
+    check("and emits one record", len(records) == 1, f"got {len(records)}")
+    if not records:
+        return
+    rec = records[0]
+    check("the JSON's count is the same number the library property gave",
+          rec.get("poses_outside_box_count") == RESULT.poses_outside_box_count,
+          f"json {rec.get('poses_outside_box_count')!r} vs library "
+          f"{RESULT.poses_outside_box_count!r} for the same box, seed and spacing")
+    check("and so is the unrecognised-atom count",
+          rec.get("unknown_atom_types") == RESULT.unknown_atom_types,
+          f"json {rec.get('unknown_atom_types')!r} vs library "
+          f"{RESULT.unknown_atom_types!r}")
+    check("the record's pose count matches the library's",
+          rec.get("num_poses") == RESULT.num_poses,
+          f"json {rec.get('num_poses')!r} vs library {RESULT.num_poses!r}")
+    check("the two modes' shape is the same set of fields the derivation found",
+          set(keys) <= set(rec),
+          f"derived {len(keys)} keys, record has {sorted(rec)}")
+
+
 def main() -> int:
+    crashed: list[str] = []
     for fn in (sec_surface, sec_reachability, sec_gridbox, sec_gridbox_engine, sec_term_maps,
-               sec_receptor,
+               sec_receptor, sec_extension_currency,
                sec_estimate, sec_maps, sec_ligand, sec_exhaustiveness, sec_ladder_agreement,
-               sec_auto_box, sec_dock_guards, sec_dock_boundary, sec_result, sec_writers, sec_scoring):
+               sec_auto_box, sec_dock_guards, sec_dock_boundary, sec_result, sec_writers, sec_scoring,
+               sec_out_of_box, sec_thread_count, sec_contact_distance, sec_output_modes):
         try:
             fn()
         except BaseException:  # noqa: BLE001
             check(f"section {fn.__name__} completed", False, "crashed")
+            crashed.append(fn.__name__)
             traceback.print_exc()
-    print(f"\n{CHECKS - len(FAILURES)}/{CHECKS} passed")
+
+    # The pin, asserted on the way out rather than only in the declaration. The
+    # `+ 1` is this check, which has not been counted yet when the comparison is
+    # built.
+    #
+    # The `crashed` list is here so that this red is a *diagnosis* rather than a
+    # second bare number. A section that raises is already reported as a failed
+    # `section <name> completed` above, and a tally that then said only "506 ran,
+    # 510 are declared" would be a second failure about one cause -- the shape
+    # the comment above `sec_output_modes` already complained about. Naming the
+    # sections turns the two reds into one fact. A shortfall with nothing in
+    # `crashed` is the other shape, and the only one this file knows how to
+    # produce: `if not records: return` in `sec_output_modes`, four checks the
+    # run did not take, where the empty child output is already in the failures.
+    check("this file's own count is the count it declares",
+          CHECKS + 1 == EXPECTED_CHECKS,
+          f"{CHECKS} ran before this one and {EXPECTED_CHECKS} are declared"
+          + (f"; the section(s) that crashed and took their checks with them: "
+             f"{', '.join(crashed)}" if crashed else ""))
+
+    print(f"\n{CHECKS - len(FAILURES)}/{CHECKS} passed (expected {EXPECTED_CHECKS})")
     print(f"  measured: {_IMPORT_SOURCE}")
     for f in FAILURES:
         print(f"  FAILED: {f}")
@@ -1466,5 +2515,6 @@ if __name__ == "__main__":
     except Exception as exc:  # noqa: BLE001 - this is the point
         print(f"\n  [FAIL] the run crashed before finishing  - "
               f"{type(exc).__name__}: {exc}")
-        print(f"\n{CHECKS - len(FAILURES)}/{CHECKS} passed (run incomplete)")
+        print(f"\n{CHECKS - len(FAILURES)}/{CHECKS} passed (run incomplete; "
+              f"expected {EXPECTED_CHECKS})")
         sys.exit(1)

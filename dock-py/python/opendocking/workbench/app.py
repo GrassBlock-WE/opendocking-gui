@@ -196,6 +196,185 @@ FOG_COLOR = (0.095, 0.105, 0.130)
 #: frame time for a difference nobody can see on a shaded sphere.
 MSAA_SAMPLES = 4
 
+#: Narrowest the 3-D view is allowed to get, in logical px, and what that number
+#: is and is not.
+#:
+#: **It was 640, and 640 was protecting nothing.** It came in as a bare literal
+#: with no comment, so it was measured rather than argued with. Every consumer of
+#: the view's pixel width was enumerated and each one is continuous in it:
+#:
+#: * `Camera.projection` sets `m[1, 1] = f` from the **vertical** fov and
+#:   `m[0, 0] = f / aspect`, with `aspect` clamped at 1e-3. A narrower view
+#:   narrows the *horizontal* field and changes no threshold; the scene is
+#:   cropped across, never scaled wrong or dropped.
+#: * `framing_selection.fit_view`, `fit_drawn`, `drawn_fill` and `focus_target`
+#:   all take `aspect` and solve the distance that fits the subject **at that
+#:   aspect**, so a narrow frame moves the camera back rather than cropping the
+#:   subject out of the picture.
+#: * `projected_width_px` -- the pair marker's width in pixels, which is what a
+#:   gate measures it against -- is a function of the frame's **height** alone.
+#: * There is no atom picking. `mousePressEvent` starts an orbit,
+#:   `wheelEvent` zooms, and no hit test, no pick tolerance and no
+#:   pixel-threshold anywhere in the tree reads the view's width.
+#:
+#: So the one thing 640 did was impose `aspect >= 4/3` on the picture, by way of
+#: `640/480`. It was never the framing that needed it, and it was not even
+#: enough to make the pan exact (`_pan` scales by the *vertical* fov and is
+#: therefore short by a factor of `aspect` on the horizontal drag -- a separate,
+#: pre-existing inaccuracy that no minimum here ever fixed, since 640/480 is
+#: 1.33 and not 1.0).
+#:
+#: **What it cost, measured.** The panel is a left `QDockWidget` and the view is
+#: the central widget, so the view's minimum *is* the window's minimum, and the
+#: dock is left with the rest. At dpr 2.5 on this machine a 1280x820 request is
+#: clamped to 770x533 by a 768x432 screen; with the floor at 640 the dock got
+#: 126 px, its scroll viewport 110, and the panel's own minimum is 495. The dock
+#: width at which the panel is whole was measured by dragging, not assumed:
+#: **512 px** (495 plus 16 of title, frame and scroll bar), identical at both
+#: ratios. 126 could not be dragged to 512 by any gesture, so the panel showed
+#: as a 110 px strip of row labels and the only remedy the product had was the
+#: notice.
+#:
+#: **What this number is instead.** The width left for the view when the panel
+#: has what it needs at the tightest geometry this screen allows: 768 - 512 =
+#: 256, less the splitter handle, taken down to 240 so there is 14 px of slack
+#: rather than a handle width pinned into a literal. It is deliberately *below*
+#: what the panel needs, because the panel is the thing being operated and the
+#: view is the thing being looked at, and a floor on the view is what stopped
+#: the user from choosing. Below 240 the frame is still drawn correctly -- the
+#: renderer has no opinion -- but it is a slot rather than a view, and that is
+#: where this stops being a rendering argument and starts being taste.
+#:
+#: 240 x 480 was looked at before it was written down, at 1:2 portrait, beside a
+#: whole panel: the molecule is legible, the spheres and the search-box
+#: wireframe both read, and it is a view. See `target/viewmin_probe_20261003`.
+VIEWPORT_MIN_W = 240
+
+#: The view's minimum height, and it is a *different* argument from the width.
+#: This is the panel's height to spend, and it is set by what the tightest
+#: screen in use can actually give. Measured, not reasoned: at dpr 3.125 the
+#: available box is 326 px, the window's own frame is 12 and its chrome is 53
+#: (a 33 px menu bar and a 20 px status bar), so the old 480 put the window at
+#: 545 outer against 326 available -- 219 px off the screen, with the central
+#: widget's contribution to that minimum at zero. 285 still leaves it 24 px
+#: over, which is where the 24 px in the notes about this constant came from.
+#:
+#: **What the screen will really give, asked rather than subtracted.** Telling
+#: Qt to shrink the window onto the available box and reading back what it got:
+#: at a floor of 272 and below the client reaches the full 326, and at 285 it
+#: cannot get below 338. So 273 is the largest floor that fits here, and this
+#: is set 33 px below it -- one menu-bar line, the largest single piece of that
+#: chrome a font change could grow -- instead of sitting on the boundary with no
+#: margin at all. At dpr 2.5 the same floor leaves 76 px, so 3.125 binds.
+#:
+#: **What the frames say.** Six of them, at 480, 320, 285, 261, 240 and 200,
+#: all six byte-distinct: the framing solves for the aspect it is handed, so
+#: nothing is ever *cut* by a lower floor and the only thing one costs is
+#: resolution. At 240 the molecule, the spheres, the search-box wireframe and
+#: the dashed contact lines all still read. At 200 the contact dashes start to
+#: lose their dash character, and that is the frame evidence for stopping at
+#: 240 rather than going as low as the fit argument alone would allow.
+#:
+#: **What it costs.** The subject is height-normalised, so at 240 it is drawn
+#: at half the linear resolution of 480: every sphere, bond and contact dash is
+#: half the size, and the dashes are the thinnest thing in the picture and the
+#: first to suffer. The panel gets those 240 px instead, which is the right
+#: trade -- it scrolls, and it carries a notice for the case where it does not
+#: -- but 240 px of extra strip is a tenth more of a 2279 px panel, not the
+#: whole of it.
+#:
+#: See `target/viewheight_w5h2q` for the frames and the scripts that measured
+#: all of the above.
+VIEWPORT_MIN_H = 240
+
+#: The share of the framed picture's width the 3-D view must still be able to
+#: show, in percent, before the view says out loud that it cannot.
+#:
+#: **What the number measures.** `Viewport.framed_width_percent` asks how much
+#: of the width of the extent the camera is *currently framed on* fits inside
+#: the frame, at the frame's present aspect ratio. The subject is whatever the
+#: last framing solved for -- see `_framed_extent` on the four framing methods
+#: -- so the share reads 100% immediately after any framing the product
+#: performed, and falls only when the frame's shape changes under a camera
+#: that is already placed. That is the state this notice is for:
+#: `framing_selection.fit_view`, `fit_drawn` and `focus_target` all solve the
+#: camera distance *for the aspect they are handed*, so a splitter drag or a
+#: window resize changes that aspect without re-solving it, and a frame that
+#: was whole becomes a slice of itself with nothing on screen saying so.
+#:
+#: **Why 50 and not 100.** Both ends of the trade are real. At 100 the notice
+#: fires on a one-pixel crop and the reader learns to ignore it; below 1 it
+#: never fires at all. 50 is the share at which as much of the framed width is
+#: outside the frame as inside it -- the one value of this quantity that is a
+#: property of the geometry rather than a preference, because any other figure
+#: is a line drawn at a place nobody could point to on the picture. It is the
+#: same *kind* of boundary as the panel notice's `deficit > 0` (see
+#: `_update_panel_notice`), which is the width at which *nothing at all* is off
+#: the edge; the two differ because "a sliver is off the edge" and "half the
+#: picture is off the edge" are different questions, and only the second is
+#: one a reader can act on without a ruler.
+#:
+#: **What it costs, measured.** The control panel swept from 79 px to the 1256
+#: px that leaves the view at its own floor, in a 1500x844 window at dpr 1.25,
+#: on 1CRN with the crambin pose in the selection framing the window lands in:
+#: the view runs 1417 px (100% of the framed width on screen) down through 633
+#: px (94%), 535 (80%), 437 (65%) and 339 (50%) to 240 px at the floor (35%).
+#: Walking the splitter one pixel at a time puts the boundary at a **334 px
+#: view with the notice down and 333 px with it up** -- a one-pixel boundary,
+#: the same width as the panel notice's own, and reachable by one gesture at
+#: every geometry in the sweep. Both sides of it are therefore states a reader
+#: can be in, which is the only thing that makes it a threshold rather than a
+#: statement. The instrument is
+#: `target/viewnotice_w3n7q/scratch/probe_sweep.py`; the frames it took are
+#: beside it in `target/viewnotice_w3n7q/frames/`.
+VIEW_MIN_FRAMED_WIDTH_PCT = 50
+
+
+def _drawn_half_width_fill(points, radii, right, up, forward, distance, *,
+                           center, fov: float = 45.0,
+                           aspect: float = 1.0) -> float:
+    """Share of the frame's half-width the drawn extent reaches, across.
+
+    **This is `framing_selection.drawn_fill`'s horizontal term, written out
+    here, and this docstring is the definition a reader checks it against.**
+    For each drawn sphere at `p` with drawn radius `r`, with
+    `(x, y, z) = (p - c) . (right, up, forward)` measured from the point the
+    camera is centred on, `t = tan(fov / 2)` and depth
+    `d = max(distance + z - r, 1e-6)`:
+
+        H = max over the spheres of  (|x| + r) / (d * t * aspect)
+
+    `H` is a share of the frame's *half*-width, so the frame's own edge is
+    `H == 1`, and the share of the framed width that fits inside the frame is
+    `min(1, 1 / H)`. The drawn radius is subtracted from the depth and added to
+    the lateral term for one reason: the part of a drawn object that reaches
+    furthest toward the eye is the same silhouette `r` nearer than its centre.
+    Both are `drawn_fill`'s terms in its order, and its vertical term is this
+    expression without the `aspect`.
+
+    **Why the term is taken apart instead of read off `drawn_fill`.**
+    `drawn_fill` answers "does the drawn scene overflow the frame" by taking
+    the worse of the two screen axes, which is the right question for a fit and
+    the wrong one for a notice: a picture can overflow top to bottom with its
+    width entirely on screen, and a notice that said "22% of the width is
+    visible" about such a frame would be reporting the other axis. A second
+    projection would be a second thing to keep in step with the first, so this
+    is the module's own expression instead, and
+    `scripts/workbench_interaction_check.py` section 1c pins the two together
+    on a scene whose width is the wider of the two.
+    """
+    pts = np.asarray(points, np.float64).reshape(-1, 3)
+    r = np.asarray(radii, np.float64).reshape(-1)
+    if not len(pts) or len(r) != len(pts):
+        return 0.0
+    rel = pts - np.asarray(center, np.float64).reshape(3)
+    z = rel @ np.asarray(forward, np.float64)
+    x = rel @ np.asarray(right, np.float64)
+    depth = np.maximum(float(distance) + z - r, 1e-6)
+    t = math.tan(math.radians(float(fov)) * 0.5)
+    return float(((np.abs(x) + r) / (depth * t * max(float(aspect), 1e-3))).max())
+
+
 def _mat4(m: np.ndarray) -> np.ndarray:
     """Flatten a 4x4 matrix the way a GLSL ``mat4`` uniform wants it.
 
@@ -659,8 +838,18 @@ def draw_spheres(ctx, prog, mesh: SphereMesh, mol, mvp, colors=None,
     ibo.release()
 
 
-def draw_lines(ctx, prog, positions, colors, mvp, opacity) -> None:
-    """Draw line segments from explicit vertex positions and colours."""
+def draw_lines(ctx, prog, positions, colors, mvp, opacity, primitive=None) -> None:
+    """Draw line segments from explicit vertex positions and colours.
+
+    `primitive` is `moderngl.LINES` unless a caller needs the same flat,
+    weakly-fogged, unlit colour at a different topology. The pair marker is the
+    one caller that does: it needs a triangle, because the GL line width this
+    driver clamps to 1.0 cannot make a 1 px line any wider, and it needs that
+    width to come from the scene rather than from a device cap. The *program* is
+    the line program on purpose -- a marker drawn with the sphere program would
+    be lit and fogged like an atom, and its colour would then change as the
+    camera orbits, which is the one property `COLOR_PAIR` is documented to have.
+    """
     import moderngl
 
     pos = np.ascontiguousarray(positions, dtype=np.float32)
@@ -673,7 +862,7 @@ def draw_lines(ctx, prog, positions, colors, mvp, opacity) -> None:
     )
     prog["mvp"] = _mat4(mvp)
     prog["opacity"] = float(opacity)
-    vao.render(moderngl.LINES)
+    vao.render(moderngl.LINES if primitive is None else primitive)
     vao.release()
     pos_buf.release()
     col_buf.release()
@@ -734,6 +923,345 @@ ELEMENT_VDW_CPK: dict[str, float] = {
 
 #: The one number the space-filling mode is anchored on, in Angstrom.
 CPK_CARBON_RADIUS = 0.77
+
+#: Bond cylinder radius as a multiple of `MoleculeView.radius`, for the modes
+#: that draw bonds. The other two factors are 0.16 for `stick` and 0.13 for the
+#: side chains under `cartoon`, both of which draw a *skeleton* and so draw it
+#: thinner; 0.20 is the ball-and-stick factor and is the one that answers "how
+#: thick is a bond in this scene".
+#:
+#: It is named rather than written as a literal at each of its uses because
+#: `_draw_pair` measures itself against it. A marker that is going to be as thick
+#: as the bonds beside it has to be reading the same number, and a second literal
+#: is a second number to drift.
+BOND_RADIUS_SCALE = 0.20
+
+
+def projected_width_px(radius: float, depth: float, fov: float, height: int) -> float:
+    """Pixels a world-space length of `2 * radius` covers at `depth`.
+
+    The projection in one line, and it is the same one `Camera.projection`
+    performs: `m[1, 1] = 1 / tan(fov / 2)` maps a view-space length to NDC, and
+    NDC spans the frame's height. So a rod of half-thickness `radius`, seen
+    face-on at distance `depth`, is `radius * f / depth * height / 2` pixels
+    from its axis to its edge, and twice that across.
+
+    Derived rather than tuned, which is the point: it has no constant of its
+    own, so it cannot be "made big enough for this fixture" without the fixture
+    being what changed.
+    """
+    if depth <= 1e-6:
+        return 0.0
+    f = 1.0 / math.tan(math.radians(fov) * 0.5)
+    return float(2.0 * radius * f * float(height) / (2.0 * depth))
+
+
+#: Smallest projected area, in square pixels, at which the pair marker is still
+#: worth submitting.
+#:
+#: **The previous version of this comment was wrong, and the correction is the
+#: useful part.** It claimed an intersection of (0.470, 0.515) px^2 across four
+#: measurements, with 0.5 inside it. Re-measured -- same instrument, four
+#: ligands instead of one, three declared widths instead of two, and the floors
+#: lifted so the draw would submit the rods the floors are derived from -- the
+#: first-lit edge is:
+#:
+#: ==========  ==============  ==================  ====================
+#: dpr         declared width  first lit           as a length
+#: ==========  ==============  ==================  ====================
+#: 1.25        1.160 px        0.28919 px^2        0.250 px
+#: 1.25        6.451 px        1.53399 px^2        0.238 px
+#: 1.25        20.295 px       4.42648 px^2        0.218 px
+#: 2.5         1.407 px        0.35089 px^2        0.249 px
+#: 2.5         7.827 px        1.86175 px^2        0.238 px
+#: 2.5         24.625 px       5.39280 px^2        0.219 px
+#: ==========  ==============  ==================  ====================
+#:
+#: **The edge is a length, not an area, and that is the whole finding.** The
+#: three areas at one ratio differ by 15x while the three widths differ by 17x;
+#: divided by the width they are the same number to within 4%, and the same
+#: three lengths come out at the other ratio. So the area a rod needs before it
+#: covers a pixel is proportional to how wide it is, at about 0.22-0.25 px of
+#: screen length, and **a single width-independent area constant cannot be the
+#: shape of that edge.** The old intersection was empty for that reason, not
+#: because 0.5 sat outside it: (0.439, 0.553) at a 6.45 px width and (0.470,
+#: 0.593) at a 20.3 px one describe the same 0.23 px length twice.
+#:
+#: **So what is 0.5 px^2, now that the bracket is gone.** It is the conservative
+#: end of a width-independent choice. A floor of `A` px^2 refuses everything
+#: shorter than `A / width` px, so it is safe exactly while `A / width` is at or
+#: above the ~0.25 px the rasteriser needs -- and with A = 0.5 that holds for
+#: every width measured, down to 1.16 px, with a factor of 1.7 to spare at the
+#: thinnest. The cost is that at a 6.45 px width it refuses marks down to 0.078
+#: px, which this rasteriser would have lit from 0.238 px: an over-refusal of
+#: about 3x there, and 8.9x at a 20.3 px width.
+#:
+#: **And the range where the area form would be wrong is covered by the other
+#: floor anyway.** A marker this floor admits at a wide width has a length far
+#: below `PAIR_MARKER_MIN_LENGTH_PX`, so the length floor refuses it first; and
+#: where the area floor is the *only* thing that can refuse, the marker is
+#: sub-pixel in width (`length >= 1 px` and `area < 0.5` together mean a declared
+#: width below 0.5 px) and would be a hairline. So the number is defensible, but
+#: as a **thinness** floor, not as "half a pixel, the resolution of the
+#: framebuffer" -- the sentence this comment used to open with, and which the
+#: third column above is the refutation of.
+#:
+#: Reproduce with `target/wb2/wb2y_derive.py` (one fixture per process, the
+#: floors lifted, three distances), and the numbers above are re-measured rather
+#: than trusted by section 14b of `scripts/workbench_interaction_check.py`.
+PAIR_MARKER_MIN_AREA_PX2 = 0.5
+
+#: Smallest projected screen length, in pixels, along the marker's **own** axis,
+#: at which the marker is still worth submitting.
+#:
+#: **This is the guard that was missing, and the area floor cannot be it.** A
+#: rod seen nearly end-on has plenty of area and no length. Measured on
+#: 1crn/biotin at 25.17 A, the marker's own lit pixel count holds at **8**
+#: while its projected area grows from 1.75 to 3.50 px^2 and its screen length
+#: from 0.270 to 0.540 px: double the area, and the frame has the same eight
+#: pixels in it, arranged as a single column across the rod and **nothing at
+#: all** along it.
+#:
+#: **1.0 px is a chosen round number, and the derivation this comment used to
+#: give for it does not survive being measured.** It claimed that "a rectangle
+#: at least one pixel long spans at least two pixel columns whatever its width,
+#: its screen angle and where it happens to land, and all 96 measured cameras
+#: agree". Swept properly -- four declared widths, thirteen screen lengths on a
+#: 0.05 px ladder, eight sub-pixel phases along the mark's own axis at each,
+#: at both ratios -- that guarantee is **false at 1.0 px**:
+#:
+#: ==========  ==============  ==============================  ==========
+#: dpr         declared width  two columns at every phase from  n rungs
+#: ==========  ==============  ==============================  ==========
+#: 1.25        1.16 px         1.25 px  (achieved 1.230)        5 of 13
+#: 1.25        2.71 px         1.25 px  (achieved 1.205)        5 of 13
+#: 1.25        6.45 px         1.20 px  (achieved 1.099)        4 of 13
+#: 1.25        14.76 px        1.20 px  (achieved 0.975)        4 of 13
+#: 2.5         1.41 px         1.25 px  (achieved 1.230)        5 of 13
+#: 2.5         3.28 px         1.25 px  (achieved 1.205)        5 of 13
+#: 2.5         7.83 px         1.25 px  (achieved 1.149)        5 of 13
+#: 2.5         17.91 px        1.35 px  (achieved 1.125)        7 of 13
+#: ==========  ==============  ==============================  ==========
+#:
+#: **The grid is 0.05 px and the number is 1.23, not 1.20.** The earlier table
+#: was measured on a ladder stepping by 0.1 px, so it could only say the
+#: width-independent value was 1.20 px "localised to +/-0.1 px, the grid step",
+#: and it reported 1.20 px at the two thinnest widths. On the 0.05 px ladder
+#: those two rows move: at 1.16 px (dpr 1.25) and 1.41 px (dpr 2.5) the rung at
+#: 1.20 px still drops to a single pixel column at some phase, and 1.25 is the
+#: first rung that holds at all eight. The smallest *achieved* length at which
+#: the property holds at the worst width is therefore **1.230 px, and it is
+#: 1.230 px at both ratios** -- the same number to three decimals at 1.25 and at
+#: 2.5, which is a stronger result than the 0.1 grid could express.
+#:
+#: **Why the old measurement said otherwise, which is the part worth keeping.**
+#: Its instrument counted 1-px bins along the mark's axis *from the mark's own
+#: start point*, not from the framebuffer. For any mark at or below one pixel
+#: long that count is 1 by construction, whatever the pixel grid does -- so the
+#: instrument was partly restating the length rather than counting columns, and
+#: "96 cameras agree" could be recorded without the question having been asked.
+#: Counting bins in framebuffer coordinates instead (`floor(xs * ax + ys * ay)`
+#: over the lit pixels) is what makes the mark's position in the pixel grid
+#: matter, and it is the version the table above is measured with.
+#:
+#: **What this floor is, then: a geometric floor, and the sweep says it is not
+#: the two-column one.** It refuses a projected rectangle whose *length* is
+#: below one framebuffer pixel -- the smallest extent the framebuffer can
+#: resolve at all. That argument stands on its own and the measurement does not
+#: touch it. What the measurement does say is that 1.0 px is **0.23 px short of
+#: the two-column property**: at 1.00 px, at all four widths and at both ratios,
+#: the lit set is a single pixel column at some phase. A 1.0 px mark is a dash
+#: at 7-18 px wide and a scratch at 1-3 px wide, and the floor cannot tell those
+#: apart because it is not allowed to see the width.
+#:
+#: **The units are framebuffer pixels, so the constant is not DPR-dependent.**
+#: `pair_screen_segment` reports every key "in framebuffer pixels", `length`
+#: included, and that is the value this floor is compared against. If it were
+#: widget pixels the same constant would behave as a 1.0 px floor at dpr 1.25
+#: and a 2.5 px one at 2.5, which is the failure mode to watch for.
+#:
+#: **The decision, and what it costs.** The constant stays at **1.0 px**, and
+#: the reason is that the two-column property is a *different* property from the
+#: one the floor is for. Moving it to 1.23 px would buy the guarantee, at these
+#: measured prices:
+#:
+#:   * **The cost in refusals**, on this instrument: the interval
+#:     [1.00, 1.23) px of screen length. At dpr 1.25 that is rungs 1.00-1.20 at
+#:     the two thinnest widths and 1.00-1.15 at the two widest -- 22 of the 32
+#:     rung-by-width cells, every one of them lit at all eight phases and
+#:     reaching two columns at *some* of them. Those are visible dashes.
+#:   * **The cost in a constant on a measurement.** 1.230 px is the smallest
+#:     *achieved* passing length, so a floor set to 1.23 would sit on it with
+#:     0.000 px of margin; a floor that wants margin has to take the next rung,
+#:     1.25 px, and then it refuses 0.25 px rather than 0.23.
+#:
+#: **What would falsify the geometric argument**, since keeping a constant on an
+#: argument rather than on a measurement needs one:
+#:
+#:   * a sub-1.0 px mark that reached two pixel columns at *every* phase at some
+#:     width -- that would make the floor under-refuse and the geometric
+#:     framing the wrong one. Measured: no. Every rung from 0.30 to 0.95 px has
+#:     phases at a single column, at all four widths and at both ratios.
+#:   * `seg["length"]` turning out to be widget rather than framebuffer pixels,
+#:     which would make the effective floor scale with the ratio.
+#:   * a rasteriser whose pixel grid moved -- a different MSAA sample pattern or
+#:     driver -- which would move 1.23 px. Section 14b of
+#:     `scripts/workbench_interaction_check.py` re-measures the property on every
+#:     run rather than trusting this table, which is what would catch it.
+#:
+#: **What the floor is not over-refusing**, and this is the correction to the
+#: previous round's figure: on the corrected instrument **no** length below
+#: 1.0 px reaches two columns at every phase, at any width, at either ratio. The
+#: earlier claim of "0.33 to 1.0 px, an over-refusal of up to 3x" came from the
+#: start-anchored count and overstated the cost by about 2x; the corrected
+#: instrument does not support an over-refusal on the two-column criterion at
+#: all, only the narrower statement that a sub-pixel mark is a single-column
+#: scratch at some phases, which is what the floor is for.
+#:
+#: Reproduce with `target/wb2/wb2z_sweep.py` (0.05 px ladder, 1.00-1.60 px,
+#: 8 sub-pixel phases, four declared widths, both ratios, floors lifted) and
+#: read it with `target/wb2/wb2z_read.py`; the property itself is re-measured
+#: rather than trusted by section 14b of
+#: `scripts/workbench_interaction_check.py`. **One caveat carried forward**: the
+#: first sweep of all aimed by bisecting the off-axis angle over [0, 45 deg],
+#: which cannot resolve a short length on a wide marker -- at an 11 A distance
+#: every requested length from 0.30 to 2.00 px measured 0.88-1.11 px, and the two
+#: wide-width rows it produced were an artefact of the instrument. They were
+#: re-measured after the aiming was replaced by a bracketed secant, which is the
+#: version tabulated here.
+PAIR_MARKER_MIN_LENGTH_PX = 1.0
+
+#: Share of the frame the marker's declared rectangle may cover before the
+#: status bar says so. A reporting threshold, **not a guard**: the marker is
+#: still drawn, because the geometry is honest and the camera is the reader's
+#: own choice, and refusing a picture the projection describes correctly would
+#: make the product disagree with itself. It is here because a reader cannot
+#: tell an honest wall from a bug.
+#:
+#: **Which quantity this is, because two of them were both being called it.**
+#: It is the **declared** share: `_projected_area_px2(seg)` over the framebuffer,
+#: the projected area of the marker's own six-vertex rectangle. It is a
+#: *projection* fact -- a property of the pair and the camera distance, and the
+#: same whether or not the rod is rasterised at all. The other candidate is the
+#: **drawn** share, the pixels that differ between two grabs at one camera over
+#: the framebuffer, which is a *rasterisation* fact and is not stable: on a
+#: 1126x989 frame at 2 A, 1crn/biotin row 0 declares 14.14% and draws 8.41% of
+#: the frame, because a rod 1940 px long in a 989 px frame only lands
+#: 1153 px of itself inside it and how much depends on its screen angle. Both
+#: were once quoted as "the share"; they differ by up to 2x, and only the
+#: declared one is a property of the geometry.
+#:
+#: **1% is chosen, and it is owned as a product decision rather than dressed as
+#: a measurement.** Unlike the two floors above, nothing here measures an edge:
+#: "the reader is confused" is a fact about a reader, and this project has not
+#: measured a reader. What the measurement does give is the **scope** of the
+#: choice, on three fixtures at dpr 1.25, as the declared share:
+#:
+#: ==========  ==============  ==============  ==============
+#: camera      1crn/biotin     1crn/ibuprofen  rec/benzene
+#: ==========  ==============  ==============  ==============
+#: 2 A         14.142%         14.744%         15.241%
+#: 3 A          6.285%          6.553%          6.774%
+#: 4 A          3.536%          3.686%          3.810%
+#: 6 A          1.571%          1.638%          1.693%
+#: 8 A          0.884%          0.922%          0.953%
+#: 22.78 A      0.109%          0.114%          0.117%
+#: 25.17 A      0.089%          0.093%          0.096%
+#: ==========  ==============  ==============  ==============
+#:
+#: So 1% fires between 6 and 8 A on all three, and the framing `F` gives is
+#: 22.78 A, where the share is about 0.11%: **in ordinary use the bar is
+#: silent, and it speaks only to a reader who has dollied in to roughly a
+#: quarter of the framing distance.** That is the trade, stated: a threshold
+#: low enough to be useless in normal use, or one that interrupts a reader who
+#: has deliberately zoomed in. 1% takes the second cost, on the grounds that the
+#: case it exists for -- 2 A, a wall -- is unmistakable and would otherwise be
+#: silent.
+#:
+#: **What would change it.** The one derivable edge available: the distance at
+#: which the mark's own length equals the framebuffer's height, past which it
+#: is a wall rather than a mark. That is computed from the camera, not tuned,
+#: and it was measured rather than asserted -- at 3.923 A the mark is 989.00 px
+#: long against a 989 px frame, ratio 1.0000, for a declared share of **3.675%**
+#: (4.090 A and 3.525% for ibuprofen, 4.228 A for rec/benzene). So a fully
+#: derived threshold is available and is **3.5-3.7%, not 1%**: it would fire
+#: between 3 and 4 A rather than between 6 and 8, and it would be silent in
+#: every case where the mark is merely prominent. It is not used because a
+#: length comparison misses the other shape of the failure -- a mark short
+#: along its axis but very wide, which can own a tenth of the frame at a
+#: length well under the frame's height -- and because the two thresholds
+#: disagree about how alarming the 4-6 A band is, which is a judgement about
+#: readers and not a measurement. If this project ever measures readers, that
+#: is the number to revisit, and the table above is the measurement to revisit
+#: it against.
+#:
+#: Reproduce with `target/wb2/wb2y_share.py`; the main window is 1400x850
+#: because that is the size that gives the 1126x989 frame these shares are of.
+PAIR_MARKER_FRAME_WARN = 0.01
+
+
+def _projected_area_px2(seg) -> float:
+    """Projected area of the pair marker's rectangle, in framebuffer px^2.
+
+    **Area, not length, and the difference is the whole guard.** `seg` is
+    `Viewport.pair_screen_segment()`: `length` is the projected distance
+    between the two atoms and `width_near`/`width_far` are the declared width at
+    each end. The six-vertex rectangle projects to a trapezoid, so its area is
+    `length * (width_near + width_far) / 2` -- which is also why `fill` against
+    `length * width` reads slightly over 1 for a correct rod rather than under
+    it, the taper's excess at the near end nearly cancelling its deficit at the
+    far one.
+
+    One function, called by `_pair_quad` to decide whether to draw and by
+    `_on_pair_selected` to decide what to *say*. Two implementations of one
+    predicate is how a status line comes to promise a marker the draw then
+    declines to submit, which is the defect this guard exists to close.
+    """
+    length = float(seg["length"])
+    if length <= 0.0:
+        return 0.0
+    near = float(seg.get("width_near", seg["width"]))
+    far = float(seg.get("width_far", seg["width"]))
+    return abs(length * 0.5 * (near + far))
+
+
+def marker_area_ok(seg) -> bool:
+    """Is the pair marker big enough in area to be worth drawing?
+
+    The area half of the guard, kept as its own name because the two halves
+    fail for different reasons and the status line names which one it was.
+    """
+    return seg is not None and _projected_area_px2(seg) >= PAIR_MARKER_MIN_AREA_PX2
+
+
+def marker_length_ok(seg) -> bool:
+    """Is the pair marker long enough along its own axis to be worth drawing?
+
+    The length half, and the one the area floor cannot stand in for. A rod
+    seen nearly end-on has all the area in the world and none of it along its
+    own axis; see `PAIR_MARKER_MIN_LENGTH_PX` for why the floor sits at one
+    pixel and for what that value does *not* guarantee -- the two-column
+    property it was once derived from is measured to need **1.23 px** at both
+    device pixel ratios, so this is a geometric floor 0.23 px below that one.
+    """
+    return seg is not None and float(seg["length"]) >= PAIR_MARKER_MIN_LENGTH_PX
+
+
+def marker_drawable(seg) -> bool:
+    """Is the pair marker worth drawing at this camera? **The one predicate.**
+
+    Both floors, one question, and the only implementation of it. `_pair_quad`
+    calls this to decide whether to submit the rod and `_on_pair_selected`
+    calls this to decide what to *say* about it, which is the whole point: two
+    implementations of one rule is how a status line comes to promise a marker
+    the draw then declines to submit.
+
+    `False` means the selection is real and named in the status bar but
+    contributes nothing to the frame, and the bar has to say so. It used to
+    carry an `marker_area_ok` that answered half the question, and a
+    near-end-on marker of 8 scattered pixels passed it.
+    """
+    return marker_area_ok(seg) and marker_length_ok(seg)
 
 #: The same table scaled so that carbon is exactly ``CPK_CARBON_RADIUS``. So
 #: ``ELEMENT_CPK_RADIUS[e] / CPK_CARBON_RADIUS`` is the published CPK ratio for
@@ -853,7 +1381,14 @@ class Viewport(QOpenGLWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setMinimumSize(640, 480)
+        # **A floor that yields, not one that decides.** See `VIEWPORT_MIN_W`
+        # for the measurement that established the old 640 was protecting
+        # nothing, and for the 512 px the panel needs at the tight geometry this
+        # number is sized to leave room for. The short version: this is the
+        # central widget, so its minimum is the window's minimum, and a floor
+        # here is a floor on how much of the window the user may give to the
+        # controls they are operating.
+        self.setMinimumSize(VIEWPORT_MIN_W, VIEWPORT_MIN_H)
         self.setFocusPolicy(QtCore.Qt.FocusPolicy.StrongFocus)
         # Multisampling is a property of the surface, so it has to be asked for
         # before the context exists. Qt answers with the count it actually
@@ -895,6 +1430,21 @@ class Viewport(QOpenGLWidget):
         #: True once `contacts` has been computed for the current pair, so the
         #: panel can distinguish "none found" from "never looked".
         self.contacts_valid = False
+        #: The interaction pair the pair table has selected, as
+        #: ``(pose_atom_index, receptor_atom_index)``, or ``None`` for "no row
+        #: selected".
+        #:
+        #: **Atom indices, not a position in `contacts`**, because the draw is
+        #: solved against the molecules currently in the scene the same way
+        #: `_draw_contacts` solves itself: a reloaded structure can shift every
+        #: index, and a highlight that outlived the pair it named would be a
+        #: line between two atoms nobody selected.
+        #:
+        #: `None` is also the state a pose switch must put it in, which is what
+        #: makes "the selection follows the pose" checkable rather than a claim:
+        #: the highlight cannot survive a refresh that emptied the table it came
+        #: from.
+        self.highlight_pair: tuple[int, int] | None = None
         #: One of ``REPRESENTATION_KEYS``. Set through :meth:`set_representation`
         #: so the status bar can be told about it.
         self.representation = "spheres"
@@ -913,6 +1463,85 @@ class Viewport(QOpenGLWidget):
         self._move = None
         self._move_step = 0
         self._move_timer = None
+        #: The `framing_selection.PairFraming` the last `_focus` produced, or
+        #: `None` before anything has been focused this session.
+        #:
+        #: **Kept because the measurement was being thrown away.**
+        #: `framing_selection.focus_target` computes how much of the frame the
+        #: framed subject actually reaches -- `subject_fill` -- and returns it on
+        #: the record `_focus` was given, and `_focus` read two fields of the
+        #: five and dropped the rest on the floor. The quantity it dropped is the
+        #: one the whole module exists to move: the original defect was a pose
+        #: framed too small to see, and this is the number that says whether the
+        #: pose in front of the user is too small to see. The module measures it
+        #: on every selection and, before this attribute existed, the window
+        #: showed it to nobody.
+        #:
+        #: The counterpart of `MainWindow._last_selection_plan` for the gesture
+        #: path, and kept for the same reason: a check or a status line should
+        #: not have to re-measure the framing to find out where the camera went.
+        self._last_pair_framing = None
+        #: The extent the camera is currently framed on, as ``(points,
+        #: radii)`` -- exactly the input the last framing solved its distance
+        #: from, and nothing else. Four methods write it (`frame_all`,
+        #: `focus_point`, `_focus`, `focus_selection`) because four routes
+        #: place this camera, and a measure that asked "what is the camera
+        #: pointed at" and consulted fewer than all four would be wrong on the
+        #: rest. `framed_width_percent` is what reads it.
+        self._framed_extent = None
+        # -- the view's own notice -------------------------------------------
+        # A card over the picture, and not a row in the control panel. At the
+        # geometry this notice exists for -- the panel dragged out to 1036 px
+        # and the view left at its 240 px floor -- the panel is the one thing on
+        # screen with room to spare, so a sentence about the view printed there
+        # would cost the reader a look away from the thing being described, and
+        # would be laid out in the very pixels the view does not have.
+        #
+        # Positioned by hand in `_place_view_notice` rather than put in the
+        # viewport's layout: the shortcut card's layout owns the one that is
+        # there (`_build_keys_overlay`), and a notice that joined it would be
+        # moved by a card the reader did not open.
+        self.view_notice = QtWidgets.QFrame(self)
+        self.view_notice.setObjectName("view_notice")
+        self.view_notice.setStyleSheet(
+            "QFrame#view_notice { background: rgba(18, 20, 24, 224);"
+            " border: 1px solid #c47f00; }"
+        )
+        # The scene under it is a dark field with a molecule on it, and the
+        # sentence has to read on top of both that and the clear colour. Amber,
+        # and the same amber as the panel's notice, so the two are recognisably
+        # the same kind of sentence about the same kind of shortage.
+        self._view_notice_label = QtWidgets.QLabel(self.view_notice)
+        self._view_notice_label.setWordWrap(True)
+        self._view_notice_label.setStyleSheet(
+            "color: #e8a33d; font-size: 11px; background: transparent;"
+        )
+        # **Transparent to the mouse, and not by accident.** The view's own
+        #: gestures are a drag to orbit, a drag to pan and a wheel to zoom, and
+        #: this card sits over the bottom of all three. A label that took the
+        #: press would swallow the gesture under the notice, which is a warning
+        #: that stops the window working in exactly the state it is warning
+        #: about.
+        self._view_notice_label.setAttribute(
+            QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.view_notice.setAttribute(
+            QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        _notice_inner = QtWidgets.QVBoxLayout(self.view_notice)
+        _notice_inner.setContentsMargins(6, 5, 6, 5)
+        _notice_inner.addWidget(self._view_notice_label)
+        self.view_notice.setVisible(False)
+        # One event-loop turn of delay, for the reason `MainWindow.eventFilter`
+        # gives on the panel side: a resize handler runs *before* the widget has
+        # acted on the event, so a measure taken in one is a measure of the
+        # frame being left rather than the frame being entered.
+        self._view_notice_timer = QtCore.QTimer(self)
+        self._view_notice_timer.setSingleShot(True)
+        self._view_notice_timer.timeout.connect(self._update_view_notice)
+        #: What the last pass computed, so that a drag which changes nothing
+        #: costs nothing: a pointer move arrives at `update` at the pointer's
+        #: own rate, and re-measuring a few hundred atoms on each one to write
+        #: the same two words is work between the mouse and the picture.
+        self._view_notice_state = None
 
     # -- Qt / GL lifecycle -------------------------------------------------
 
@@ -958,6 +1587,11 @@ class Viewport(QOpenGLWidget):
         target.use()
         target.viewport = (0, 0, target.size[0], target.size[1])
         target.clear(0.10, 0.11, 0.13, 1.0)
+        # The size this frame was drawn at, kept so that anything asked about the
+        # picture afterwards is answered in the picture's own pixels. Derived
+        # from the widget instead it would be wrong by the device pixel ratio,
+        # and wrong by a different ratio on each of the two screens this runs on.
+        self._fb_size = (int(target.size[0]), int(target.size[1]))
 
         aspect = target.size[0] / max(target.size[1], 1)
         view = self.camera.view_matrix()
@@ -983,6 +1617,8 @@ class Viewport(QOpenGLWidget):
             self._draw_box(mvp)
         if self.show_contacts and self.contacts:
             self._draw_contacts(mvp)
+        if self.highlight_pair is not None:
+            self._draw_pair(mvp)
 
         # Leave the default framebuffer bound, as Qt expects.
         ctx.screen.use()
@@ -1031,7 +1667,8 @@ class Viewport(QOpenGLWidget):
             )
             draw_mesh(
                 self._ctx, self._sphere_prog,
-                bond_geometry(mol.coords, pairs, float(mol.radius) * 0.20, colors),
+                bond_geometry(mol.coords, pairs,
+                              float(mol.radius) * BOND_RADIUS_SCALE, colors),
                 mvp, mol.opacity,
             )
             return
@@ -1109,6 +1746,432 @@ class Viewport(QOpenGLWidget):
         # hydrogen bond is that bond's colour rather than a gradient along it.
         rgb = np.asarray(colors, np.float32)[group]
         self._draw_lines(segs, rgb, mvp, 0.95)
+
+    def _pair_atoms(self):
+        """The two atom coordinates `highlight_pair` names, or `None`.
+
+        Solved the way `_draw_pair` solves it, against the molecules in the scene
+        by role and by index, so the answer is the line that gets drawn and not a
+        re-reading of a selection that may have been made against a structure
+        that has since been replaced.
+        """
+        pair = self.highlight_pair
+        if pair is None:
+            return None
+        pose = next((m for m in self.molecules if m.role == "pose"), None)
+        receptor = next(
+            (m for m in self.molecules if m.role == "receptor"), None
+        )
+        if pose is None or receptor is None:
+            return None
+        i, j = int(pair[0]), int(pair[1])
+        if not (0 <= i < len(pose.coords) and 0 <= j < len(receptor.coords)):
+            return None
+        return pose, receptor, pose.coords[i], receptor.coords[j]
+
+    def framebuffer_size(self) -> tuple:
+        """`(width, height)` of the framebuffer, in pixels.
+
+        The size `paintGL` last drew at, and the widget's own size times the
+        device pixel ratio before the first frame. Everything that answers a
+        question about the picture in pixels goes through here, because the
+        widget size and the framebuffer size are different numbers and only one
+        of them is the picture.
+
+        **The fallback rounds, because that is what Qt does.** `paintGL` sizes
+        the framebuffer from `target.size`, and Qt builds that from the widget
+        geometry times the device pixel ratio with `qRound`. `int()` disagreed
+        with it whenever `size * ratio` had a fractional part, which at 1.25x is
+        most sizes. Measured against the `_fb_size` the product itself records
+        for the frame it drew:
+
+        ==================  =========  ==========  ==========  =============
+        viewport widget    dpr        real fb      `int()`     `floor(x+.5)`
+        ==================  =========  ==========  ==========  =============
+        901 x 791           1.25       1126 x 989   1126 x 988  1126 x 989
+        823 x 617           1.25       1029 x 771   1028 x 771  1029 x 771
+        700 x 521           1.25        875 x 651    875 x 651   875 x 651
+        1000 x 700          1.25       1250 x 875   1250 x 875  1250 x 875
+        901 x 791           2.5        2253 x 1978  2252 x 1977  2253 x 1978
+        1200 x 860          2.5        3000 x 2150  3000 x 2150  3000 x 2150
+        ==================  =========  ==========  ==========  =============
+
+        The dpr 1.25 rows are the desktop this machine runs at; the 2.5 rows are
+        the same widget under `QT_SCALE_FACTOR=2`, which does give a second
+        ratio with a laid-out frame once the viewport is resized explicitly and
+        repainted to settle, rather than being stuck at 640x480.
+
+        **Not Python's `round()`.** It is banker's rounding, so `901 * 2.5 =
+        2252.5` comes out 2252 where Qt's `qRound` gives 2253, and that row
+        above is the one place the two disagree. `math.floor(x + 0.5)` is
+        `qRound` for a non-negative size and matches every row here; `int()`
+        misses four of the six and `round()` still misses one. Getting a second
+        device pixel ratio is what turned this up -- at the one ratio this
+        machine runs at, `round()` happens to be right.
+
+        The bottom two rows at 1.25x are the sizes where the product is a whole
+        number and every rule agrees, which is why one agreeing size would not
+        have shown the bug: the disagreement only appears where `size * ratio`
+        has a fraction, and 901 * 1.25 = 1126.25 hides it in the width while
+        791 * 1.25 = 988.75 does not.
+
+        **The branch is reachable, and still unreached.** `pair_screen_segment`
+        is its one caller in the product, and it is a pure query about a frame
+        that has been drawn, so by then `paintGL` has set `_fb_size` and this
+        code does not run. It is reachable rather than dead -- a caller added
+        before the first paint would hit it -- so it is kept and made correct
+        rather than deleted, and it is now the branch that agrees with the
+        framebuffer instead of the one that is off by a pixel.
+        """
+        size = getattr(self, "_fb_size", None)
+        if size:
+            return int(size[0]), int(size[1])
+        ratio = float(self.devicePixelRatioF()) if hasattr(
+            self, "devicePixelRatioF") else 1.0
+        return (max(math.floor(self.width() * ratio + 0.5), 1),
+                max(math.floor(self.height() * ratio + 0.5), 1))
+
+    def _frame_mvp(self, size):
+        """The exact matrix `paintGL` draws this frame with, for a frame of
+        `size`. One function so a projection cannot disagree with the draw."""
+        aspect = size[0] / max(size[1], 1)
+        return self.camera.projection(aspect) @ self.camera.view_matrix()
+
+    def pair_screen_segment(self) -> dict:
+        """Where the selected pair is on screen, analytically.
+
+        **The name deliberately avoids `highlight`.** The suite holds an
+        invariant that the only `highlight`-named thing on this widget is the
+        state `highlight_pair`, so that nothing in the residue path can ever
+        carry a claim about the picture; naming a method `highlight_*` tripped
+        that check and the check was right to. This is a pure query over
+        `highlight_pair` that returns `None` when the pair table has selected
+        nothing, so it is state about the *pair* and not a second highlight.
+
+        The answer is **computed from the camera**, not measured off the
+        framebuffer: the two atoms are pushed through the same `mvp` that
+        `paintGL` uses and the same perspective divide, and reported in the
+        framebuffer's own pixels. Nothing here asks what colour anything is.
+
+        That is the whole reason it exists. A count of "pixels near
+        `COLOR_PAIR`" answers *how much* of a line the sample pattern covered,
+        which is a fact about MSAA and not about the product: the same line, the
+        same colour and the same tolerance read 110 px at 8.125 A and 0 px at
+        27 A. Projecting instead answers the question a reader is actually
+        asking -- *is the marker where the pair is, and how big is it there* --
+        and it answers it whether or not the marker is currently visible, which
+        is what makes it usable as the reference the marker is then measured
+        against.
+
+        Keys, all in framebuffer pixels unless said otherwise:
+
+        ``start``/``end``
+            `(x, y)` of the two atoms, y down, as the framebuffer holds it.
+        ``axis``
+            Unit `(x, y)` from start to end, the direction the marker runs in.
+        ``length``
+            Distance between them in pixels.
+        ``width``
+            The marker's **declared** width in pixels: the pose's own bond
+            radius, projected at these depths. See `_draw_pair`.
+        ``depth``
+            `(t0, t1)`, distance from the eye in Angstrom, the two ends.
+        ``size``
+            The framebuffer `(width, height)`.
+
+        `None` when there is no pair, no pose, or the pair names atoms this
+        scene does not have -- the same three answers `_draw_pair` gives by
+        drawing nothing.
+        """
+        solved = self._pair_atoms()
+        if solved is None:
+            return None
+        _pose, _receptor, a, b = solved
+        size = self.framebuffer_size()
+        mvp = self._frame_mvp(size)
+
+        world = np.asarray([a, b], np.float32)
+        # The full homogeneous transform, kept as two pieces rather than one
+        # `homogeneous @ mvp` so the divide stays visible: `w` is the sign that
+        # says which side of the eye a point is on, and folding it away is how a
+        # point behind the camera comes back mirrored and on screen.
+        clip = world @ mvp[:3, :3].T + mvp[:3, 3]
+        w = world @ mvp[3, :3] + mvp[3, 3]
+        if not np.all(w > 1e-6):
+            # Behind the eye. Dividing here would mirror the point to the far
+            # side of the screen and report a segment the camera cannot see.
+            return None
+        ndc = clip / w[:, None]
+        px = (ndc[:, 0] * 0.5 + 0.5) * size[0]
+        py = (1.0 - (ndc[:, 1] * 0.5 + 0.5)) * size[1]
+        start = (float(px[0]), float(py[0]))
+        end = (float(px[1]), float(py[1]))
+        dx, dy = end[0] - start[0], end[1] - start[1]
+        length = float(np.hypot(dx, dy))
+        axis = (dx / length, dy / length) if length > 1e-9 else (1.0, 0.0)
+
+        # Depth from the view matrix, which is the one that knows about the eye
+        # and has not had the perspective divide folded into it.
+        view = self.camera.view_matrix()
+        eye = world @ view[:3, :3].T + view[:3, 3]
+        depth = (float(-eye[0, 2]), float(-eye[1, 2]))
+        radius = float(_pose.radius) * BOND_RADIUS_SCALE
+        # The width reported is the one at the **middle** of the segment, in
+        # pixels across, because that is the width a measurement of the drawn
+        # marker's middle reports. The two ends are reported alongside it, since
+        # a segment that runs towards the camera is honestly narrower at its far
+        # end and a reader comparing a number against `width` is comparing
+        # against the middle for that reason.
+        mid = 0.5 * (depth[0] + depth[1])
+        return {
+            "start": start,
+            "end": end,
+            "axis": axis,
+            "length": length,
+            "width": projected_width_px(radius, mid, self.camera.fov, size[1]),
+            "width_near": projected_width_px(radius, min(depth), self.camera.fov,
+                                             size[1]),
+            "width_far": projected_width_px(radius, max(depth), self.camera.fov,
+                                            size[1]),
+            "radius": radius,
+            "depth": depth,
+            "size": size,
+        }
+
+    def _draw_pair(self, mvp) -> None:  # pragma: no cover - GUI
+        """The selected pair, as one solid rod between its two atoms.
+
+        Solid, where every other interaction line in this file is dashed, and in
+        the one colour nothing else draws with (`COLOR_PAIR`). Both halves are
+        the point rather than styling: a selected pair that looks like the other
+        contacts is a selection the reader cannot see, and the entire reason the
+        pair table selects a row is that a line in the picture changes when they
+        do.
+
+        Drawn **after** the contacts, so it is on top of them, and deliberately
+        not gated on `show_contacts`. A reader who has hidden the dashed lines
+        still needs to see which pair they picked, and a highlight that vanishes
+        with the thing it highlights is a highlight that cannot be trusted.
+
+        **Depth testing is off for this one draw**, for the same reason
+        `_draw_pocket` turns it off and with the same trade accepted: a line
+        between a pose atom and a receptor atom is, by definition, a line
+        *between* two atoms, and it is drawn from one atom's centre to the
+        other's, so both of its ends are always inside the very spheres it
+        connects. Depth-tested, what survives is only the gap between the two
+        surfaces -- measured on 1crn/biotin at the framing `F` produces, 46 px
+        of a 347 px line for one pair and 0 px in the space-filling, ribbon and
+        cartoon representations, where the gap closes. A selection that draws
+        nothing in three of the six representations a reader can choose is not
+        a selection, and the failure is invisible rather than obvious: the rest
+        of the picture is unchanged, so nothing on screen reports that the
+        click landed. Drawing through turns the line into what it is meant to
+        be, an x-ray statement of which two atoms are joined. Depth is restored
+        immediately after, so the box and the contacts keep their own order.
+
+        **The width is the pose's own bond radius, projected.** Not a number of
+        pixels. A marker is a length in the scene, so it gets a length in the
+        scene, and the one already in the model is `pose.radius *
+        BOND_RADIUS_SCALE` -- the radius of the cylinders `ball_and_stick`
+        draws for the pose's own bonds. The rule is *the selected pair is drawn
+        as thick as the bonds beside it*, and it carries its own consequences
+        rather than being tuned to a fixture: zoom in and it thickens, zoom out
+        and it thins, move to a HiDPI screen and it thickens with the pixels,
+        and at 8.125 A it is about three times the width it is at 25 A, which
+        is what a fixed length in the world does when the camera moves.
+
+        The alternatives were rejected for what they are rather than for how they
+        looked on 1crn. **A pixel count** is a preference dressed as a
+        measurement, and it is a different preference on every display. **A
+        fraction of the frame** makes the marker's size a property of the window
+        rather than of the picture, and worse, it *grows* as the camera pulls
+        back, which is backwards for an object in the scene. **A fraction of the
+        line's own length** would give a dot when the line is foreshortened and
+        a bar when it is not.
+
+        **`Context.line()` cannot express any of them.** The GL line width this
+        driver clamps to 1.0 is why the marker used to be a hairline: at 8.125 A
+        it ran 208 px across the frame, and at the framing `F` now produces it
+        runs 54-68 px while lying over two spheres whose pixels are near
+        `COLOR_PAIR` in red and blue, so a 1 px line over them is a colour the
+        eye has to find rather than a shape it can see. So the marker is drawn
+        as **a rectangle in the plane that contains the segment and faces the
+        camera** -- two triangles, not a line. It is built in world space and
+        goes through the same `mvp` as everything else, so the perspective
+        divides it correctly and the far end is honestly narrower than the near
+        one, which a screen-space quad of constant width would have lied about.
+        """
+        import moderngl
+
+        from . import COLOR_PAIR
+
+        solved = self._pair_atoms()
+        if solved is None:
+            return
+        pose, _receptor, a, b = solved
+        quad = self._pair_quad(a, b, float(pose.radius) * BOND_RADIUS_SCALE)
+        if quad is None:
+            return
+        self._ctx.disable(moderngl.DEPTH_TEST)
+        try:
+            draw_lines(
+                self._ctx,
+                self._line_prog,
+                quad,
+                np.tile(np.asarray(COLOR_PAIR, np.float32), (6, 1)),
+                mvp,
+                1.0,
+                primitive=moderngl.TRIANGLES,
+            )
+        finally:
+            self._ctx.enable(moderngl.DEPTH_TEST)
+
+    def _pair_quad(self, a, b, radius):
+        """Six vertices of a camera-facing rod of `radius` from `a` to `b`.
+
+        A world-space rectangle, which is what a thick line *is*: its two long
+        edges run along the segment, its two end faces are flat to the camera,
+        and it goes through the same `mvp` as everything else, so the far end is
+        honestly narrower than the near one. A length `radius` taken across it
+        at depth `t` subtends `radius * f * h / (2t)` pixels to the axis, the
+        perspective divides it the way it divides everything else, and the rod
+        is foreshortened correctly when the segment points at or away from the
+        camera.
+
+        **The offset is `cross(p1 - p0, forward)`, and it needs both of the
+        properties that makes it.** Perpendicular to the segment, so the width
+        is measured across the rod and the rectangle's long axis *is* the
+        segment rather than a smear along it. And with no component along the
+        view axis, so the offset points sit at the depth they were already at
+        and the width at each end is `radius * f * h / (2t)` for that end's own
+        `t`, which is what makes the rod narrow honestly with distance instead
+        of only pretending to.
+
+        **The two offsets that look equivalent are not, and both shipped.** The
+        screen axis lifted back into the view plane (`right * ax + up * ay`)
+        is a *screen* direction dressed as a world one, and `cross(forward,
+        along)` built from it is perpendicular in view space, which is not the
+        metric the screen is written in -- the projection flips y, so the two
+        disagree about where "perpendicular" is. Over **all 27** interaction
+        pairs of 1crn/biotin at the framing `F` produces, the drawn width
+        against the declared one is:
+
+        * the screen axis as the offset: a smooth function of the segment's
+          screen angle, **0.216 of the declared width** on the row nearest
+          horizontal (176.6 deg) and **1.061** on the row nearest the
+          orientation it gets right (-134.8 deg), 11 rows below 0.5 of declared,
+          23 below 0.95 and 4 correct. **This is what was here.** It is
+          graded, not broken-or-fine, and a ten-row sample of it read "5 of 10
+          not findable" where the whole table is 11 of 27;
+        * `cross(forward, along)`: **0.103 of the declared width** on row 4 and
+          0.290 on a re-framed pair, with 4 of the 27 rows below 0.5 and 11 at
+          0.95 or better. It is *nearly* as good as this one on the rows a
+          fixture happens to favour, and that is the honest reading of it;
+        * this one: 1.034 to 1.086 on all 27, and 0.99 to 1.10 measured at
+          6 A and 8.125 A, so the width does not depend on the depth either.
+
+        The screen-axis ratio is predictable without drawing anything. The
+        offset is lifted from the *pixel* axis, so x arrives scaled by w/2 and
+        y by h/2 and flipped, and the drawn width is the sine of the angle that
+        makes: with `s` the framebuffer aspect and `(dx, -dy)` the view-plane
+        direction in those units, `cos(phi) = (dx^2/s - dy^2) /
+        sqrt((dx^2/s^2 + dy^2)(dx^2 + dy^2))` and the ratio is `|sin phi|`. Over
+        the 27 rows that predicts the measured ratio to a mean absolute error
+        of **0.067, worst 0.116**, with the residual running positive because
+        the antialiased rim of a thin rod floors the percentile measurement near
+        1 px. It is 1.000 exactly when `|dx| = |dy| * sqrt(s)`, which is why the
+        offset looked right on the rows nearest 45 degrees and was not right on
+        any of them exactly.
+
+        **The retracted arm's form is right and its value is wrong, and the
+        two are worth separating.** `|ax^2 - ay^2|` predicts what
+        `cross(forward, along)` *draws* to a mean absolute error of **0.066**
+        over the 27 rows, **0.068** over a yaw sweep that rotates the pair set
+        through -102 to -10 degrees, and **0.109** over an aspect sweep from
+        0.81 to 1.83 with the screen angle held to 0.05 deg -- never worse
+        than 0.14 anywhere. So it is a property of the arm, not a curve fitted
+        to one fixture, and "wrong on every row" was the wrong claim to make
+        about it. What makes it the wrong offset is that the quantity it
+        predicts is **not 1.000**: it reaches 0.103 on row 4, 0.290 on the
+        re-framed pair, and 0.52 across the held-angle sweep, where this arm
+        measured 1.09 on the same pixels. A marker declared 6.4 px wide and
+        drawn 0.7 px wide is not findable at any floor worth having.
+
+        **The retracted arm is the aspect-*free* one, which is the opposite of
+        what its dismissal assumed.** With the screen angle held to 0.05 deg
+        and the framebuffer aspect swept 0.81 to 1.83, its drawn ratio moved
+        **0.046** and its closed form moved **0.000** -- so `|ax^2 - ay^2|`
+        needs no aspect term, and the offset with the aspect in it is this
+        file's own first arm, not the second. The view-to-pixel map is
+        `(X, Y) -> (kX, -kY)`, isotropic, because the `W/H` anisotropy of NDC
+        is exactly cancelled by a `W`-wide, `H`-tall framebuffer; so a
+        view-plane angle and a screen angle are one angle up to the y flip.
+        The consequence is that the screen-axis form above is the *only* one of
+        the three whose value moves when the window is resized, and the
+        correction that removed it removed the aspect dependence with it.
+
+        `None` for a segment that projects to a point or lies along the view
+        axis, where the rectangle has no area to draw.
+        """
+        p0 = np.asarray(a, np.float32)
+        p1 = np.asarray(b, np.float32)
+        # Only the view axis is wanted here: the width offset is built from the
+        # segment and `forward` alone. `right` and `up` are named so that this
+        # reads as a deliberate omission and not a lost unpack.
+        _right, _up, forward = (np.asarray(v, np.float32)
+                                for v in self.camera.basis())
+        # The screen-space length still gates the degenerate case: a segment the
+        # camera sees end-on projects to a point, and there is no width to give
+        # a direction to.
+        screen = self.pair_screen_segment()
+        if screen is None or screen["length"] < 1e-6:
+            return None
+        # The two guards are on the marker's **two dimensions**, and the second
+        # is not a restatement of the first. A segment the camera sees nearly
+        # end-on keeps a large *declared* width -- the pose's bond radius
+        # projects to 7.127 px at every angle, because it is a length in the
+        # scene -- while both of the rectangle's own dimensions collapse at
+        # different rates. The screen-length guard upstream asks whether the
+        # segment is longer than a millionth of a pixel, and the answer stays
+        # "yes" across a range where the rasteriser draws nothing at all.
+        #
+        # The area guard is the lower edge: below half a square pixel the
+        # marker cannot cover a sample point, and measured that is exactly
+        # where the first lit pixel appears. The length guard is the *other*
+        # edge, and it is the one an area floor cannot express. Measured on
+        # 1crn/biotin at 25.17 A, the lit pixel count is **8** at a projected
+        # area of 1.75 px^2 and **8** at 3.50 px^2 -- double the area, the same
+        # eight pixels, laid out across the rod and not along it, because the
+        # screen length only went from 0.270 to 0.540 px. A marker with area to
+        # spare and no length along its own axis is not a marker; it is a
+        # scratch, and it draws at a quarter of the contrast a full-length
+        # marker reaches. Both floors are in the constants and both are
+        # measured; see `PAIR_MARKER_MIN_AREA_PX2` and
+        # `PAIR_MARKER_MIN_LENGTH_PX`.
+        #
+        # `marker_drawable` is the predicate, not a second copy of it: the
+        # status line asks the same question when the reader selects the pair,
+        # and two implementations of one rule is how the bar ends up naming a
+        # marker the draw then declines to submit.
+        if not marker_drawable(screen):
+            return None
+        # The rod's other axis: perpendicular to its length by the cross product,
+        # and perpendicular to `forward` by the same cross product, which is what
+        # keeps the offset in the plane of constant depth. It is also the one
+        # operation here that cancels -- two nearly parallel vectors leave
+        # almost nothing behind -- so it is done in float64 even though the
+        # vertices it offsets are float32.
+        across = np.cross(p1.astype(np.float64) - p0.astype(np.float64),
+                          forward.astype(np.float64))
+        na = float(np.linalg.norm(across))
+        if na < 1e-9:
+            return None
+        across = (across / na).astype(np.float32)
+        off = across * float(radius)
+        return np.asarray([
+            p0 - off, p0 + off, p1 + off,
+            p0 - off, p1 + off, p1 - off,
+        ], np.float32)
 
     def _draw_box(self, mvp) -> None:  # pragma: no cover
         from . import COLOR_BOX
@@ -1203,12 +2266,26 @@ class Viewport(QOpenGLWidget):
         dx, dy = x - self._last_mouse[0], y - self._last_mouse[1]
         self._last_mouse = (x, y)
         if self._dragging == QtCore.Qt.MouseButton.LeftButton:
-            self.camera.yaw += dx * 0.01
-            self.camera.pitch = max(-1.5, min(1.5, self.camera.pitch + dy * 0.01))
+            self.rotate(dx * 0.01, dy * 0.01)
         elif self._dragging == QtCore.Qt.MouseButton.MiddleButton:
             self.camera.distance = max(2.0, self.camera.distance * (1.0 + dy * 0.005))
         elif self._dragging == QtCore.Qt.MouseButton.RightButton:
             self._pan(dx, dy)
+        self.update()
+
+    def rotate(self, dyaw: float, dpitch: float) -> None:  # pragma: no cover - GUI
+        """Turn the camera by a given amount, in radians.
+
+        The one place yaw and pitch change. The left-drag above and the keyboard
+        keys in `MainWindow` both come through here, for the same reason the
+        pose stepper goes through `setCurrentCell`: a camera that can be turned
+        two ways has two places to get the pitch limit wrong, and the second one
+        is the one nobody re-tests. `pitch` stops at the same +/-1.5 rad for
+        both, and a key press of one degree feels like the same rotation as a
+        one-degree drag.
+        """
+        self.camera.yaw += float(dyaw)
+        self.camera.pitch = max(-1.5, min(1.5, self.camera.pitch + float(dpitch)))
         self.update()
 
     def _pan(self, dx: float, dy: float) -> None:
@@ -1248,6 +2325,16 @@ class Viewport(QOpenGLWidget):
         self.camera.center = allpts.mean(axis=0).astype(np.float32)
         radius = float(np.linalg.norm(allpts - self.camera.center, axis=1).max())
         self.camera.distance = max(5.0, radius * 2.6)
+        # What this framing solved for: the visible atoms' *centres* inside a
+        # sphere. `radius * 2.6` is a spherical fit of centres and claims no
+        # surface, so the radii are zero and the measure stays the measure of
+        # what was fitted -- see `framed_width_percent`. A radius here would
+        # make this framing report itself as cropping, which is the one thing
+        # a fit that put the whole scene in the frame cannot be.
+        self._framed_extent = (
+            np.asarray(allpts, np.float64).reshape(-1, 3),
+            np.zeros(len(allpts), np.float64),
+        )
         self.update()
 
     def focus_point(self, point, radius: float) -> None:  # pragma: no cover - GUI
@@ -1263,7 +2350,159 @@ class Viewport(QOpenGLWidget):
         self._cancel_move()
         self.camera.center = np.asarray(point, np.float32)
         self.camera.distance = max(12.0, float(radius) * 1.6)
+        # What this framing solved for: one extent of known radius, which is
+        # what `radius` means at the call site. See `framed_width_percent`.
+        self._framed_extent = (
+            np.asarray(point, np.float64).reshape(1, 3),
+            np.asarray([float(radius)], np.float64),
+        )
         self.update()
+
+    # -- the view's own notice ---------------------------------------------
+
+    def framed_width_half_fill(self) -> float:
+        """`H` from `_drawn_half_width_fill`, for the current framing.
+
+        The raw measure, exposed so a check can read the number the percentage
+        was made from rather than only the rounded one. `0.0` is the one state
+        in which there is no picture to be a slice of: nothing has been framed
+        in this session yet.
+        """
+        extent = self._framed_extent
+        if extent is None:
+            return 0.0
+        points, radii = extent
+        if points is None or not len(points):
+            return 0.0
+        right, up, forward = self.camera.basis()
+        return _drawn_half_width_fill(
+            points, radii, right, up, forward,
+            float(self.camera.distance),
+            center=self.camera.center,
+            fov=float(self.camera.fov),
+            aspect=(max(float(self.width()), 1.0)
+                    / max(float(self.height()), 1.0)),
+        )
+
+    def framed_width_percent(self) -> int | None:
+        """Share of the framed width on screen: 1-100, or `None` if unframed.
+
+        **One number, and both the sentence and the threshold are this one.**
+        The panel's notice had the bug this shape exists to prevent: it was up
+        with the scroll bar reading 1 px and it said the controls needed 0 px,
+        because the sentence read `minimumSizeHint` and the threshold read the
+        bar. So the percentage is computed here once, and `_update_view_notice`
+        tests `VIEW_MIN_FRAMED_WIDTH_PCT` against the very value it prints.
+
+        **Floored at 1, and never 0 or 100 while the notice is up.** `H` is
+        unbounded above, so a camera inside its own drawn surface would give a
+        share of 0.000x% and a visible notice reading "0% of the framed
+        width" -- the panel notice's exact failure, in the other direction. The
+        floor keeps the figure inside the range that justifies showing it.
+        """
+        half = self.framed_width_half_fill()
+        if half <= 0.0 or not math.isfinite(half):
+            return None
+        return max(1, min(100, int(100.0 / half)))
+
+    def _update_view_notice(self) -> None:  # pragma: no cover - GUI
+        """Say that the view's width is spent, exactly when it is.
+
+        The mirror of `_update_panel_notice`, and the same rule shape: the
+        measure decides, the sentence reports, and both are one value. Up when
+        `framed_width_percent()` is under `VIEW_MIN_FRAMED_WIDTH_PCT`, down
+        when it is not or when nothing has been framed, and the figure in the
+        text is the figure the threshold was tested against.
+        """
+        pct = self.framed_width_percent()
+        state = (
+            pct,
+            int(self.width()), int(self.height()),
+            round(float(self.camera.distance), 6),
+        )
+        if state == self._view_notice_state:
+            return
+        self._view_notice_state = state
+        if pct is None or pct >= VIEW_MIN_FRAMED_WIDTH_PCT:
+            self.view_notice.setVisible(False)
+            self._view_notice_label.setText("")
+            return
+        # **Two sentences: what the state is, and what can be done about it.**
+        # Neither says the window is too narrow, because it is not -- the
+        # window is as wide as the reader made it, and naming its width as the
+        # fix is the mistake `_update_panel_notice` was corrected for, on a
+        # screen where the window cannot be widened any further. Neither names
+        # the control panel as the holder of the missing width, for the same
+        # reason: the view's floor is a floor the reader is free to spend, so
+        # the sentence describes the state and points at the gestures that
+        # change it.
+        #
+        # **The wheel is named first because it is the one that always works.**
+        # The splitter only helps while there is width to hand back, and one
+        # framing -- `focus_point`, which `_frame_poses` reaches through -- is
+        # aspect-blind by construction and can be showing less than half its
+        # own extent on the widest view the screen offers. Measured, on 1CRN
+        # with the crambin pose: 44% at a 1417 px view. Zooming out moves the
+        # camera in every one of these states, and a sentence whose advice
+        # cannot be followed is a sentence that is wrong.
+        self._view_notice_label.setText(
+            f"the 3-D view shows {pct}% of the framed width; the rest runs "
+            f"off both sides. Scroll to zoom out, or drag the splitter back "
+            f"toward the view."
+        )
+        self._place_view_notice()
+        self.view_notice.setVisible(True)
+
+    def _place_view_notice(self) -> None:  # pragma: no cover - GUI
+        """Put the card at the bottom of the view, as wide as the view is.
+
+        **Anchored at the bottom and not centred**, because the shortcut card
+        (`_build_keys_overlay`) is centred and the two can be on screen at
+        once. And no wider than the view less a margin, because a card wider
+        than the view has its own sentence cut off by the very thing it is
+        reporting -- the defect `_update_panel_notice` documents on the panel
+        side, where the notice used to wrap at the panel's full width and run
+        off the right-hand edge of a 110 px strip.
+        """
+        margin = 6
+        w = max(int(self.width()) - 2 * margin, 40)
+        # 12 px of layout margin and 2 px of border, both set above, so the
+        # label's own wrapped height plus those is the frame's height. Asked of
+        # the label rather than counted out of a line count, for the reason
+        # `heightForWidth` is used on the panel notice: the number of lines a
+        # string takes is a guess and this is not.
+        inner_w = max(w - 14, 20)
+        self._view_notice_label.setFixedWidth(inner_w)
+        h = int(self._view_notice_label.heightForWidth(inner_w)) + 12
+        self.view_notice.setFixedSize(w, h)
+        self.view_notice.move(
+            (int(self.width()) - w) // 2,
+            max(int(self.height()) - h - margin, 0),
+        )
+
+    def resizeEvent(self, event) -> None:  # pragma: no cover - GUI
+        """Re-ask the notice once the frame has changed shape.
+
+        Deferred by one event-loop turn for the reason `MainWindow.eventFilter`
+        gives on the panel side: a resize handler runs before the widget has
+        acted on the event, so the width read in one is the width the frame is
+        leaving. `super()` is called first and unconditionally, so the
+        `QOpenGLWidget`'s own handling of the event is untouched.
+        """
+        super().resizeEvent(event)
+        self._view_notice_timer.start(0)
+
+    def update(self) -> None:  # pragma: no cover - GUI
+        """Re-ask the notice after any camera move, because they all end here.
+
+        Zooming in crops the frame as surely as narrowing it does, and a notice
+        that answered only resizes would be silent about that.
+        `QWidget.update` is not virtual, so Qt's own internal repaints do not
+        arrive here -- which is why `resizeEvent` is the second hook and not a
+        redundant one.
+        """
+        super().update()
+        self._view_notice_timer.start(0)
 
     # -- the camera transition --------------------------------------------
 
@@ -1373,6 +2612,14 @@ class Viewport(QOpenGLWidget):
         plan = self.plan_selection(
             pose_coords, partner_coords, right, up, forward, aspect=aspect, **kwargs
         )
+        # What this framing will have solved for: `selection_target` fits the
+        # pose and the atoms it touches on their *centres*, through `fit_view`,
+        # so the radii are zero here for the same reason they are in `frame_all`
+        # and for no other -- the measure has to be of the input the fit took.
+        framed = np.asarray(
+            fs.selection_points(pose_coords, partner_coords),
+            np.float64).reshape(-1, 3)
+        self._framed_extent = (framed, np.zeros(len(framed), np.float64))
         self._settle_move_now()
         self._begin_move(plan)
         return plan
@@ -1392,34 +2639,218 @@ class Viewport(QOpenGLWidget):
             steps=self.MOVE_STEPS,
         )
 
+    def _framing_radii(self, mol) -> np.ndarray:
+        """Half-width in A of what this representation paints at each atom.
+
+        Not `sphere_radii_for`: that is what the *sphere* path draws, and a
+        framing needs what is on screen in the mode in use. The two differ for
+        three of the six modes, and the differences are large:
+
+        * ``stick`` paints no atom at all, only the bond tubes, which it draws at
+          0.16 of the molecule radius -- so the atom's own drawn half-width is
+          that, not the 0.30 A sphere `sphere_radii_for` reports.
+        * ``ribbon`` and ``cartoon`` paint a swept band along the C-alpha trace
+          whose half-width is `cartoon_geometry.WIDTHS`, up to 1.70 A, and no
+          spheres. A per-atom radius is an approximation of a swept surface, so
+          this takes the widest half-width the sweep can produce and applies it
+          to every atom. Over-estimating is the safe direction for a stand-off
+          distance: it stands the camera back rather than into the band.
+
+        The per-atom radius is still a per-atom radius, which is the decision
+        that matters. Averaging the two atoms of a pair into one number would be
+        a smaller quantity with no author: on the shipped fixture the pair is a
+        pose oxygen to a receptor oxygen, drawn at 0.31 A and 0.27 A in the
+        small-sphere modes, and "the pair's radius" would be neither of them.
+        """
+        from . import cartoon_geometry as cg
+
+        key = self.representation
+        if key in ("ribbon", "cartoon"):
+            if getattr(mol, "has_backbone", False):
+                return np.full(len(mol.coords), max(cg.WIDTHS.values()), np.float64)
+            return np.asarray(mol.atom_radii(), np.float64) * 0.13
+        if key == "stick":
+            return np.asarray(mol.atom_radii(), np.float64) * 0.16
+        return np.asarray(sphere_radii_for(mol, key), np.float64)
+
+    def _focus(self, subject_pose, subject_receptor, receptor) -> None:
+        """Centre on the subject; stand off until the drawn context is in shot.
+
+        The one camera rule both `focus_pair` and `focus_residue` use, so the two
+        cannot drift apart, and both delegate to
+        `framing_selection.focus_target`, which owns the arithmetic and the
+        reasoning.
+        """
+        from . import framing_selection as fs
+
+        pose = next((m for m in self.molecules if m.role == "pose"), None)
+        if pose is None:
+            return
+        pose_xyz = np.asarray([pose.coords[int(i)] for i in subject_pose],
+                              np.float64).reshape(-1, 3)
+        rec_xyz = np.asarray([receptor.coords[int(i)] for i in subject_receptor],
+                             np.float64).reshape(-1, 3)
+        if not len(pose_xyz) or not len(rec_xyz):
+            return
+        subject = np.vstack([pose_xyz, rec_xyz])
+        r_pose = self._framing_radii(pose)
+        r_rec = self._framing_radii(receptor)
+        subject_r = np.concatenate(
+            [np.asarray([r_pose[int(i)] for i in subject_pose], np.float64),
+             np.asarray([r_rec[int(i)] for i in subject_receptor], np.float64)])
+        # The context is every receptor atom within the shell of the subject's
+        # own midpoint, on centres, so the representation decides how far the
+        # camera stands off and never what is in the frame.
+        centre = subject.mean(axis=0)
+        all_rec = np.asarray(receptor.coords, np.float64).reshape(-1, 3)
+        near = np.linalg.norm(all_rec - centre, axis=1) <= fs.PAIR_CONTEXT_SHELL
+        right, up, forward = self.camera.basis()
+        target = fs.focus_target(
+            subject, subject_r, all_rec[near], r_rec[near],
+            right, up, forward,
+            fov=float(self.camera.fov),
+            aspect=max(float(self.width()), 1.0) / max(float(self.height()), 1.0),
+        )
+        self.camera.center = target.center
+        self.camera.distance = target.distance
+        # What `focus_target` solved for: the subject and the context together,
+        # in the drawn radii this representation draws them at, because
+        # `focus_target` fits the drawn envelope through `fit_drawn`. The
+        # empty-context fallback is `focus_target`'s own, copied rather than
+        # re-derived -- an extent recorded here that the fit did not use is an
+        # extent the measure would be reporting on instead of the framing.
+        context, context_r = all_rec[near], r_rec[near]
+        if not len(context):
+            context, context_r = subject, subject_r
+        self._framed_extent = (
+            np.vstack([subject, context]),
+            np.concatenate([subject_r, context_r]),
+        )
+        # The whole record, not just the two fields above. It is kept because
+        # `subject_fill` is how much of the frame the thing the user just
+        # selected actually reaches, and the only way to put that on screen is
+        # to have kept it -- see `_framed_subject_note`.
+        self._last_pair_framing = target
+
+    def _framed_subject_note(self) -> str:
+        """How much of the frame the last framed selection reaches, or `""`.
+
+        **One sentence, formatted once, because four routes frame a selection
+        and each of them already writes its own status line.** The pair table,
+        the contacts table, and the two branches of the `F` key all call the
+        same `focus_pair` / `focus_residue`, so they all get the same number;
+        formatting it four times is four chances for the copies to disagree,
+        and each copy would be individually correct, which is what makes that
+        kind of drift invisible.
+
+        **The unit is in the words, because the line this lands on already
+        carries a number in the other one.** `subject_fill` is what
+        `framing_selection.drawn_fill` returns: the share of the frame's
+        *half-extent* the subject's drawn discs reach, on the worse of the two
+        axes -- a ratio of lengths. The marker's share, printed a few words
+        earlier on the same line by `_on_pair_selected`, is a *projected area*
+        over the framebuffer's pixels. Both are called a share of the frame by
+        their own comments, they are an order of magnitude apart on one
+        picture, and a reader shown both without the unit has no way to tell
+        which is which.
+
+        **No warning is attached, and that is a measurement rather than an
+        omission.** The only floor expressed in these units is
+        `MIN_SELECTION_FRAME_FILL` (0.40), and the module's own comment records
+        that a floor on the pair's own drawn extent was tried, measured
+        0.060-0.178 against a stated 0.40, and removed: the context fit
+        contains the subject and always stands further back, so the constraint
+        was not expected to bind. Measured here over all 34 pairs of the
+        shipped fixture, the share runs 0.0785 at the narrowest and 0.2835 at
+        the widest on a 1280x820 window -- 0.40 is 1.4x the widest, so on that
+        geometry it cannot fire. But at the 770x533 a 1500x900 request is
+        clamped to at dpr 2.5, one row reaches **0.4223** and crosses it. So
+        the floor is not unreachable, it is *window-shaped*: it fires on one
+        row in thirty-four at one aspect ratio and on none at another, because
+        the share is a ratio of the subject to a frame whose shape the reader
+        chose. A warning keyed to it would be reporting the size of the window
+        and calling it the size of the pose, which is the one thing a reader
+        looking at a too-small pose must not be told.
+
+        `POSE_SHARE_TARGET` is no use as the floor either, and not because it
+        is high. It is a share of *pixels* -- 1.66%-3.93% over the nine poses,
+        median 2.64% -- calibrated on the whole-pose `fit_view` path, while
+        this is `drawn_fill`: a ratio of lengths against the half-frame.
+        Comparing them would be comparing 0.12 with 0.015, and no row in the
+        sweep is below it in any case (0 of 34 at both geometries, against a
+        floor of 0.015 and a narrowest row of 0.0785 -- 5.2x it).
+
+        Empty before anything has been focused, which is the one state in which
+        there is no number to report: no framing ran, so there is nothing to
+        have measured.
+        """
+        framing = self._last_pair_framing
+        if framing is None:
+            return ""
+        # The leading two spaces are the separator, not decoration: they are
+        # how every other extra report on these lines is set off
+        # (`"  [marker not drawn: ...]"`, `"  |  "`), and putting them here
+        # rather than at each call site is what stops a fourth route from
+        # printing the bracket flush against the sentence before it.
+        return (
+            f"  [framed subject reaches {float(framing.subject_fill) * 100:.2f}% "
+            f"of the half-frame at {float(framing.distance):.1f} A]"
+        )
+
+    def focus_pair(self, self_index: int, partner_index: int) -> bool:  # pragma: no cover - GUI
+        """Move the camera onto one interaction pair. True if it moved.
+
+        Two atoms, centred on their midpoint, at whatever distance holds the
+        *drawn* neighbourhood of the pair in the frame. The distance is a
+        function of the representation for the reason `framing_selection`'s
+        module docstring sets out: the six modes paint 5.7x different amounts of
+        atom at the same coordinates, and a framing that does not know which one
+        is in use cannot know how far back to stand.
+
+        An index that is not in the current pose or receptor leaves the camera
+        alone and says so, the same way `focus_residue` does for a residue with
+        no contacts.
+        """
+        self._cancel_move()
+        receptor = next((m for m in self.molecules if m.role == "receptor"), None)
+        pose = next((m for m in self.molecules if m.role == "pose"), None)
+        if pose is None or receptor is None:
+            return False
+        if not (0 <= int(self_index) < len(pose.coords)):
+            return False
+        if not (0 <= int(partner_index) < len(receptor.coords)):
+            return False
+        self._focus([int(self_index)], [int(partner_index)], receptor)
+        self.update()
+        return True
+
     def focus_residue(self, residue: str) -> bool:  # pragma: no cover - GUI
         """Move the camera onto a residue's contacts. True if it moved.
 
         Zooms to the span of the atoms actually making contact rather than to
         the whole residue, which for a buried side chain is the difference
         between the interaction filling the window and being a few pixels wide
-        in it. A residue with no contacts found leaves the camera alone and says
-        so, rather than jumping somewhere arbitrary.
+        in it, and holds the drawn neighbourhood of those atoms in the frame the
+        same way `focus_pair` does. A residue with no contacts found leaves the
+        camera alone and says so, rather than jumping somewhere arbitrary.
         """
         self._cancel_move()
         pose = next((m for m in self.molecules if m.role == "pose"), None)
         receptor = next((m for m in self.molecules if m.role == "receptor"), None)
         if pose is None or receptor is None:
             return False
-        pts: list[np.ndarray] = []
+        pose_idx: list[int] = []
+        rec_idx: list[int] = []
         for c in self.contacts:
             if c.partner_residue != residue:
                 continue
             if 0 <= c.self_index < len(pose.coords):
-                pts.append(pose.coords[c.self_index])
+                pose_idx.append(c.self_index)
             if 0 <= c.partner_index < len(receptor.coords):
-                pts.append(receptor.coords[c.partner_index])
-        if not pts:
+                rec_idx.append(c.partner_index)
+        if not pose_idx and not rec_idx:
             return False
-        arr = np.asarray(pts, np.float32)
-        self.camera.center = arr.mean(axis=0)
-        radius = float(np.linalg.norm(arr - self.camera.center, axis=1).max())
-        self.camera.distance = max(6.0, radius * 5.0)
+        self._focus(pose_idx, rec_idx, receptor)
         self.update()
         return True
 
@@ -1567,6 +2998,20 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self._receptor_path: Path | None = None
         self._ligand_path: Path | None = None
+        # Where an export goes when the caller does not choose. The working
+        # directory, which is also where this window's screenshots land -- an
+        # export the user cannot find is an export they do not have, and
+        # `dist/exports/` sits beside the rest of what a run leaves behind.
+        self._export_root: Path = Path.cwd()
+        #: The last file `_export_run` wrote, so a caller can ask without
+        #: having to read the status bar. `None` until one has been written,
+        #: which is not the same as "there is nothing to write".
+        self._last_export: Path | None = None
+        #: The pose file the poses came from, when they came from one. Recorded
+        #: because a pose file is the whole provenance of a pose-file session:
+        #: the export can name and hash it, and it is the only thing that
+        #: distinguishes those poses from a run's.
+        self._pose_path: Path | None = None
         self._pose_view: MoleculeView | None = None
         self._pose_models: list[tuple[str, float]] = []
         # The `DockingResult` behind the poses on screen, when there is one. A
@@ -1576,9 +3021,26 @@ class MainWindow(QtWidgets.QMainWindow):
         # intermolecular part away. Keeping the result is what lets the table
         # show the engine's own numbers instead of the file's weaker ones.
         self._dock_result = None
+        # The running search's stage text, and any standing notice to show beside
+        # it. The stage is `DockingWorker.progressed`'s own; the notice is what
+        # `start_docking` sets when a second request is refused, and it has to
+        # outlive the progress messages that would otherwise bury it. See
+        # `_show_dock_progress`.
+        self._dock_stage = ""
+        self._dock_notice = ""
         # Per-pose (hydrogen bonds, contacts, residues), filled for every pose
         # rather than for the selected one. See `_refresh_pose_contacts` for why.
         self._pose_contacts: list[tuple[int, int, int]] = []
+        # The pair table's rows for the **selected** pose, as
+        # `contacts.pair_rows`. One list, rebuilt by `_refresh_contacts`, and
+        # emptied by it too -- so a row can never be read after the contacts it
+        # came from have been replaced. Declared here rather than in
+        # `_build_ui` because the pair table's selection slot can fire before
+        # the first refresh: Qt sends `itemSelectionChanged` when a table is
+        # populated, and an attribute that does not exist yet would raise
+        # inside a slot, which on Windows ends the process with nothing on
+        # stderr.
+        self._pairs: tuple = ()
         # One ghost view per reported pose, built once when the poses load.
         self._pose_ghosts: list = []
         self._pose_ghosts_on = False
@@ -1614,6 +3076,40 @@ class MainWindow(QtWidgets.QMainWindow):
     def _build_ui(self) -> None:  # pragma: no cover - GUI
         panel_widget = QtWidgets.QWidget()
         form = QtWidgets.QFormLayout(panel_widget)
+
+        # **A notice for the case where this panel cannot be shown whole, and
+        # the case is not hypothetical -- but it is no longer this ratio.**
+        # Measured on this machine at dpr 2.5 with the 3-D view's floor at the
+        # 640 it used to carry, where a 1280x820 request is clamped to 770x533
+        # logical by a 1920x1080 device screen: the dock was 126 px, its
+        # viewport 110, the panel's own minimum 495, and the view's minimum 640.
+        # 495 + 640 is 1135 logical px, so at 770 the two could not both be had
+        # and the field column -- which starts at x=122, past the 110 px strip --
+        # was entirely off screen. The strip scrolls, so every control was
+        # *reachable*, and the existing reachability check was right to pass;
+        # what was missing is that nothing said so on screen. A panel that
+        # shows a 110 px slice of its own labels and no controls beside them,
+        # silently, is a defect.
+        #
+        # **With `VIEWPORT_MIN_W` at 240 the panel is whole at that geometry and
+        # this notice is not what the user reads any more**, so the notice is
+        # no longer the fix for the case it was written for -- it is the honest
+        # description of the case that survives, which is a dock dragged down
+        # to its own 77 px minimum or a window narrower than the panel's 495.
+        # Both are real, both are reachable by a gesture, and both are the
+        # question `hbar.maximum() > 0` answers.
+        #
+        # The notice is the first row so that it is at x=0, inside the visible
+        # strip even when the strip is 110 px, and it is hidden outright when
+        # the panel fits, so it costs a wide window nothing.
+        self.panel_notice = QtWidgets.QLabel()
+        self.panel_notice.setWordWrap(True)
+        # Amber, and not the file's `#9aa3ad` secondary grey: a sentence that
+        # says the controls do not fit has to look different from the
+        # sentences that are merely explaining something.
+        self.panel_notice.setStyleSheet("color: #c47f00;")
+        form.insertRow(0, self.panel_notice)
+        self.panel_notice.setVisible(False)
 
         self.cmb_representation = QtWidgets.QComboBox()
         for rep in REPRESENTATIONS:
@@ -2126,6 +3622,45 @@ class MainWindow(QtWidgets.QMainWindow):
         self.contact_table.itemSelectionChanged.connect(self._on_contact_selected)
         form.addRow(self.contact_table)
 
+        # The same interactions one pair at a time. The residue table above
+        # answers "which residues is this pose against"; this one answers "which
+        # two atoms", which is the question a residue name leaves open -- a
+        # glutamine hydrogen-bonds through its backbone amide or through its
+        # side-chain nitrogen, and those are two different interactions.
+        #
+        # Built from the *same* `find_contacts` list the dashed lines are drawn
+        # from, and `Pair.contact_index` is the row's position in it, so a row
+        # and a line are the same contact. A second search could disagree with
+        # the first about what is touching, and then a highlighted row would be
+        # highlighting a line that is not there.
+        self.lbl_pairs = QtWidgets.QLabel("—")
+        self.lbl_pairs.setWordWrap(True)
+        form.addRow("interaction pairs", self.lbl_pairs)
+
+        self.pair_table = QtWidgets.QTableWidget(0, 5)
+        self.pair_table.setHorizontalHeaderLabels(
+            ["pose atom", "receptor atom", "kind", "distance", "term"]
+        )
+        self.pair_table.horizontalHeader().setStretchLastSection(True)
+        self.pair_table.setSelectionBehavior(
+            QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows
+        )
+        self.pair_table.setEditTriggers(
+            QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers
+        )
+        # 150 px like the residue table above, and the panel is inside the
+        # scroll area further down for exactly the reason that height exists.
+        self.pair_table.setMinimumHeight(150)
+        # No shortcut is installed for this table and none is needed: Qt moves
+        # the current row on Up/Down itself and fires `itemSelectionChanged`,
+        # which is the signal a click fires. `workbench/keys.py` lists the two
+        # keys in the map so they are documented, and installs nothing -- a
+        # window-level shortcut for a gesture the focused widget already
+        # answers would be a second path to one behaviour, and the one nobody
+        # would test.
+        self.pair_table.itemSelectionChanged.connect(self._on_pair_selected)
+        form.addRow(self.pair_table)
+
         self.status_label = QtWidgets.QLabel("ready — load a receptor and a ligand")
         self.status_label.setWordWrap(True)
         form.addRow(self.status_label)
@@ -2137,12 +3672,74 @@ class MainWindow(QtWidgets.QMainWindow):
         # contacts table alone is 150 px tall, which is what pushed it over.
         scroll = QtWidgets.QScrollArea()
         scroll.setWidgetResizable(True)
+        # **And scrollable across as well as down, which is the HiDPI case.**
+        # The panel's size hint is 540 px and the viewport's minimum width is
+        # 640 px, so the window needs 1180 logical px to show both without
+        # clipping. At dpr 2.5 a 1920x1080 panel offers 768, the viewport
+        # refuses to go below 640, and the dock is left with about 128 px for
+        # controls whose widest is 484: with the horizontal bar switched off,
+        # every one of them past 126 px was simply not on the screen and not
+        # reachable by any gesture. The 3-D view is the product and a smaller
+        # one is worse than a scrolling control strip, so the viewport's 640
+        # minimum stands and the strip scrolls instead.
+        #
+        # **That last sentence was a decision made for the user, and it was
+        # wrong.** "The 3-D view is the product" is true, and it does not follow
+        # that the *view* should hold the floor while the controls hold none --
+        # least of all when the floor is what stops the user from trading one
+        # for the other. The view's minimum is now `VIEWPORT_MIN_W` (240), which
+        # is what the panel needs at the tight geometry with 14 px to spare, and
+        # the trade is the user's to make on screen. Measured at dpr 2.5: the
+        # panel is whole at 512 px of dock, the tight 770 px window leaves 256,
+        # and the notice is not what the user has to read to get there.
+        #
+        # The scroll area stays, and the notice stays with it, because a window
+        # narrower than the panel's own 495 px is still a real case and is still
+        # the one the notice is for. Measured the same way, the dock's *own*
+        # minimum is 77 px -- Qt's answer, not a choice here -- so the panel can
+        # be dragged down to a strip, and at that width the notice is the honest
+        # description of what is on the screen. Whether the dock should have a
+        # floor of its own is left open on purpose: a hard 512 there raises the
+        # window's minimum to 756, and at dpr 2.5 the screen is 768 wide, so the
+        # product would then be one notch from opening wider than the display
+        # and the notice would have no reachable boundary left to fire on.
+        #
+        # `setWidgetResizable(True)` alone would not do it: with a resizable
+        # child the scroll area shrinks the *widget* to the viewport, and a
+        # `QFormLayout` under that pressure compresses the controls rather than
+        # overflowing, so the minimum width below is what forces a scrollbar to
+        # exist at all. It is the panel's own size hint, not a number picked
+        # for this display.
+        panel_widget.setMinimumWidth(panel_widget.sizeHint().width())
         scroll.setWidget(panel_widget)
         scroll.setHorizontalScrollBarPolicy(
-            QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+            QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded
         )
         dock.setWidget(scroll)
+        #: The scroll area, kept so the gate can ask whether a control is
+        #: *reachable* rather than whether it *fits* -- the two are different
+        #: questions and only the second one is what a fixed panel answers.
+        self.control_scroll = scroll
+        self.control_panel = panel_widget
         self.addDockWidget(QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, dock)
+
+        # The dock's width follows the window's, and the window's width follows
+        # the screen's, so nothing that happens at build time can know whether
+        # the panel will fit. The one event that settles it is the scroll area
+        # being resized, and it fires on every dock drag, window resize and
+        # HiDPI clamp alike.
+        scroll.installEventFilter(self)
+        # Deferred by one event-loop turn, and not decided inside the resize
+        # handler: an event filter runs *before* the widget acts on the event,
+        # so the scroll bar still reports the width the viewport had before
+        # this resize. Read there, the notice is always one resize out of date
+        # -- measured, not reasoned: it reported "no need to scroll" over a
+        # viewport whose bar ran to 385 px, and kept reporting the warning
+        # after the window was widened until the bar was back to zero.
+        self._panel_notice_timer = QtCore.QTimer(self)
+        self._panel_notice_timer.setSingleShot(True)
+        self._panel_notice_timer.timeout.connect(self._update_panel_notice)
+        self._panel_notice_timer.start(0)
 
         menu = self.menuBar().addMenu("File")
         act_rec = menu.addAction("Load receptor…")
@@ -2158,10 +3755,137 @@ class MainWindow(QtWidgets.QMainWindow):
         act_dock = menu.addAction("Dock now")
         act_dock.setShortcut("Ctrl+D")
         act_dock.triggered.connect(self.start_docking)
+        # Kept on the window, and that is the whole reason for the line. It used
+        # to be a local, so `start_docking` could grey out the button and leave
+        # this item live -- a second route into a second search, with the greyed
+        # button as the only hint that anything was running. `_set_dock_enabled`
+        # moves both now, and `start_docking` refuses a second request outright
+        # so the guard does not depend on a widget being disabled.
+        self.act_dock = act_dock
+        # Next to Dock, not down with Quit: taking the run away is the other
+        # half of the same gesture, and a reader who has just pressed Dock
+        # should not have to hunt for it. The `E` key in `workbench/keys.py`
+        # calls the same method, so a menu and a key cannot write two different
+        # files.
+        menu.addSeparator()
+        act_export = menu.addAction("Export run to a file")
+        # **Through a lambda, not straight to `_export_run`.** `QAction.triggered`
+        # emits `checked` -- a bool -- so connecting the method directly passes
+        # `False` into `_export_run`'s first positional parameter, which is
+        # `path`, and `Path(False)` raises. The menu item had therefore never
+        # written anything: it died in the slot, the crash guard ended the
+        # process, and the run reported a failure rather than a file. Found by
+        # the section-15 check in `scripts/workbench_interaction_check.py` that
+        # triggers this item instead of calling the method, for the same reason
+        # the sibling check presses `E` as a key: a wired-looking connection is
+        # not a working one, and the two ways in have to be exercised as the
+        # user reaches them.
+        act_export.triggered.connect(lambda _checked=False: self._export_run())
         menu.addSeparator()
         act_quit = menu.addAction("Quit")
         act_quit.setShortcut("Ctrl+Q")
         act_quit.triggered.connect(self.close)
+
+        # Last, because it resolves handlers against widgets that exist by now
+        # and builds the map card over the viewport.
+        self._install_shortcuts()
+
+    def eventFilter(self, obj, event):  # pragma: no cover - GUI
+        """Keep the panel's width notice honest as the dock is resized.
+
+        Chained to the base implementation, because this is the only filter on
+        this object and a filter that swallowed the event would take the scroll
+        area's own resize handling with it. The work is handed to the single
+        shot timer rather than done here, so that it reads a scroll bar range
+        the resize has already finished producing.
+        """
+        if event.type() == QtCore.QEvent.Type.Resize:
+            self._panel_notice_timer.start(0)
+        return super().eventFilter(obj, event)
+
+    def _update_panel_notice(self) -> None:  # pragma: no cover - GUI
+        """Show the notice exactly when the panel cannot be shown whole.
+
+        The question is the scroll bar's own range and not a width compared
+        against a constant: `maximum() > 0` is Qt's live answer to "is there
+        anything off to the right", and it already accounts for the scroll bar
+        taking its own width out of the viewport, which a comparison against
+        `sizeHint()` would not.
+
+        **The deficit in the sentence is that same range, and it used not to
+        be.** It read `control_panel.minimumSizeHint().width()` less the
+        viewport, which is a different quantity from the one the threshold uses
+        and a smaller one: on this machine `minimumSizeHint` is 491 px while
+        `minimumWidth` -- which is what the panel was actually given, from its
+        own `sizeHint` -- is 495 px. So at a 494 px viewport the notice came up
+        (the bar read 1) and said "they need 0 px more than the panel has". A
+        warning that contradicts its own condition is worse than no warning, and
+        the geometry hid it for as long as the boundary was 385 px wide: 381
+        against 385 is a rounding-shaped error nobody reads. The boundary is
+        two pixels wide now, so a one-pixel bar is an ordinary state and the
+        sentence was wrong in the state users actually see.
+
+        `hbar.maximum()` is the exact number by construction -- it *is*
+        `content width - viewport width`, so adding it to the viewport is what
+        clears the bar -- and it is the same number the threshold is, so the
+        two can no longer disagree.
+
+        Called from the single shot timer, and deliberately not from inside the
+        resize handler: see `eventFilter`.
+        """
+        scroll = getattr(self, "control_scroll", None)
+        if scroll is None:
+            return
+        hbar = scroll.horizontalScrollBar()
+        viewport_w = int(scroll.viewport().width())
+        deficit = int(hbar.maximum())
+        if deficit <= 0 or viewport_w <= 0:
+            self.panel_notice.setVisible(False)
+            self.panel_notice.setText("")
+            self.panel_notice.setMinimumHeight(0)
+            return
+        # Wrapped to the strip that is actually on screen. Left to the layout
+        # the label would wrap at the panel's full width, so at a 110 px
+        # viewport every one of its lines would run off the right-hand edge --
+        # a warning nobody can read is the same defect with extra steps. The
+        # width is the viewport less where this row starts, which is the form's
+        # own left margin, and *not* `mapTo`: this runs before the label has
+        # ever been laid out, and a widget with no geometry yet maps to 0, so
+        # asking it where it is returns an answer four pixels too generous.
+        left = int(self.control_panel.layout().contentsMargins().left())
+        wrap_at = max(1, viewport_w - left - 4)
+        self.panel_notice.setMaximumWidth(wrap_at)
+        # Two numbers and one action, and nothing else. This wraps to
+        # roughly a dozen lines in a 110 px strip, and every one of them costs
+        # a line of control panel below it, so the sentence is kept to the part
+        # that changes what the reader does: how many pixels are missing, and
+        # what can be given up to get them.
+        #
+        # **It no longer blames the window, and it no longer names the 3-D view
+        # as the holder.** Both were true of the old sentence and both stopped
+        # being true when `VIEWPORT_MIN_W` came down: the panel can now be
+        # whole by dragging the splitter at a window the user already has, and
+        # the view's floor is a floor the user is free to spend. A warning that
+        # names a cause the reader can fix by dragging is a warning that sends
+        # them to resize a window the screen will not let them resize.
+        self.panel_notice.setText(
+            f"the controls do not fit: they need {deficit} "
+            f"px more than the panel has, and scroll sideways. Widen the panel "
+            f"or the window -- the 3-D view will give up to its "
+            f"{int(self.viewport.minimumWidth())} px floor."
+        )
+        # **And the height has to be asked for, not waited for.** The form laid
+        # this row out at the label's old `sizeHint`, so narrowing the wrap
+        # width afterwards left the box at the height of the *previous* line
+        # count and the last line of the warning was cut in half -- visible in
+        # the rendered frame at 770x533 and invisible in the geometry, where the
+        # label's width and position were both correct. `heightForWidth` is the
+        # height the same text needs at the same width, so asking it is asking
+        # the label rather than guessing a line count.
+        self.panel_notice.setMinimumHeight(
+            self.panel_notice.heightForWidth(wrap_at))
+        self.panel_notice.setVisible(True)
+        self.control_panel.layout().activate()
 
     def _spin_row(self, form, label, lo, hi, value=0.0):  # pragma: no cover - GUI
         holder = QtWidgets.QWidget()
@@ -2232,6 +3956,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 return
             self._pose_models = [(body, _energy_of(body)) for body in models]
             self._pose_dists = None
+            # Which file these poses came from, for the export's provenance. A
+            # pose-file session has no run behind it, so this path is the only
+            # thing that says where its numbers did and did not come from.
+            self._pose_path = path
             # Attach the result only if it really describes these poses. A
             # result with a different pose count is a different run, and pairing
             # the two would put one run's energy on another's coordinates --
@@ -2885,26 +4613,560 @@ class MainWindow(QtWidgets.QMainWindow):
         self.viewport.show_contacts = self.cb_contacts.isChecked()
         self.viewport.update()
 
-    def _refresh_contacts(self) -> None:  # pragma: no cover - GUI
-        """Recompute the pose/receptor interface and refill the table.
+    def _export_run(self, path=None):  # pragma: no cover - GUI
+        """Write the whole run to one file, and say where it went.
 
-        Called whenever either side changes, so the numbers in the table always
+        Three cases and three different answers, because one of them is the
+        failure this project keeps making in a new costume:
+
+        * **no pose at all** -- refused with the reason, and **nothing written**.
+          A file whose pose list is empty is a run that found nothing, and a
+          window nobody has used yet must not be able to produce one;
+        * **poses from a file** -- written, with every number the engine did not
+          produce carried as ``null`` plus a state plus the sentence saying why.
+          A pose file holds coordinates and not a run's own numbers, and an
+          export that left those fields out would be read as an export in which
+          they had been fine;
+        * **a run** -- written, with the provenance that makes it reproducible:
+          backend, seed, box, exhaustiveness, scoring, and the sha256 of both
+          input files. And with the run's own warnings: the receptor's
+          unrecognised-atom count travels as a record beside the receptor's path
+          and hash, and a non-zero one also travels as a sentence in the file's
+          top-level `warnings`, because a count whose consequence is nowhere in
+          the document is a number, not a warning. A count the engine build does
+          not export is recorded as *absent* and listed in `absent` -- never as a
+          zero, which would be a claim about a receptor the file never read.
+
+        No file dialog. A dialog is a second thing to test and a second thing to
+        get wrong on a machine with no display, and the answer here is a path
+        that is printed in full in the status bar and can be passed in by a
+        caller who wants somewhere else.
+        """
+        import hashlib
+
+        from .export import (
+            ExportUnavailable,
+            PoseRecord,
+            default_export_path,
+            number,
+            run_export,
+            unrecognised_atom_types,
+            write_export,
+        )
+        from .contacts import find_contacts, pair_rows, residue_summary
+        from . import pose_trust as pt
+        from .. import core
+
+        if not self._pose_models:
+            self.statusBar().showMessage(
+                "nothing was written: there is no pose loaded, and a file with "
+                "an empty pose list is a run that found nothing rather than a "
+                "window that has not been used",
+                8000,
+            )
+            return None
+
+        receptor_view = next(
+            (m for m in self.viewport.molecules if m.role == "receptor"), None
+        )
+        result = self._dock_result
+        n = len(self._pose_models)
+        from_file = result is None
+
+        def digest(p):
+            if p is None:
+                return ""
+            try:
+                return hashlib.sha256(Path(p).read_bytes()).hexdigest()
+            except OSError as exc:
+                return f"unreadable: {exc}"
+
+        def jsonable(v):
+            """Whatever the engine handed back, in a shape JSON can hold.
+
+            `DockingResult.summary()` is the engine's own, and it is a list of
+            lines rather than a mapping; `gpu_status()` and
+            `available_backends()` have changed shape across builds. An export
+            that raised on an unfamiliar summary would make the whole run
+            unexportable the day the engine grew a field, so the value is
+            converted instead -- and a type this cannot recognise is carried as
+            its own `str`, which is visible as such rather than silently
+            dropped.
+            """
+            if isinstance(v, dict):
+                return {str(k): jsonable(x) for k, x in v.items()}
+            if isinstance(v, (list, tuple, set)):
+                return [jsonable(x) for x in v]
+            if isinstance(v, (bool, int, float, str)) or v is None:
+                return v
+            return str(v)
+
+        records = []
+        for i in range(n):
+            view = (self._pose_ghosts[i]
+                    if i < len(self._pose_ghosts) else None)
+            coords = tuple(
+                (float(x), float(y), float(z))
+                for x, y, z in (view.coords if view is not None else ())
+            )
+            found = (find_contacts(view, receptor_view)
+                     if view is not None and receptor_view is not None else [])
+            pairs = (pair_rows(found, view.residue_labels())
+                     if view is not None else ())
+
+            # The breakdown, because the verdict's `out_of_box_penalty` comes
+            # out of it and a verdict without the penalty is a *different*
+            # verdict -- `inside the box` reads unmeasured instead of holds.
+            breakdown = None
+            terms = None
+            terms_state = "not_run"
+            terms_because = ""
+            if result is not None and self._terms_evaluator is not None:
+                try:
+                    # `breakdown(result, index)`, the same two arguments the
+                    # panel's own worker passes, so the export's terms and the
+                    # panel's terms come from one call shape rather than two.
+                    breakdown = self._terms_evaluator.breakdown(result, i)
+                    terms = {name: float(v) for name, _k, v in breakdown.terms}
+                    terms_state = "measured"
+                except Exception as exc:  # noqa: BLE001 - reported, not raised
+                    terms_state = "unmeasured"
+                    terms_because = str(exc)
+            elif result is None:
+                terms_state = "unmeasured"
+                terms_because = (
+                    "these poses came from a file, and a pose file carries "
+                    "coordinates rather than the conformation the engine's "
+                    "decomposition is keyed on"
+                )
+            else:
+                terms_because = (
+                    "the term maps for this box have not been built, so the "
+                    "engine has not been asked to decompose this pose"
+                )
+
+            penalty = (None if breakdown is None
+                       else float(breakdown.out_of_box_penalty))
+            verdict = (pt.describe_file_pose(i, n) if from_file
+                       else pt.describe_pose(
+                           result, i, out_of_box_penalty=penalty,
+                           penalty_pose_index=i if penalty is not None else None))
+
+            if from_file:
+                affinity = number(
+                    self._pose_energy(i), source="read out of the pose file, "
+                    "not reported by the engine")
+                rmsd = number(
+                    self._pose_rmsd(i),
+                    source="computed by the workbench from these poses' own "
+                           "coordinates; the file did not record it")
+                inter = number(
+                    None, "a pose file does not record the intermolecular part "
+                    "of the energy, and it is not a number this window can "
+                    "recover", state="not_run")
+            else:
+                affinity = number(float(result.energies[i]),
+                                  source="the engine's affinity for this pose")
+                rmsd = number(float(result.rmsds[i]),
+                              source="the engine's rmsd to the best pose")
+                inter = number(float(result.intermolecular_energies[i]),
+                               source="the engine's intermolecular energy")
+
+            records.append(PoseRecord(
+                index=i,
+                coords=coords,
+                coords_source=(
+                    "the coordinates this window holds for the pose, which are "
+                    "the ones it drew and the ones written into its pose "
+                    "PDBQT at three decimal places. The engine's own float32 "
+                    "values are finer than the picture, and exporting the "
+                    "picture's is what makes these the pose a reader can check"
+                ),
+                affinity=affinity,
+                rmsd=rmsd,
+                intermolecular=inter,
+                terms=terms,
+                terms_state=terms_state,
+                terms_because=terms_because,
+                verdict={
+                    "trust": verdict.trust,
+                    "summary": verdict.summary,
+                    "why": verdict.why,
+                    "from_pose_file": bool(verdict.from_file),
+                    "contracts": [
+                        {
+                            "name": r.name,
+                            "state": r.state,
+                            "measured": r.measured,
+                            "threshold": r.threshold,
+                            "because": r.because,
+                            "remedy": r.remedy,
+                            "remedy_kind": r.remedy_kind,
+                            "source": r.source,
+                            "family": r.family,
+                        }
+                        for r in verdict.rows
+                    ],
+                    "supplied": list(verdict.supplied),
+                    "absent": list(verdict.absent),
+                    "misspelled": list(verdict.misspelled),
+                },
+                residue_rows=tuple(
+                    (r, int(hb), int(total), float(closest))
+                    for r, hb, total, closest in residue_summary(found)
+                ),
+                pair_rows=tuple(
+                    (p.pose_atom, p.receptor_atom, p.kind, float(p.distance),
+                     float(p.angle), p.term)
+                    for p in pairs
+                ),
+                contacts_count=len(found),
+            ))
+
+        centre = tuple(float(s.value()) for s in self.center_spins)
+        size = tuple(float(s.value()) for s in self.size_spins)
+        # The receptor's unrecognised-atom count, and the sentence that says what
+        # a non-zero one does to every number in the file. The engine prints
+        # this as a `WARNING:` line in `summary()` and the panel shows the run's
+        # own summary, so the window speaks it -- and the exported file is the
+        # artifact somebody actually takes away. A file that omits it is clean
+        # on the one run the window just told the user was not.
+        #
+        # The read cannot be `result.unknown_atom_types` bare: the shared binary
+        # in a checkout is routinely older than the engine source, and the
+        # property then raises `AttributeError` on the last step of a long run.
+        # `unrecognised_atom_types` turns that into a recorded state, so the
+        # file is written and says the count is absent.
+        unknown_atoms, unknown_warning = unrecognised_atom_types(
+            result,
+            source="the engine's own count of receptor atoms whose PDBQT type "
+                   "it did not recognise",
+        )
+        if result is None:
+            run_summary = {
+                "text": "", "state": "not_run",
+                "because": ("these poses came from a file, so there is no run "
+                            "behind them to summarise"),
+            }
+        else:
+            try:
+                # `summary()` returns ONE newline-joined string, so this field
+                # is a string and is called `text`. It was called `lines` in the
+                # first version of this record and a probe read 408 "lines"
+                # from it, which is `list()` over a string: 408 characters. A
+                # field whose name lies about its type is the same defect as a
+                # number whose value lies about its state.
+                run_summary = {
+                    "text": jsonable(result.summary()),
+                    "state": "measured", "because": "",
+                }
+            except Exception as exc:  # noqa: BLE001 - reported, not raised
+                # `jsonable` above is written for exactly this hazard -- "an
+                # export that raised on an unfamiliar summary would make the
+                # whole run unexportable the day the engine grew a field" -- and
+                # it converts a value it does not recognise. It cannot help when
+                # the *call* raises, and the call now does on any engine build
+                # older than the WARNING line `summary()` prints, because that
+                # line reads a field the binary has no method for. Measured on
+                # this checkout's own `_dockpy.pyd`: `_export_run` exited 70 at
+                # this very line, on the last step of a long run, over a field
+                # that exists to make the file *more* honest. So the call is
+                # wrapped and its failure is recorded like every other absence
+                # in this document, which is also the honest thing: a summary
+                # that could not be produced is not a summary with no lines.
+                run_summary = {
+                    "text": "", "state": "absent",
+                    "because": (
+                        f"the engine build that produced this run could not "
+                        f"produce its own summary "
+                        f"({type(exc).__name__}: {exc}). That is a property of "
+                        f"the build, not of this run, and it is not a claim "
+                        f"that the run was clean"
+                    ),
+                }
+        provenance = {
+            "engine_version": jsonable(core.engine_version()),
+            "backends_available": jsonable(list(core.available_backends())),
+            "gpu": jsonable(core.gpu_status()),
+            "scoring": self.cb_scoring.currentText(),
+            "seed": int(self.sp_seed.value()),
+            "exhaustiveness": int(self.sp_exhaust.value()),
+            "box_centre": list(centre),
+            "box_size": list(size),
+            "box_is": "the search box as the window holds it now, which is "
+                      "the one the run used unless the spins were moved after it",
+            "poses_source": ("read from a pose file; there is no run behind "
+                             "them" if from_file else
+                             "a docking run in this window"),
+            "receptor": {
+                "path": str(self._receptor_path or ""),
+                "sha256": digest(self._receptor_path),
+                "atoms": (len(receptor_view.coords)
+                          if receptor_view is not None else 0),
+                "unknown_atom_types": unknown_atoms,
+            },
+            "ligand": {
+                "path": str(self._ligand_path or ""),
+                "sha256": digest(self._ligand_path),
+            },
+            "run_summary": run_summary,
+            "elapsed_seconds": (float(result.elapsed_seconds)
+                                if result is not None else None),
+            "pose_count_reported": (int(result.raw_pose_count)
+                                    if result is not None else None),
+            "pose_count_rejected": (int(result.rejected_pose_count)
+                                    if result is not None else None),
+        }
+        if from_file and self._pose_path is not None:
+            provenance["pose_file"] = {
+                "path": str(self._pose_path),
+                "sha256": digest(self._pose_path),
+            }
+
+        # The index of what is *absent*, at the top of the document rather than
+        # only inside nine pose objects. The per-field records already carry
+        # it; this is the part a reader can read without walking the file, and
+        # the reason the omission is not silent is that it is *listed*.
+        absent_index = []
+        # One entry is not per-pose, and it is here rather than above because
+        # `absent_index` is what the document indexes. A count the engine build
+        # does not export is the absence most likely to be misread as a clean
+        # zero, so it is listed like any other -- with `"pose": None`, which is
+        # what says "this is about the run, not about one of its nine poses".
+        if unknown_atoms["state"] != "measured":
+            absent_index.append({
+                "pose": None, "field": "provenance.receptor.unknown_atom_types",
+                "state": unknown_atoms["state"],
+                "because": unknown_atoms["because"],
+            })
+        if run_summary["state"] != "measured":
+            absent_index.append({
+                "pose": None, "field": "provenance.run_summary",
+                "state": run_summary["state"], "because": run_summary["because"],
+            })
+        for rec in records:
+            for field_name, payload in (
+                ("affinity_kcal_per_mol", rec.affinity),
+                ("rmsd_to_best", rec.rmsd),
+                ("intermolecular_kcal_per_mol", rec.intermolecular),
+            ):
+                if payload["state"] != "measured":
+                    absent_index.append({
+                        "pose": rec.index, "field": field_name,
+                        "state": payload["state"], "because": payload["because"],
+                    })
+            if rec.terms_state != "measured":
+                absent_index.append({
+                    "pose": rec.index, "field": "energy_terms",
+                    "state": rec.terms_state, "because": rec.terms_because,
+                })
+            for c in rec.verdict["contracts"]:
+                if c["state"] == "unmeasured":
+                    absent_index.append({
+                        "pose": rec.index,
+                        "field": f"verdict.{c['name']}",
+                        "state": "unmeasured", "because": c["because"],
+                    })
+
+        try:
+            record = run_export(provenance=provenance, poses=tuple(records),
+                                selected_pose=int(self._current_pose),
+                                absent=tuple(absent_index),
+                                warnings=((unknown_warning,)
+                                          if unknown_warning else ()),
+                                notes=(f"written by the workbench from a window "
+                                       f"whose selected pose was "
+                                       f"{self._current_pose}",))
+        except ExportUnavailable as exc:
+            self.statusBar().showMessage(f"nothing was written: {exc}", 8000)
+            return None
+
+        target = Path(path) if path is not None else default_export_path(
+            self._export_root, scoring=self.cb_scoring.currentText(),
+            seed=int(self.sp_seed.value()), poses=n,
+            source="poses" if from_file else "run")
+        try:
+            written = write_export(record, target)
+        except (OSError, ValueError) as exc:
+            self.statusBar().showMessage(f"the export failed: {exc}", 8000)
+            return None
+        size_kb = written.stat().st_size / 1024.0
+        # The warning is in the status bar as well as in the file, and it is
+        # named in the message rather than left to be found: the file is what
+        # gets taken away, and a count in it that nobody was told to look at is
+        # the same silence one layer up.
+        self.statusBar().showMessage(
+            f"exported {n} pose(s) to {written} ({size_kb:.0f} kB, "
+            f"{len(absent_index)} field(s) absent and listed"
+            + (f"; WARNING: {unknown_warning}" if unknown_warning else "")
+            + ")",
+            12000
+        )
+        self._last_export = written
+        return written
+
+    def _key_export(self, _spec=None) -> None:  # pragma: no cover - GUI
+        """The `E` key: write the run out. One action, so the key is the action.
+
+        Declared in `workbench/keys.py` like every other key here, and it calls
+        the same `_export_run` the File menu does -- so a key and a click cannot
+        write two different files.
+
+        **`_spec` is not optional decoration.** Every handler here is called by
+        `_key_activated` as `handler(spec)`, and a handler written with no
+        parameter is a handler that raises `TypeError` the first time anybody
+        presses its key. It did: the export key had never been pressed by
+        anything, because every other letter-key check in
+        `scripts/workbench_interaction_check.py` pressed the eight letters that
+        existed before it and section 13's sweep did not grow to nine. The
+        crash was found by the section-15 check that presses `E` as a real key
+        rather than calling the method, which is the only reason to press a key
+        in a gate at all. The default keeps a direct call working, and the
+        signature is the one the dispatcher uses either way.
+        """
+        self._export_run()
+
+    def _keys_dock_enabled(self, spec) -> tuple[bool, str]:  # pragma: no cover
+        """Whether `K` can do anything right now, and if not, which of the three.
+
+        Three separate reasons rather than one "not yet": a window with no
+        receptor, a window with no ligand, and a window with a search already in
+        flight are three different situations, and a map that said "unavailable"
+        for all three would leave a reader to guess which one they were looking
+        at. The third is the one this round added -- before it, the key would
+        have been offered while a search was running and pressing it would have
+        started a second one.
+        """
+        missing = [what for what, have in (("receptor", self._receptor_path),
+                                           ("ligand", self._ligand_path))
+                   if not have]
+        if missing:
+            return False, f"load a {' and a '.join(missing)} first"
+        if self._dock_running():
+            return False, ("a search is already running; wait for it to finish "
+                           "rather than starting a second")
+        return True, ""
+
+    def _dock_running(self) -> bool:
+        """Is a search in flight *right now*, asked as a question.
+
+        `self._thread` is not the answer on its own: it is a slot that
+        `start_docking` overwrites, and between one search finishing and the next
+        being started it is briefly `None` with work still arriving. So this asks
+        the thread, and the answer is what both the button and the menu item are
+        disabled from.
+        """
+        thread = self._thread
+        return thread is not None and thread.isRunning()
+
+    def _show_dock_progress(self, stage: str) -> None:  # pragma: no cover - GUI
+        """The label, with any standing notice shown beside the stage.
+
+        One channel, two facts. The stage alone cannot carry the notice, because
+        the stage keeps arriving and would bury it; the notice alone would hide
+        which stage the search is at, which is the thing a user waiting on a
+        multi-second search most wants to know.
+        """
+        self._dock_stage = stage
+        self.status_label.setText(
+            f"{stage}  |  {self._dock_notice}" if self._dock_notice else stage
+        )
+
+    def _set_dock_enabled(self, on: bool) -> None:  # pragma: no cover - GUI
+        """The button and the menu item, together.
+
+        Only the button used to move, and `act_dock` was a local in the menu
+        builder, so nothing in the window could reach it. That made File > Dock
+        now a live route into a second search while the first was running: the
+        button was greyed out, the menu was not, and the greyed-out button was
+        the only sign that anything was happening. Two ways in, one of them
+        hidden -- so the two are stored together and moved together, and
+        `start_docking` refuses a second request regardless, because a greyed-out
+        widget is a courtesy and a guard is a rule.
+        """
+        self.btn_dock.setEnabled(on)
+        act = getattr(self, "act_dock", None)
+        if act is not None:
+            act.setEnabled(on)
+
+    def _key_dock(self, _spec=None) -> None:  # pragma: no cover - GUI
+        """The `K` key: run the search for the box in the panel.
+
+        One method, three routes: this key, File > Dock now (and `Ctrl+D`), and
+        the Dock button. They are not three features that happen to agree -- they
+        are one call, and the check that proves it presses the key and clicks the
+        item and watches the poses arrive, because this window has already had
+        two gestures that were wired and did nothing, and a wired connection is
+        not a working one.
+
+        `_spec` is required by the dispatcher, which calls handlers as
+        `handler(spec)`; the default keeps a direct call working.
+        """
+        self.start_docking()
+
+    def _refresh_contacts(self) -> None:  # pragma: no cover - GUI
+        """Recompute the pose/receptor interface and refill both tables.
+
+        Called whenever either side changes, so the numbers in the tables always
         belong to the pose on screen. An empty table is only ever shown together
         with a reason: "no receptor" and "nothing touches" are different facts
         and the panel says which one it is.
+
+        Both tables are filled from **one** `find_contacts` call. That is the
+        whole reason the pair table is not a second search: two searches can
+        disagree about what is touching, and a row whose contact the dashed
+        lines do not contain is a row that highlights nothing.
+
+        The selection does not survive this call, and that is deliberate. A
+        refresh means the pose on screen changed (or was cleared), so a selected
+        pair from the previous pose is a pair that belongs to a molecule no
+        longer on screen. The highlight is dropped here rather than in the
+        selection handler, so *any* path that empties the table also empties the
+        highlight -- one place, not one per caller.
         """
-        from .contacts import find_contacts, residue_summary
+        from .contacts import PAIR_TERM_NOTE, find_contacts, pair_rows, residue_summary
+        from . import COLOR_CONTACT, CONTACT_LABELS
 
         pose = next((m for m in self.viewport.molecules if m.role == "pose"), None)
         receptor = next(
             (m for m in self.viewport.molecules if m.role == "receptor"), None
         )
 
+        self._pairs = ()
         self.contact_table.setRowCount(0)
+        # `setRowCount(0)` on **both** tables, before either is refilled, and the
+        # residue table above is not given a `clearSelection()` of its own
+        # because it does not need one. That looked like an oversight for a
+        # while -- the zeroing was added for the pair table, where leaving row 0
+        # selected across a pose change would have meant a *new* pose's row 0
+        # drawn as chosen with nothing highlighted -- and it was written up as a
+        # deliberate difference between the two tables. It is not: measured on
+        # Qt 6.11, `setRowCount` keeps a selected row 0 when the new count still
+        # covers it (7->9 and 9->4 both keep it) and drops it at 9->0, and this
+        # is the 9->0. So the residue selection is dropped by the empty pass too,
+        # for the same reason and without the extra line.
+        #
+        # The consequence is a constraint rather than a convenience, and it is
+        # written out in `workbench/contacts.py` under "A limit, recorded
+        # because it was measured rather than assumed": a refactor that refilled
+        # the residue table in place instead of emptying it would begin
+        # retaining rows across a pose change, and the day the residue selection
+        # grows a highlighting behaviour that would be a claim about the
+        # previous pose. Section 14 of `scripts/workbench_interaction_check.py`
+        # measures the selection across the change on every run and asserts the
+        # load-bearing half -- the residue path touches no highlight state.
+        self.pair_table.clearSelection()
+        self.pair_table.setRowCount(0)
+        self.viewport.highlight_pair = None
         if pose is None or receptor is None:
             self.viewport.contacts = []
             self.viewport.contacts_valid = False
             self.lbl_contacts.setText("load a receptor and a pose")
+            self.lbl_pairs.setText(
+                "no pairs: a pair is one pose atom against one receptor atom, "
+                "and there is not a pose and a receptor both on screen yet"
+            )
+            self.viewport.update()
             return
 
         found = find_contacts(pose, receptor)
@@ -2924,8 +5186,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lbl_contacts.setText("  |  ".join(parts))
 
         self.contact_table.setRowCount(len(summary))
-        from . import COLOR_CONTACT
-
         for row, (residue, hbonds, total, closest) in enumerate(summary):
             # The residue cell carries the colour of its strongest contact, so
             # the table and the picture agree without a second lookup: the row
@@ -2949,7 +5209,168 @@ class MainWindow(QtWidgets.QMainWindow):
                 else:
                     item.setForeground(QtGui.QBrush(QtGui.QColor(0xC8, 0xCE, 0xD6)))
                 self.contact_table.setItem(row, col, item)
+
+        # -- the pair table, from the same list ---------------------------
+        # The pose's own residue labels, resolved once. `find_contacts` resolved
+        # them too and threw them away, and this asks the molecule rather than
+        # the contacts for them because the contacts do not carry the pose side:
+        # `Contact` names `partner_residue` because the residue table reads from
+        # the protein's point of view, and the pair table has to name both.
+        labeler = getattr(pose, "residue_labels", None)
+        pose_residues = list(labeler()) if callable(labeler) else []
+        pairs = pair_rows(found, pose_residues)
+        self._pairs = pairs
+        self.pair_table.setRowCount(len(pairs))
+        for row, pair in enumerate(pairs):
+            r, g, b = (int(round(v * 255))
+                       for v in COLOR_CONTACT.get(pair.kind,
+                                                   COLOR_CONTACT["close"]))
+            cells = [
+                pair.pose_atom,
+                pair.receptor_atom,
+                CONTACT_LABELS.get(pair.kind, pair.kind),
+                pair.distance_text,
+                pair.term or "—",
+            ]
+            for col, text in enumerate(cells):
+                item = QtWidgets.QTableWidgetItem(text)
+                if col == 2:
+                    # The kind cell wears the legend's colour, so the row and
+                    # the line in the picture are recognisably the same class
+                    # of interaction without the reader matching words.
+                    item.setForeground(QtGui.QBrush(QtGui.QColor(r, g, b)))
+                else:
+                    item.setForeground(
+                        QtGui.QBrush(QtGui.QColor(0xC8, 0xCE, 0xD6))
+                    )
+                item.setToolTip(pair.tooltip())
+                self.pair_table.setItem(row, col, item)
+        if pairs:
+            self.lbl_pairs.setText(
+                f"{len(pairs)} pairs, one row each, in the order the dashed "
+                f"lines are drawn.  {PAIR_TERM_NOTE}"
+            )
+        else:
+            # The one case where an empty pair table is a fact rather than a
+            # failure: nothing came within 4.0 A, so there is no pair to name.
+            # Said out loud, because an empty table under a heading that claims
+            # to list interactions reads as a bug until it says otherwise.
+            self.lbl_pairs.setText(
+                f"no pairs: nothing on this pose came within "
+                f"{4.0:.1f} A of the receptor, so there is no atom pair to "
+                f"list.  {PAIR_TERM_NOTE}"
+            )
         self.viewport.update()
+
+    def _on_pair_selected(self) -> None:  # pragma: no cover - GUI
+        """Highlight the selected pair, frame it, and say which pair it is.
+
+        Connected to `itemSelectionChanged`, which is the signal **both** a
+        click and the table's own `Up`/`Down` fire. That is the whole keyboard
+        story and it is deliberately not a shortcut: one signal, one slot, so
+        the key and the mouse cannot reach two different behaviours, and
+        `workbench/keys.py` documents the two keys without installing anything.
+
+        The highlight is the pair's two **atom indices**, not its row, so what
+        gets drawn is what the row says: the atom the first cell names against
+        the atom the second cell names.
+        """
+        from . import CONTACT_LABELS
+
+        model = self.pair_table.selectionModel()
+        rows = model.selectedRows() if model is not None else []
+        if not rows:
+            return
+        row = int(rows[0].row())
+        if not 0 <= row < len(self._pairs):
+            return
+        pair = self._pairs[row]
+        contact = (self.viewport.contacts[pair.contact_index]
+                   if 0 <= pair.contact_index < len(self.viewport.contacts)
+                   else None)
+        if contact is None:
+            # The row and the picture have come apart, which is the one state
+            # where a highlight would be a line between two atoms nobody chose.
+            # Say so rather than drawing something plausible.
+            self.viewport.highlight_pair = None
+            self.statusBar().showMessage(
+                "that pair is not among the contacts being drawn", 4000
+            )
+            return
+        self.viewport.highlight_pair = (int(contact.self_index),
+                                        int(contact.partner_index))
+        self.viewport.focus_pair(int(contact.self_index),
+                                 int(contact.partner_index))
+        self.viewport.update()
+        message = (
+            f"pair {row + 1} of {len(self._pairs)}: "
+            f"{pair.pose_atom} -> {pair.receptor_atom}, "
+            f"{CONTACT_LABELS.get(pair.kind, pair.kind)}, "
+            f"{pair.distance_text}"
+        )
+        # **And say so when the marker cannot be drawn.** The selection is
+        # real, the row is the row, and the pair table is about to show it
+        # highlighted -- but at a camera where the segment points nearly at the
+        # viewer the rasteriser resolves nothing, while every word above still
+        # reads as though something is now marked. That is the same defect as a
+        # gate that cannot go red: the state is real and unreported. The
+        # question is asked through the same `marker_drawable` the draw uses, so
+        # the bar cannot claim a marker `_pair_quad` then declines to submit.
+        #
+        # **The two floors are named separately, because they fail for
+        # different reasons and a reader needs different advice for each.** A
+        # marker refused for area is too small to cover a pixel at all; one
+        # refused for length has area to spare and no extent along its own
+        # axis, which is the near-end-on case and the one a reader is most
+        # likely to walk into by orbiting.
+        seg = self.viewport.pair_screen_segment()
+        if seg is not None and not marker_drawable(seg):
+            length = float(seg["length"])
+            area = _projected_area_px2(seg)
+            if not marker_length_ok(seg):
+                why = (f"it is {length:.3g} px long on screen and less than "
+                       f"one pixel of that is anything a reader can see; "
+                       f"rotate to see it side-on")
+            elif not marker_area_ok(seg):
+                why = (f"it covers {area:.3g} px^2, too little to cover a "
+                       f"pixel from this camera; rotate or zoom to see it")
+            else:  # pragma: no cover - unreachable while the two halves agree
+                why = "it is too small to draw from this camera"
+            message += (f"  [marker not drawn: {length:.3g} px long on screen, "
+                        f"{float(seg['width']):.3g} px wide, {area:.3g} px^2 "
+                        f"of area -- {why}]")
+        # **And say so when the marker is most of the picture.** The rod is
+        # drawn, honestly, at whatever width the projection gives it: at 2 A
+        # from a bond it is 81.18 px wide and 1940 px long and its declared
+        # rectangle is 14.14% of the frame, and a reader looking at a magenta
+        # wall cannot tell that from a fault. Nothing is refused -- the camera
+        # is the reader's own choice and the geometry is right -- but the bar
+        # names the number, because the alternative is a status line that is
+        # silent about the one thing about the picture that is surprising.
+        #
+        # **The number is named, because there are two of them.** This is the
+        # *declared* share -- the projected area of the marker's own rectangle
+        # over this framebuffer, a projection fact. The *drawn* share, the
+        # pixels the rod actually owns, is a rasterisation fact and is smaller
+        # and unstable, because a 1940 px rod only lands part of itself inside
+        # a 989 px frame and how much depends on its screen angle; the two
+        # differ by up to 2x. Two decimals rather than none, so this line, the
+        # strip's caption and the constant's own comment can be checked against
+        # each other instead of merely agreeing to a significant figure.
+        elif seg is not None:
+            fw, fh = (int(v) for v in seg.get("size", (0, 0)))
+            if fw > 0 and fh > 0:
+                share = _projected_area_px2(seg) / float(fw * fh)
+                if share >= PAIR_MARKER_FRAME_WARN:
+                    message += (f"  [the marker's own rectangle is "
+                                f"{share * 100:.2f}% of this {fw}x{fh} frame "
+                                f"at this distance -- its projected area, not "
+                                f"the pixels it paints, which are fewer -- it "
+                                f"is drawn because that is where the pair is, "
+                                f"so zoom out to see the rest of the pose]")
+        self.statusBar().showMessage(
+            message + self.viewport._framed_subject_note(), 4000
+        )
 
     def _on_contact_selected(self) -> None:  # pragma: no cover - GUI
         rows = self.contact_table.selectionModel().selectedRows() if self.contact_table.selectionModel() else []
@@ -2960,7 +5381,11 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         residue = item.data(QtCore.Qt.ItemDataRole.UserRole)
         self.viewport.focus_residue(residue)
-        self.statusBar().showMessage(f"centred on {residue}", 4000)
+        self.statusBar().showMessage(
+            f"centred on {residue}"
+            + self.viewport._framed_subject_note(),
+            4000,
+        )
 
     def _on_representation(self) -> None:  # pragma: no cover - GUI
         """Switch how the scene is drawn, and say what that means for the bonds.
@@ -3499,6 +5924,331 @@ class MainWindow(QtWidgets.QMainWindow):
         # overlays are drawn into.
         self._frame_selection()
         self.viewport.update()
+        # The map, if it is open, is showing which keys can act -- and stepping to
+        # a pose is exactly the moment that answer changes. One call that
+        # returns immediately when the map is closed, so the key path does not
+        # grow a cost the mouse path does not have.
+        self._keys_refresh_map()
+
+    # -- Keyboard ----------------------------------------------------------
+    # Everything below is one feature: the window answers keys, and one of them
+    # prints what it answers. The table in `workbench/keys.py` is the contract
+    # -- every key, its group, what it does and what has to be true for it to
+    # act -- and the map is rendered from that same table, so a key cannot exist
+    # without being documented.
+    #
+    # The pose steppers are the reason this is not a bag of shortcuts. They go
+    # through `setCurrentCell`, which is what a click on a row goes through, so
+    # the pose a key gives is the pose a click gives -- same framing, camera,
+    # overlays, breakdown and verdict -- and that is a property of the route
+    # rather than a claim a check has to keep re-earning.
+    #
+    # Measured on this machine before any of it was written, because the
+    # behaviour a key meets depends on what has focus and that is not something
+    # to guess at: with the pose table focused, `Up` and `Down` moved the
+    # selection (the table's own keys) while `Left` and `Right` did *not* --
+    # `Right` moved the current *column* from 0 to 1 and left the pose alone --
+    # and with the viewport, the window, the display combo or a spin box
+    # focused, all four arrows did nothing at all. So the steppers are
+    # registered as window shortcuts, which is the only level that reaches all
+    # five, and whether they actually beat the table's own handling is measured
+    # in `scripts/workbench_interaction_check.py` rather than assumed from how
+    # Qt is documented to dispatch shortcuts.
+    ROTATE_STEP = 0.35  # radians per press, about 20 degrees
+
+    def _install_shortcuts(self) -> None:  # pragma: no cover - GUI
+        """Wire the table in `workbench/keys.py` to real `QShortcut` objects.
+
+        `keys.resolve` is called first and raises if the table names a handler
+        this window does not have, so a typo is a window that refuses to open
+        rather than a key that silently does nothing.
+        """
+        from . import keys as keymap
+
+        self._key_bound = keymap.resolve(self)
+        self._key_specs: dict[QtGui.QShortcut, object] = {}
+        self._key_shorts: list[QtGui.QShortcut] = []
+        context = QtCore.Qt.ShortcutContext.WindowShortcut
+        for spec in keymap.SHORTCUTS:
+            if not spec.handler:
+                continue  # the table's own key, listed but not installed here
+            for key in spec.keys:
+                sequence = QtGui.QKeySequence(key)
+                if sequence.isEmpty():
+                    raise ValueError(
+                        f"the shortcut table names {key!r} for {spec.action}, "
+                        f"which Qt does not recognise as a key sequence"
+                    )
+                short = QtGui.QShortcut(sequence, self)
+                short.setContext(context)
+                short.activated.connect(
+                    lambda s=short, sp=spec: self._key_activated(s, sp)
+                )
+                self._key_specs[short] = spec
+                self._key_shorts.append(short)
+        self._build_keys_overlay()
+
+    def _build_keys_overlay(self) -> None:  # pragma: no cover - GUI
+        """The map, as a card over the 3D view. No layout is disturbed.
+
+        Over the viewport and not in the sidebar: the sidebar's contents already
+        ask for more width than the dock gives them (816 px of minimum against a
+        416 px viewport, measured), and a panel that widens the one column the
+        reader is already squeezing is not a shortcut map, it is a second
+        layout problem. A layout on the viewport with the card centred keeps it
+        in the middle of the picture at any window size, with no resize handler.
+        """
+        from . import keys as keymap
+
+        card = QtWidgets.QFrame(self.viewport)
+        card.setObjectName("keymap_card")
+        card.setStyleSheet(
+            "QFrame#keymap_card { background: #ffffff; border: 1px solid #b0b0b0; }"
+        )
+        label = QtWidgets.QLabel(card)
+        label.setTextFormat(QtCore.Qt.TextFormat.RichText)
+        label.setWordWrap(True)
+        label.setStyleSheet("color: #1a1a1a; font-size: 12px;")
+        inner = QtWidgets.QVBoxLayout(card)
+        inner.setContentsMargins(14, 12, 14, 12)
+        inner.addWidget(label)
+        layout = QtWidgets.QVBoxLayout(self.viewport)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(card, 0, QtCore.Qt.AlignmentFlag.AlignCenter)
+        card.setVisible(False)
+        self._keys_card = card
+        self._keys_label = label
+        self._keys_open = False
+        self._keys_last_html = ""
+        self._keys_refresh_map()
+
+    def _keys_pose_summary(self) -> str:
+        count = self.pose_table.rowCount()
+        if count == 0:
+            return "No poses on screen"
+        row = self.pose_table.currentRow()
+        if row < 0:
+            return f"{count} poses, none selected"
+        return f"{count} poses, pose {row + 1} of {count} selected"
+
+    def _keys_refresh_map(self) -> None:  # pragma: no cover - GUI
+        """Rebuild the map's text, if it is on screen. Availability is live."""
+        if not self._keys_open:
+            return
+        from . import keys as keymap
+
+        html = keymap.map_html(self, self._keys_pose_summary())
+        if html != self._keys_last_html:
+            self._keys_label.setText(html)
+            self._keys_last_html = html
+
+    # -- what each key can do right now -------------------------------------
+    def _keys_needs_pose(self, _spec) -> tuple[bool, str]:
+        if not self._pose_models or self.pose_table.currentRow() < 0:
+            return False, "no pose is selected"
+        return True, ""
+
+    def _keys_step_enabled(self, spec) -> tuple[bool, str]:
+        """Whether a stepper can move, and which edge it is at when it cannot.
+
+        The reason is the point. "Right does nothing" and "Right is at the last
+        pose" are different facts, and only the second one tells a reader
+        whether the window understood the key. Clamping rather than wrapping is
+        a decision, not a shrug: wrapping makes the ends of the list
+        indistinguishable from the middle, and a reader stepping through nine
+        poses wants to know when there are no more.
+        """
+        count = self.pose_table.rowCount()
+        if count == 0:
+            return False, "there are no poses to step through"
+        row = self.pose_table.currentRow()
+        if row < 0:
+            return False, "no pose row is selected"
+        step = self._key_step_direction(spec)
+        target = row + step
+        if not 0 <= target < count:
+            edge = "last" if step > 0 else "first"
+            return False, f"pose {row + 1} of {count} is already the {edge} one"
+        return True, ""
+
+    def _keys_map_open(self, _spec) -> tuple[bool, str]:
+        return (True, "") if self._keys_open else (False, "the map is not open")
+
+    @staticmethod
+    def _key_step_direction(spec) -> int:
+        return 1 if spec.keys[0] == "Right" else -1
+
+    # -- the handlers -------------------------------------------------------
+    def _key_activated(self, shortcut, spec) -> None:  # pragma: no cover - GUI
+        """One dispatcher for every key, so there is one place to look."""
+        handler = self._key_bound.get(spec.handler)
+        if handler is None:
+            return
+        handler(spec)
+
+    def _key_step_pose(self, spec) -> None:  # pragma: no cover - GUI
+        """Step to the next or previous pose, or say why it did not."""
+        available, reason = self._keys_step_enabled(spec)
+        if not available:
+            self.statusBar().showMessage(reason, 4000)
+            return
+        row = self.pose_table.currentRow()
+        target = row + self._key_step_direction(spec)
+        # `setCurrentCell` is the click's own route: it emits
+        # `currentCellChanged`, which is what `_on_pose_selected` is connected
+        # to. Column 0 for the same reason a click lands on column 0.
+        self.pose_table.setCurrentCell(target, 0)
+        self.statusBar().showMessage(self._keys_pose_summary(), 2000)
+
+    def _key_rotate(self, spec) -> None:  # pragma: no cover - GUI
+        """Turn the camera one step, through the drag's own method."""
+        turns = {"A": (-self.ROTATE_STEP, 0.0), "D": (self.ROTATE_STEP, 0.0),
+                 "W": (0.0, -self.ROTATE_STEP), "S": (0.0, self.ROTATE_STEP)}
+        turn = turns.get(spec.keys[0])
+        if turn is None:
+            return
+        self.viewport.rotate(*turn)
+
+    def _key_frame_selection(self, spec) -> None:  # pragma: no cover - GUI
+        """`F` frames **whatever is selected**, and that is the whole rule.
+
+        One rule, no exceptions, in this order: a selected **pair**, then a
+        selected **residue**, then the selected **pose** with its contacts, and
+        with nothing selected at all, every pose. The key's description says
+        this and it names what wins.
+
+        It is one rule because there were two before, and they disagreed about
+        the same question. Selecting a pair already put the camera exactly on
+        that pair -- measured, 0.00 A from the midpoint of the two atoms, at a
+        distance of 6.00 A, with the line reading 32 px of highlight colour.
+        Pressing `F` then took the camera 8.80 A off that midpoint and pulled
+        back to 22.78 A, so a 2.05 A line became 9.0% of the view depth and
+        fell to 5 px. "I selected this, then asked to frame it, and it is now
+        tiny" is a gesture that undoes itself, and a key whose own text says it
+        frames the selection is the wrong place for that.
+
+        Each branch calls **the same viewport method the automatic gesture
+        calls** -- `focus_pair`, `focus_residue`, `focus_selection` -- so the two
+        routes cannot drift apart again. The alternative, computing a framing
+        here that happens to match, is a second implementation of a rule that
+        already exists twice, and this file has been bitten by duplicate paths
+        often enough to know what they cost.
+
+        With nothing selected, every pose, unchanged: the "compare nine answers
+        at once" view is a different question and `_frame_poses` is its answer.
+        """
+        pair = self._selected_pair_indices()
+        if pair is not None:
+            self.viewport.focus_pair(pair[0], pair[1])
+            self.viewport.update()
+            # The same number the two tables print, on the key that reframes
+            # what they framed. The two branches used to end in silence, so a
+            # reader who pressed `F` and watched the picture change had no way
+            # to learn how much of the frame the new framing is worth -- which
+            # is the one question this key exists to answer.
+            self.statusBar().showMessage(
+                "framed the selected pair"
+                + self.viewport._framed_subject_note(), 4000
+            )
+            return
+        residue = self._selected_residue_name()
+        if residue is not None:
+            self.viewport.focus_residue(residue)
+            self.viewport.update()
+            self.statusBar().showMessage(
+                f"framed {residue}"
+                + self.viewport._framed_subject_note(), 4000
+            )
+            return
+        if not self._keys_needs_pose(spec)[0]:
+            # No pose row is current, so "the selection" is nothing at all, and
+            # the honest answer to "frame the selection" is the set of poses
+            # rather than a refusal.
+            self._frame_poses()
+            return
+        self._frame_selection()
+
+    def _selected_pair_indices(self) -> tuple[int, int] | None:
+        """The two atom indices of the selected pair, or `None`.
+
+        Read through the same row lookup `_on_pair_selected` uses, so this
+        cannot return a pair the picture is not drawing. A row whose contact has
+        gone out of range is reported as no selection rather than as a guess.
+        """
+        model = self.pair_table.selectionModel()
+        rows = model.selectedRows() if model is not None else []
+        if not rows:
+            return None
+        row = int(rows[0].row())
+        if not 0 <= row < len(self._pairs):
+            return None
+        pair = self._pairs[row]
+        if not 0 <= pair.contact_index < len(self.viewport.contacts):
+            return None
+        contact = self.viewport.contacts[pair.contact_index]
+        return int(contact.self_index), int(contact.partner_index)
+
+    def _selected_residue_name(self) -> str | None:
+        """The selected residue's name, or `None` when no residue row is picked.
+
+        The name travels in the row's `UserRole` because the visible cell is a
+        display string and this is the same string the handler that moved the
+        camera on selection used. Read here the same way rather than by parsing
+        the cell text.
+        """
+        model = self.contact_table.selectionModel()
+        rows = model.selectedRows() if model is not None else []
+        if not rows:
+            return None
+        item = self.contact_table.item(rows[0].row(), 0)
+        if item is None:
+            return None
+        name = item.data(QtCore.Qt.ItemDataRole.UserRole)
+        return str(name) if name else None
+
+    def _key_toggle_contacts(self, _spec) -> None:  # pragma: no cover - GUI
+        """Flip the checkbox, so the existing handler is the one that runs."""
+        self.cb_contacts.setChecked(not self.cb_contacts.isChecked())
+        self.statusBar().showMessage(
+            f"interaction lines {'shown' if self.cb_contacts.isChecked() else 'hidden'}",
+            2000,
+        )
+
+    def _key_toggle_site_volume(self, _spec) -> None:  # pragma: no cover - GUI
+        """The site cloud, through its own checkbox."""
+        self.cb_pocket_volume.setChecked(not self.cb_pocket_volume.isChecked())
+        self.statusBar().showMessage(
+            f"site volume {'shown' if self.cb_pocket_volume.isChecked() else 'hidden'}",
+            2000,
+        )
+
+    def _key_cycle_representation(self, _spec) -> None:  # pragma: no cover - GUI
+        """Next representation, through the combo so its handler runs."""
+        combo = self.cmb_representation
+        combo.setCurrentIndex((combo.currentIndex() + 1) % combo.count())
+        self.statusBar().showMessage(
+            f"display: {combo.currentText()}", 2000
+        )
+
+    def _key_toggle_map(self, _spec) -> None:  # pragma: no cover - GUI
+        if self._keys_open:
+            self._keys_close()
+            return
+        self._keys_open = True
+        self._keys_last_html = ""
+        self._keys_refresh_map()
+        self._keys_card.setVisible(True)
+        self.statusBar().showMessage(
+            "keyboard map: Esc or ? closes it", 4000
+        )
+
+    def _key_close_map(self, _spec) -> None:  # pragma: no cover - GUI
+        if self._keys_open:
+            self._keys_close()
+
+    def _keys_close(self) -> None:  # pragma: no cover - GUI
+        self._keys_open = False
+        self._keys_card.setVisible(False)
 
     def _refresh_energy_terms(self, index: int) -> None:  # pragma: no cover - GUI
         """Show pose ``index``'s term decomposition, or say why there isn't one.
@@ -3964,7 +6714,49 @@ class MainWindow(QtWidgets.QMainWindow):
             self.status_label.setText("load a ligand first")
             return
 
-        self.btn_dock.setEnabled(False)
+        # A second request while one is running is **refused with a reason**,
+        # not queued and not run alongside. Both alternatives are worse than the
+        # sentence:
+        #
+        # Running it alongside is what happened until this guard existed.
+        # `start_docking` assigns `self._thread` and `self._worker` unconditionally,
+        # so a second call orphaned the first pair: when the first search finished
+        # its handler quit and cleared the *new* thread, and the poses the second
+        # search produced had nowhere to go. Measured, not hypothesised: two Dock
+        # requests in a row ended with an empty pose table, a green Dock button,
+        # and no message anywhere -- the same shape as a failure, with none of
+        # the information.
+        #
+        # Queuing it would be the silent version of that: the window would look
+        # busy, the request would sit behind whatever is running, and a user who
+        # asked twice would get two runs and no way to tell which one they are
+        # looking at.
+        #
+        # So the answer is a sentence that says a search is in flight. The button
+        # and the menu item are disabled for the duration as well, but that is
+        # the courtesy; this is the rule, and it holds for a keypress, a click on
+        # the button, `Ctrl+D`, and the menu item alike, because they are all this
+        # method.
+        if self._dock_running():
+            # A notice that **stays**, rather than a message that is overwritten.
+            # Both obvious channels are contested while a search runs: the status
+            # label is `DockingWorker.progressed`'s own ("precalculating maps...",
+            # "searching (N walks)"), and the status bar is the automatic pocket
+            # search's. A sentence written to either was measured being replaced
+            # within a frame, which is the same as no sentence -- so it is held in
+            # `_dock_notice` and rendered *beside* the stage text, and it is
+            # cleared when the run it belongs to ends. Pressing K twice and seeing
+            # "searching (8 walks) -- a second press was refused" is the answer;
+            # pressing K twice and seeing the ordinary progress line is not.
+            self._dock_notice = (
+                "a second Dock was asked for and refused; one search is already "
+                "running"
+            )
+            self._show_dock_progress(self._dock_stage)
+            return
+
+        self._dock_notice = ""
+        self._set_dock_enabled(False)
         self._maps = None
         try:
             box_ = GridBox.from_center_size(
@@ -3973,8 +6765,16 @@ class MainWindow(QtWidgets.QMainWindow):
             )
             receptor = Receptor.from_pdbqt(self._receptor_path)
         except Exception as exc:
-            self.status_label.setText(f"setup failed: {exc}")
-            self.btn_dock.setEnabled(True)
+            # The same voice as a failure that arrives later, and for the same
+            # reason: this one happens before any thread starts, so it is the
+            # only thing the user will be told, and "setup failed: <python
+            # traceback line>" is not a next action.
+            self._set_dock_enabled(True)
+            self.status_label.setText(
+                f"the search did not start. "
+                f"{self._dock_failure_advice(str(exc))} "
+                f"[engine: {exc}]"
+            )
             return
 
         # Everything from here on happens on a worker thread, map
@@ -3994,14 +6794,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self._thread.started.connect(self._worker.run)
         self._worker.finished.connect(self._on_dock_finished)
         self._worker.failed.connect(self._on_dock_failed)
-        self._worker.progressed.connect(self.status_label.setText)
+        self._worker.progressed.connect(self._show_dock_progress)
+        self._dock_stage = "starting…"
+        self._dock_notice = ""
         self._thread.start()
 
     def _on_dock_finished(self, result) -> None:  # pragma: no cover - GUI
-        self.btn_dock.setEnabled(True)
-        self._thread.quit()
-        self._thread.wait()
-        self._thread.deleteLater()
+        self._dock_notice = ""
+        self._set_dock_enabled(True)
+        if self._thread is not None:
+            self._thread.quit()
+            self._thread.wait()
+            self._thread.deleteLater()
         self._thread = None
         self._worker = None
 
@@ -4030,15 +6834,87 @@ class MainWindow(QtWidgets.QMainWindow):
             f"in {result.elapsed_seconds:.1f} s"
         )
 
+    def _dock_failure_advice(self, message: str) -> str:
+        """What to do about a failed search, in one short line.
+
+        The verdict panel's voice is this product's voice now: say what was not
+        measured and say why, and where that is knowable say what would change
+        it. A failure message is exactly that kind of statement, and the old one
+        was not: it printed the engine's words and stopped. A user who hit
+        ``docking failed: dock() takes from 2 to 9 positional arguments but 10
+        were given`` had a search that did not run, a window that looked ready,
+        and no idea that the two halves of this program were built at different
+        times.
+
+        Classified on the message, and **only** where a specific action is known
+        -- inventing a fix is worse than admitting there is not one, which is
+        the same rule `number()`'s `state` follows and for the same reason. The
+        unclassifiable branch says so rather than guessing.
+
+        Short on purpose. A user hitting this mid-session wants the next action,
+        not the essay; the raw message stays available underneath for anyone who
+        wants the whole thing.
+        """
+        low = message.lower()
+        # An argument-count `TypeError` is not a bad input. It is the compiled
+        # extension and the Python beside it having been built at different
+        # times, and nothing the user does to their receptor will change that.
+        if "positional argument" in low or "keyword argument" in low:
+            return ("this is a build mismatch, not your input: the engine "
+                    "extension and the Python beside it disagree about the "
+                    "docking call. Rebuild or reinstall the extension so its "
+                    "signature matches core.py")
+        if ("but the ligand needs" in low
+                or ("at least" in low and "axis" in low)):
+            return ("the search box is smaller than the ligand. Widen it in the "
+                    "panel, or take one from the site's own list, which is "
+                    "sized for the ligand")
+        if "no atom/hetatm records" in low or "is this a pd bqt" in low \
+                or "is this a pdbqt" in low:
+            # Found by driving a real bad file at it rather than by thinking of
+            # a string. The engine's own message ends in a question, and the
+            # question *is* the fix; the branch was missing and the message was
+            # being answered with "nothing here can name a fix", which is the
+            # one sentence that is never right.
+            return ("that file is not a prepared .pdbqt. Prepare it first "
+                    "(Prep -> receptor / ligand), or load a different file")
+        if "parse error" in low or "bad coordinate" in low:
+            # The second real message the driving found that the classifier had
+            # no branch for. It names the line and the offending text, so the
+            # fix is in the sentence already, and answering "nothing here can
+            # name a fix" to a message that names a fix is the one thing this
+            # branch must never do.
+            return ("that file has a coordinate the engine could not read, and "
+                    "it says which line. Fix that line or prepare the file "
+                    "again -- a hand-edited PDBQT is the usual cause")
+        if "no such file" in low or "not found" in low:
+            return ("one of the two files is missing. Load the receptor and the "
+                    "ligand again, and both as prepared .pdbqt")
+        if "permission" in low or "access is denied" in low:
+            return ("the file could not be read. Check it is not open in another "
+                    "program and that this account can read it")
+        return ("nothing here can name a fix: the engine's message above is the "
+                "whole of it, and the three inputs are the box, the receptor "
+                "and the ligand")
+
     def _on_dock_failed(self, message: str) -> None:  # pragma: no cover - GUI
-        self.btn_dock.setEnabled(True)
+        self._dock_notice = ""
+        self._set_dock_enabled(True)
         if self._thread is not None:
             self._thread.quit()
             self._thread.wait()
             self._thread.deleteLater()
             self._thread = None
             self._worker = None
-        self.status_label.setText(f"docking failed: {message}")
+        # The search did not run, so there is no run to describe and no panel to
+        # clear: what is on screen is still whatever was there before, and
+        # saying "failed" is the only thing that changed. Stated as its own
+        # fact, then what to do about it, then the engine's own words -- in that
+        # order, because the order is what a reading eye takes.
+        self.status_label.setText(
+            f"the search did not run. {self._dock_failure_advice(message)} "
+            f"[engine: {message}]"
+        )
 
     def closeEvent(self, event) -> None:  # pragma: no cover - GUI
         """Stop running searches before the window goes away.

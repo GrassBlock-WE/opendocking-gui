@@ -36,6 +36,7 @@ Run:  python scripts/prep_check.py
 
 from __future__ import annotations
 
+import re
 import sys
 import tempfile
 import warnings
@@ -56,6 +57,34 @@ except ImportError:  # pragma: no cover - only on an uninstalled checkout
 from opendocking import prep  # noqa: E402
 
 CRAMBIN = ROOT / "examples" / "1crn_receptor.pdb"
+
+#: The number of checks this file runs, asserted on the way out. This file had
+#: no pin, which meant its total was printed and never compared -- the exact
+#: failure every other gate in the tree holds itself to. `skip()` is not
+#: defined here, so the count is the number of `check()` calls that run.
+#:
+#: **102 is what a green run of this file prints, and it cannot be read off the
+#: source.** The file has 96 `check()` call sites -- 69 of them unconditional
+#: and 27 behind a condition, which is the split the block below declares -- so
+#: the number that matters is the number of results a run produces, and counting
+#: call sites is a different number (off by 6 today) that no reading of the file
+#: can correct. That is what makes this a *measured* constant rather than a typed
+#: one, and it is why the derivation is the run: add a check or remove one and
+#: this is a red until someone re-runs the file and takes the number it reports.
+#:
+#: 99 -> 102 is this round's row-225 pin (see `OOB_CLAIM_RE` above for why that
+#: row can be pinned and rows 207/222 cannot).
+#: GATE-DECLARE 1
+#: sites: 69 unconditional + 27 guarded
+#: guards: sha256:757db9bd10cd656af4d902c5a55658fb89fc5894077419cbe32c39b69f9dad5a
+#:
+#: The two columns above are measured by `check_scripts_declare.py` walking
+#: this file's own syntax tree, and they are the count of *call sites*, which
+#: is a different quantity from the pin on the line below: sites do not
+#: multiply by loop iteration and guards do not stop being sites. Both are
+#: declared because a reader who has one of them and assumes the other is wrong
+#: in a direction the file cannot check.
+EXPECTED_CHECKS = 102
 
 # A Windows console is frequently GBK and a warning this script merely *counts*
 # may contain a non-ASCII character. A character that cannot be encoded must
@@ -85,6 +114,73 @@ def finish() -> int:
     for f in FAILURES:
         print(f"  FAILED: {f}")
     return 1 if FAILURES else 0
+
+
+# ---------------------------------------------------------------------------
+# Row 225 of docs/VERIFICATION.md is re-measured here.
+#
+# A number in the ledger that no gate re-derives drifts silently, and this one
+# already drifted: the out-of-box charge used to be a flat 1000.0 step and is
+# now a per-angstrom ramp, so every figure derived from a docking run moved,
+# and three rows kept quoting the old ones long after the engine stopped
+# producing them. Re-staling one of them turns nothing red.
+#
+# Row 225 is pin-able and rows 207/222 are not, and the difference is the
+# search. These readings come from `score_conformation` on a hand-placed
+# conformation -- one atom, no Monte Carlo, no seed, no thread count. Every
+# figure in 207 and 222 comes out of a search, and row 207 itself records that
+# the same fixture read 1.3e-04 on the CI runner against 3.6e-05 here because
+# the walk differs with the thread count. Pinning those would be a red on a
+# correct tree, which is worse than no pin because it teaches people to ignore
+# red. So the pose-derived numbers stay unpinned and this comment is the
+# record of why, rather than the absence of one.
+# ---------------------------------------------------------------------------
+
+#: A one-carbon ligand, so "one atom is N A outside the box" is literally true
+#: and the reading is the out-of-box charge rather than a sum over a ligand
+#: that also spilled.
+ONE_CARBON_PDBQT = (
+    "REMARK  Prepared by Open Docking\n"
+    "REMARK  1 atom, 0 rotatable bonds\n"
+    "TORSDOF 0\n"
+    "ATOM      1  C1  UNL     1       0.000   0.000   0.000  1.00  0.00"
+    "     0.000 C \n"
+)
+
+#: The box `examples/audit_poses.py` docks into, so the face these readings are
+#: taken against is the same box the audit's own figures came from.
+OOB_CENTRE = (3.47, 6.21, 8.95)
+OOB_SIZE = 18.0
+OOB_SPACING = 0.375
+
+#: The three overhangs row 225 names, in the order it names them.
+OOB_OVERHANGS = (20.0, 200.0, 2000.0)
+
+#: Row 225's figures, read out of the ledger rather than restated here. A gate
+#: that carried its own copy of them would be a second place to forget to
+#: update them, which is the failure this is here to close.
+OOB_CLAIM_RE = re.compile(
+    r"20/200/2000 Å 读数是 \*\*(\d+) / (\d+) / (\d+)\*\*"
+)
+OOB_SLOPE_RE = re.compile(r"dE/dx 一律 \*\*\+(\d+(?:\.\d+)?)\*\*")
+
+
+def out_of_box_charges(lig, maps, face_x, overhangs):
+    """``(energy, dE/dx)`` for one carbon parked at ``face_x + d``, per ``d``.
+
+    Scored through `score_conformation` -- the same call the audit's descent
+    ladder makes -- because that is the path the search charges the penalty on.
+    """
+    import numpy as np
+    from opendocking import score_conformation
+
+    out = []
+    for over in overhangs:
+        conf = np.zeros(lig.num_dof, dtype=np.float64)
+        conf[0] = face_x + over
+        energy, grad = score_conformation(lig, maps, conf, "vina")
+        out.append((float(energy), float(grad[0])))
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -400,6 +496,77 @@ def prepare(path: Path, **kwargs):
         warnings.simplefilter("always")
         text, report = prep.prepare_receptor_with_report(path, **kwargs)
     return text, report, list(caught)
+
+
+def hydrogen_census(path):
+    """What the writer was given, what it wrote, and the difference.
+
+    Returns ``(hd_on_disk, capture, unprotonated, multiply, dropped)``.
+
+    The molecule is captured by wrapping the module's own writer and its own
+    `AddHs` call rather than by re-running preparation here: a second pipeline
+    is a second implementation, and the whole point of this is to count what
+    the product actually did. The writer's keep/drop rule is then applied to
+    the molecule it received, so the dropped set is the product's decision and
+    not an inference from the output text.
+    """
+    import warnings as _warnings
+    import rdkit.Chem.AllChem as _allchem
+
+    cap = {}
+    real_writer = prep._molecule_to_pdbqt
+    real_addhs = _allchem.AddHs
+
+    def _writer(mol, resname="UNL"):
+        cap["mol"] = mol
+        return real_writer(mol, resname=resname)
+
+    def _addhs(mol, *a, **kw):
+        cap["donors"] = list(kw.get("onlyOnAtoms") or [])
+        return real_addhs(mol, *a, **kw)
+
+    prep._molecule_to_pdbqt = _writer
+    _allchem.AddHs = _addhs
+    try:
+        with _warnings.catch_warnings(record=True):
+            _warnings.simplefilter("always")
+            text, _report = prep.prepare_receptor_with_report(path)
+    finally:
+        prep._molecule_to_pdbqt = real_writer
+        _allchem.AddHs = real_addhs
+
+    mol = cap["mol"]
+    conf = mol.GetConformer()
+    cap["h_added"] = sum(1 for a in mol.GetAtoms() if a.GetSymbol() == "H")
+    dropped = []
+    for atom in mol.GetAtoms():
+        if atom.GetSymbol() != "H":
+            continue
+        nbrs = atom.GetNeighbors()
+        if not nbrs or nbrs[0].GetSymbol() not in ("N", "O", "S"):
+            dropped.append((atom, "not bonded to N/O/S"))
+            continue
+        sep = conf.GetAtomPosition(atom.GetIdx()).Distance(
+            conf.GetAtomPosition(nbrs[0].GetIdx()))
+        if not (0.7 <= sep <= 1.35):
+            dropped.append((atom, f"{sep:.2f} A from its parent"))
+    unprot, multi = [], []
+    for idx in cap.get("donors", []):
+        atom = mol.GetAtomWithIdx(idx)
+        # `_residue_identity` returns (name, res, chain, resseq) -- the atom
+        # name FIRST. Unpacked the other way round, every label below loses its
+        # residue and these assertions fail for a reason that has nothing to do
+        # with the chemistry.
+        name, res, _chain, seq = prep._residue_identity(atom)
+        tag = f"{res} {seq} {name}".strip()
+        hydrogens = [n for n in atom.GetNeighbors() if n.GetSymbol() == "H"]
+        if not hydrogens:
+            unprot.append(tag)
+        elif len(hydrogens) > 1:
+            multi.append(tag)
+    hd = sum(1 for ln in text.splitlines()
+             if ln.startswith(("ATOM", "HETATM")) and ln[77:79].strip() == "HD")
+    return hd, cap, unprot, multi, dropped
 
 
 def component_warnings(caught) -> list:
@@ -848,10 +1015,20 @@ def main() -> int:
             # tally. It is the only place a caller reading a single log line
             # learns the input file modelled no hydrogens at all, which is the
             # difference between "the receptor is what I gave you" and "the
-            # receptor is what I gave you plus 61 atoms I made up". Pinned to the
-            # measured 61 rather than to the report's own field, so a
-            # regression in the *count* is caught and not just a change in how
-            # the count is spelled.
+            # receptor is what I gave you plus a set of hydrogens I invented".
+            # Pinned to the measured 61 rather than to the report's own field,
+            # so a regression in the *count* is caught and not just a change in
+            # how the count is spelled.
+            #
+            # **61 is a count of donor SITES, not of hydrogens.** It is
+            # `len(indices)` in `_add_receptor_polar_hydrogens`, handed to
+            # `AddHs(onlyOnAtoms=...)`. On crambin the molecule that reaches
+            # the writer carries 58 hydrogens, 3 of which the writer drops
+            # because RDKit put them 13-22 A from their own parent, so 55 `HD`
+            # records reach the file. An earlier version of this comment said
+            # "61 atoms I made up", which is wrong twice over: 58 were made and
+            # 55 survived. The three assertions below are what make the
+            # difference checkable rather than merely stated.
             check("the summary line carries the added polar hydrogens as '+N polar H'",
                   crambin.polar_hydrogens_added == 61
                   and "+61 polar H" in crambin.summary(),
@@ -862,8 +1039,72 @@ def main() -> int:
                   single_report.polar_hydrogens_added == 0
                   and "polar H" not in single_report.summary(),
                   f"summary reads {single_report.summary()!r}")
+        # -------------------------------------------------------------------
         else:  # pragma: no cover
             check("the checked-in crambin example exists", False, f"{CRAMBIN} is missing")
+
+
+        # The hydrogen census: what the report promised against what is on disk
+        # -------------------------------------------------------------------
+        # `polar_hydrogens_added` counts donor SITES. The file counts
+        # hydrogens. The two are not the same quantity, the difference is
+        # non-zero, and every number derived from treating them as one is a net
+        # of errors in opposite directions -- which is why the identity below is
+        # asserted as arithmetic instead of being narrated in a comment.
+        #
+        # Nothing here needs a product change. The writer's own rule is applied
+        # to the molecule it is given, and the `HD` records are read off the
+        # text that was written.
+        hd, _cap, _unprot, _multi, _dropped = hydrogen_census(CRAMBIN)
+        written = len(atom_lines(crambin_text))
+        heavy = written - hd
+        gap = crambin.polar_hydrogens_added - hd
+        check(
+            "the polar-hydrogen count on disk is lower than the donor-site "
+            "count the report publishes, and the difference is the sites that "
+            "got no hydrogen",
+            heavy == crambin.atoms_kept
+            and hd < crambin.polar_hydrogens_added
+            and gap == len(_unprot),
+            f"{crambin.polar_hydrogens_added} donor site(s) published, "
+            f"{hd} `HD` record(s) written beside {heavy} heavy atom(s); the "
+            f"difference is {gap}, and it is the count of donor sites that "
+            f"were handed to AddHs and came back with nothing",
+        )
+        # The six sites, enumerated rather than counted. A count plus a
+        # residue-name prefix is weaker than it looks: on this file every
+        # unprotonated site *is* a CYS SG, so a check that only asks "is it a
+        # cysteine" cannot tell "all six thiols" from "all six cysteines,
+        # whatever they are". Pinning the tuple makes the chemistry the thing
+        # under test, which is what a red here should mean.
+        CRAMBIN_UNPROTONATED = ("CYS 16 SG", "CYS 26 SG", "CYS 3 SG", "CYS 32 SG",
+                                "CYS 4 SG", "CYS 40 SG")
+        check(
+            "the donor sites that got no hydrogen are the six cysteine thiols, "
+            "enumerated from the molecule rather than counted",
+            len(_unprot) == gap
+            and tuple(sorted(_unprot)) == CRAMBIN_UNPROTONATED,
+            f"{len(_unprot)} unprotonated donor site(s): "
+            f"{', '.join(_unprot) or 'none'}, against the pinned set "
+            f"{', '.join(CRAMBIN_UNPROTONATED)}. The tuple is pinned rather "
+            f"than a count, so a chemistry change -- a seventh thiol, a "
+            f"different atom -- goes red for the right reason, and the names "
+            f"are printed so the red is diagnosable",
+        )
+        check(
+            "the published count decomposes into sites that got none, sites "
+            "that got two, and hydrogens the writer dropped",
+            _cap["h_added"] - len(_dropped) == hd
+            and len(_unprot) - len(_multi) + len(_dropped) == gap,
+            f"{_cap['h_added']} hydrogen(s) in the molecule the writer received, "
+            f"{len(_dropped)} dropped for want of a position, {hd} written; "
+            f"and {len(_unprot)} unprotonated - {len(_multi)} over-protonated "
+            f"({', '.join(_multi) or 'none'}) + {len(_dropped)} dropped = "
+            f"{len(_unprot) - len(_multi) + len(_dropped)}, which is the "
+            f"published difference {gap}. **The net means nothing on its own**, "
+            f"and reading it as a count of lost hydrogens sends someone to fix "
+            f"the wrong thing",
+        )
 
         # -------------------------------------------------------------------
         section("a receptor that is little more than a metal site")
@@ -1022,6 +1263,72 @@ def main() -> int:
               f"_chain_ids -> {prep._chain_ids(bare)}")
 
         # -------------------------------------------------------------------
+        section("the corrected ledger rows are re-measured, not just re-typed")
+
+        import numpy as np
+        from opendocking import GridBox, Ligand, Receptor
+
+        one_carbon = tmp / "one_carbon.pdbqt"
+        one_carbon.write_text(ONE_CARBON_PDBQT, encoding="utf-8")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            oob_rec = Receptor.from_pdbqt(
+                str(ROOT / "examples" / "1crn_prep.pdbqt")
+            )
+        oob_lig = Ligand.from_pdbqt(str(one_carbon))
+        oob_box = GridBox.from_center_size(
+            OOB_CENTRE, (OOB_SIZE, OOB_SIZE, OOB_SIZE)
+        )
+        oob_maps = oob_rec.precalculate(
+            oob_box, scoring="vina", spacing=OOB_SPACING
+        )
+        measured = out_of_box_charges(
+            oob_lig, oob_maps, float(oob_box.max_corner[0]), OOB_OVERHANGS
+        )
+
+        ledger = (ROOT / "docs" / "VERIFICATION.md").read_text(encoding="utf-8")
+        claim = OOB_CLAIM_RE.search(ledger)
+        slope = OOB_SLOPE_RE.search(ledger)
+        charged = [f"{e:.0f}" for e, _ in measured]
+        published = [f"{float(g):.0f}" for g in claim.groups()] if claim else []
+
+        check("the out-of-box charge row 225 publishes is the charge the engine makes",
+              bool(claim) and charged == published,
+              f"the ledger publishes {published or 'nothing'} for overhangs "
+              f"{list(OOB_OVERHANGS)} A; the engine charged {charged}. The charge is "
+              f"1000.0 x the overhang, so the flat step this row used to describe "
+              f"would show up here as three equal numbers")
+
+        want_slope = float(slope.group(1)) if slope else None
+        slopes = [g for _, g in measured]
+        check("row 225's dE/dx is the one the engine reports, and it points outward",
+              want_slope is not None
+              and all(abs(g - want_slope) < 1e-6 for g in slopes)
+              and all(g > 0.0 for g in slopes),
+              (f"the ledger publishes +{want_slope}; the engine reports "
+               f"{[round(g, 6) for g in slopes]}. A positive dE/dx is the whole "
+               f"fix: it means -grad points back into the box, where the old "
+               f"-1000.000 pointed out of it")
+              if slope is not None else
+              (f"the ledger publishes no dE/dx in the form this check reads, so "
+               f"there is nothing to compare against the engine's "
+               f"{[round(g, 6) for g in slopes]}. The old -1000.000 cannot be "
+               f"published in this slot either: it is the sign that was wrong, "
+               f"and a reader must not be able to put it back"))
+
+        # A reader that quietly found nothing would make the two checks above
+        # vacuously true, so it is shown refusing text with no figures in it.
+        check("the reader refuses a row that publishes no figure, rather than passing",
+              OOB_CLAIM_RE.search(
+                  "20/200/2000 Å 读数是 **20000 / 200000 / 2000000**"
+              ) is not None
+              and OOB_CLAIM_RE.search(
+                  "the out-of-box row no longer quotes a figure"
+              ) is None,
+              "the same pattern finds a real row and declines text carrying no "
+              "figure, so a re-worded row 225 goes red instead of going unchecked")
+
+        # -------------------------------------------------------------------
         section("reverse verification: these guards can fail")
 
         # 1. The harness itself. A check function that always returned True
@@ -1070,6 +1377,18 @@ def main() -> int:
         check("the old fragment-and-atom-only wording is gone",
               "kept the largest of 4 fragments" not in report.component_warning(),
               "it counted fragments and atoms and never mentioned a chain")
+
+        # The pin, asserted on the way out rather than only in the
+        # declaration. The `+ 1` is this check, which has not been counted yet
+        # when the comparison is built.
+        #
+        # Only on the path that got this far: `main` returns early when the
+        # package does not import, and that path has already gone red on
+        # `has_api`, so a total that does not add up there is not the number
+        # this pin is about.
+        check("this file's own count is the count it declares",
+              CHECKS + 1 == EXPECTED_CHECKS,
+              f"{CHECKS} ran before this one and {EXPECTED_CHECKS} are declared")
 
     return finish()
 

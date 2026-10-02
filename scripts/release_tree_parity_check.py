@@ -78,8 +78,14 @@ import release_tree_rule as RULE  # noqa: E402  (after the path fix, on purpose)
 #: not-asserted rather than dropped -- a run that reported fewer results on CI
 #: than locally would be a smaller run wearing a pass.
 #: GATE-DECLARE 1
-#: sites: 0 unconditional + 58 guarded
-#: guards: sha256:b4d5a5863ceca06db046647f002b9f309d2602bd55ba77a45141040a2c91e128
+#: sites: 0 unconditional + 71 guarded
+#: guards: sha256:3be99f7a9c4632648187e1d5a0c901202cbc5e0fc510719beec8968b207ce99b
+#:
+#: 46 -> 71 sites, re-derived against the auditor rather than by hand, and the
+#: reason the paragraph below is now in the past tense. The two-sites-per-check
+#: shape is still what the file looks like and is still not re-verified for the
+#: twenty-five added sites; what this block claims is only the site count, and
+#: the results stay the pin on the line below.
 #:
 #: **0 unconditional is what the file's shape produces, not an omission.** Every
 #: check in here is a verdict computed and then routed through `ok` or `bad`, so
@@ -101,15 +107,19 @@ import release_tree_rule as RULE  # noqa: E402  (after the path fix, on purpose)
 #: not ship although its root *and* its suffix are both declared -- that row is
 #: the regression the inversion made, and section E's E6 is what caught it).
 #:
-#: **This block is not machine-verified yet, and the reason is worth recording.**
-#: `check_scripts_declare.py` measures the gates named in its `INVENTORY`, and
-#: this file is not in it -- it reports three pinned gates missing from the
-#: inventory and this is one of them. So the numbers above were derived by
-#: lifting the auditor's own `_sites_of` and `_guards_digest` out of its source
-#: and running them against this file, rather than by letting the census compare
-#: them. They will be compared the moment the file joins `INVENTORY`, and if the
-#: derivation above is wrong about the two-sites-per-check shape that is where it
-#: will show.
+#: **This block was not machine-verified when it was written, and that is worth
+#: recording because the reason was right.** `check_scripts_declare.py` measures
+#: the gates named in its `INVENTORY`, and this file was not in it -- it reported
+#: three pinned gates missing from the inventory and this was one of them. So the
+#: numbers above were derived by lifting the auditor's own `_sites_of` and
+#: `_guards_digest` out of its source and running them against this file, rather
+#: than by letting the census compare them. **The file is in `INVENTORY` now, the
+#: comparison has run, and it went red: the lift was wrong by thirteen guarded
+#: sites.** That is the outcome this paragraph predicted, and it is the whole
+#: argument for the syntax-tree walk over lifting a function out of another
+#: file: a lift is exactly as trustworthy as the care of whoever did it, and care
+#: is not a mechanism. The two columns above are now measured by the thing that
+#: compares them.
 #:
 #: The earlier `30 -> 34` movement, for the record: the table dispatched through
 #: a variable (`verdict = bad, ...; verdict(...)`), which the auditor's
@@ -341,9 +351,15 @@ def snapshot(root: Path) -> Snapshot:
 REMEDY = {
     "missing": "copy it across, or decide deliberately that the release should "
                "not carry it",
-    "extra": "the next run of the tool deletes it, so it is published now and "
-             "gone later, which is the state that reads as intentional until it "
-             "is not",
+    # Reached whenever the rule has no objection, which is the common case: a
+    # file renamed or moved in the development tree is still a perfectly good
+    # source path, and what puts it in this bucket is only that the development
+    # tree no longer has it. Saying so is the difference between a reader who
+    # knows to look for a rename and one who goes looking for a rule change
+    # that does not exist.
+    "extra": "the rule still ships this path; the development tree no longer "
+             "has the file, so the next run of the tool deletes it -- renamed, "
+             "moved or dropped, and the published tree is what remembers",
     "differs": "the published tree is behind; re-run _sync_release.py, and if "
                "the difference is intended then the one-way promise is the thing "
                "that is wrong",
@@ -358,7 +374,21 @@ SHADOW_REMEDY = {
 }
 
 KIND_MISSING = "present in one tree only (missing from the published tree)"
-KIND_EXTRA = "present in one tree only (in the published tree, not a source)"
+#: **Not "not a source".** That phrasing was here and it was wrong, and it was
+#: wrong in the direction that costs a reader the most: it told them the rule
+#: declines these paths, when the rule *ships* every one of them. The four
+#: files this currently names -- `scripts/check_doc_encoding.py`,
+#: `scripts/contacts_check.py`, `scripts/contacts_check2.py`,
+#: `scripts/result_trust.py` -- are all `scripts/*.py`, which is a declared root
+#: and a declared suffix, so `recognition_reason` returns `None` for all four,
+#: meaning "this is a source". They are listed here because the *development
+#: tree* no longer has them, not because the rule would exclude them: three were
+#: renamed (`check_text_encoding.py`, `contacts_attribution_check.py`,
+#: `contacts_criteria_check.py`) and one moved into the package
+#: (`dock-py/python/opendocking/result_trust.py`, byte-identical to the stale
+#: copy). A reader told "not a source" looks for a rule change and finds none,
+#: because there is nothing to find.
+KIND_EXTRA = "present in one tree only (in the published tree, not in the development tree)"
 KIND_DIFFERS = "present in both trees, different bytes"
 
 
@@ -385,14 +415,22 @@ def compare(left_root: Path, left: Snapshot,
             left[rel][1], "", remedies["missing"], left_name, right_name))
     for rel in sorted(set(right) - set(left)):
         reason = RULE.recognition_reason(rel, right[rel][0].parent)
+        # `reason is None` means the rule *does* ship this path, so the file is
+        # listed because the development tree dropped it, and a sentence that
+        # named a recognition reason would be a lie. The tool's delete pass
+        # removes it either way -- it deletes by membership in the development
+        # tree, not by recognition -- which is why the text below is about the
+        # tool rather than about the rule.
+        if remedies is REMEDY and reason:
+            remedy = (f"the rule does not ship it -- {reason} -- so the next "
+                      f"run of _sync_release.py deletes it from the published "
+                      f"tree")
+        else:
+            remedy = remedies["extra"]
         out.append(Difference(
             rel.as_posix(), KIND_EXTRA,
             left_root / rel, right[rel][0], "",
-            right[rel][1],
-            (f"the rule does not ship it -- {reason} -- so the next run of "
-             f"_sync_release.py deletes it from the published tree"
-             if remedies is REMEDY and reason else remedies["extra"]),
-            left_name, right_name))
+            right[rel][1], remedy, left_name, right_name))
     for rel in sorted(set(left) & set(right)):
         if left[rel][1] != right[rel][1]:
             out.append(Difference(
@@ -643,9 +681,12 @@ def check_the_trees_agree(trees: Trees) -> None:
          "not have it"),
         ("the published tree holds nothing the rule would delete",
          KIND_EXTRA,
-         "the published tree carries files the development tree does not. The "
-         "next run of the tool deletes them, so they are published now and gone "
-         "later, which is the state that reads as intentional until it is not"),
+         "the published tree carries files the development tree does not. Most "
+         "of them are paths the rule still ships -- renamed or moved rather than "
+         "declined -- and the tool's delete pass removes them by membership in "
+         "the development tree, not by recognition, so each line below is "
+         "published now and gone later, which is the state that reads as "
+         "intentional until it is not"),
         ("every file in both trees is byte-identical",
          KIND_DIFFERS,
          "the two trees disagree about the contents of a file that is in both"),
@@ -1354,16 +1395,43 @@ def check_the_tree_carries_no_declared_output(trees: Trees) -> None:
 #: rebuild -- which is the engine owner's build, not a fact inside either tree.
 UNREVIEWABLE_PAYLOAD = ("dock-py/python/opendocking/_dockpy.pyd",)
 
+#: **The same question asked of the other artefact, which has a different answer
+#: and is the one a reader of the repository actually has.** *Which files in the
+#: published repository cannot be reviewed by reading?* -- **none**, and that is
+#: worth stating rather than leaving implied, because the two answers used to be
+#: the same file.
+#:
+#: The gap between them is a real structural fact about this project and the
+#: first time the two artefacts have been distinguishable: `.gitignore` carries
+#: `*_dockpy.pyd`, so git never tracked the compiled extension. The **sync
+#: payload** is a working copy and therefore does contain it; the **published
+#: repository** cannot. All three CI jobs build and install the wheel themselves,
+#: and the gate scripts import the installed package, so nothing depends on a
+#: committed binary.
+#:
+#: This is why `UNREVIEWABLE_PAYLOAD` above has exactly one entry and this table
+#: has none, and why the check below asserts both rather than one: a payload
+#: question answered for the repository, or the reverse, is a green that means
+#: nothing -- the first version of this file made exactly that conflation.
+UNREVIEWABLE_REPOSITORY: tuple = ()
+
 
 def check_the_unreviewable_payload() -> None:
     section("which payload files cannot be reviewed by reading")
     listed = set(RULE.iter_source_files(ROOT))
     drift = [p for p in UNREVIEWABLE_PAYLOAD if Path(p) not in listed]
     if drift:
-        bad("the list of payload files that cannot be reviewed by reading is current",
+        bad("the payload and repository unreviewable lists are current",
             f"{drift} are listed here as unreviewable but the rule no longer "
             f"publishes them. Either they became reviewable -- say so and change "
             f"this list -- or the suffix table moved and this is now wrong")
+    elif [p for p in UNREVIEWABLE_REPOSITORY if p in listed]:
+        bad("the payload and repository unreviewable lists are current",
+            f"{list(UNREVIEWABLE_REPOSITORY)} are listed as carried by the "
+            f"published repository. The rule publishes them, but that is the "
+            f"payload: `.gitignore` carries `*_dockpy.pyd`, so git never tracked "
+            f"it and no published tree can contain one. A clone that appeared to "
+            f"need this file would be a clone nobody has")
     else:
         size = (ROOT / UNREVIEWABLE_PAYLOAD[0]).stat().st_size
         ok("the list of payload files that cannot be reviewed by reading is current",

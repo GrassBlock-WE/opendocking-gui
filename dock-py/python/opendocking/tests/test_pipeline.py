@@ -298,10 +298,28 @@ class TestGrid:
         assert "SPACING" in text
 
     def test_too_small_box_is_rejected(self, receptor, ligand):
-        tiny = GridBox.from_center_size((0.0, 0.0, 0.0), (2.0, 2.0, 2.0))
+        # Centred on a real receptor atom rather than on the origin. This used
+        # to be a 2 A cube at (0, 0, 0), which misses every atom of
+        # `rec_prep.pdbqt` -- the nearest is 3.3 A away at [0.75, 4.253, 0.0] --
+        # so it was rejected for a second, unrelated reason before the
+        # ligand-fit check it exists to exercise could run. A 2 A box is still
+        # far too small for a 16-atom ligand whichever atom it is centred on, so
+        # the subject of the test is unchanged; only the incidental geometry
+        # that made it depend on a second defect is gone.
+        tiny = GridBox.from_center_size((0.75, 4.253, 0.0), (2.0, 2.0, 2.0))
         with pytest.raises(ValueError, match="needs at least"):
             dock(ligand, receptor.precalculate(tiny, "vina", 0.5),
                  exhaustiveness=1, num_modes=1)
+
+    def test_a_box_missing_every_receptor_atom_is_rejected(self, receptor, ligand):
+        # The other half of the same boundary, and the one that used to pass
+        # silently: a box nowhere near the receptor tabulates to all zeros, so
+        # the search ranks poses by the ligand's internal energy alone and
+        # reports them as a binding mode. The receptor here is 30 atoms around
+        # the origin, so a box 200 A away cannot contain one of them.
+        away = GridBox.from_center_size((200.0, 200.0, 200.0), (18.0, 18.0, 18.0))
+        with pytest.raises(ValueError, match="none of the 30 receptor atoms"):
+            receptor.precalculate(away, "vina", 0.5)
 
 
 # ---------------------------------------------------------------------------

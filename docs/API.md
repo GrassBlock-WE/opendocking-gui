@@ -61,7 +61,7 @@ for pose in &result.poses {
 |---|---|
 | `Element` | 12 种元素枚举（`COUNT = 12`），`from_symbol`、`symbol`、`interaction_radius`、`covalent_radius`、`is_metal`、`is_polar_hydrogen` |
 | `AtomType` | 18 种 PDBQT 原子类型（`COUNT = 18`），`from_token`、`token`、`default_atom_type(Element)` |
-| `AtomKind` | `Hydrophobic` / `Donor` / `Acceptor` / `DonorAcceptor` / `Other` |
+| `AtomKind` | 5 种相互作用类（`COUNT = 5`）：`Hydrophobic` / `Donor` / `Acceptor` / `DonorAcceptor` / `Other` |
 | `Atom` | `serial` `coord` `element` `atom_type` `kind` `charge` `ring` |
 | `Bond` | `i` `j` `rotatable`；别名 `MoleculeBond` |
 | `Molecule` | `atoms` `bonds`；`from_atoms`、`perceive_bonds`、`assign_ring_membership`、`assign_vina_atom_kinds`、`is_empty`、`total_charge`、`bounding_box`、`centroid` |
@@ -101,7 +101,7 @@ PDBQT 的 **BRANCH 只写本簇原子，不做嵌套**（`collect_cluster` 负�
 | `conf_gradient(&Conformation, &[Vector3<f64>]) -> Vec<f64>` | 原子梯度 → DOF 梯度 |
 | `subtree_atoms(cluster)` / `subtree_table()` | 运动学树的子表 |
 | `Conformation { position, orientation, torsions }` | `identity(n)` `from_slice` `ndof` `randomize` |
-| `Quaternion` | `from_rotvec` `to_rotvec` `to_matrix` `normalized` `IDENTITY` |
+| `Quaternion` | `from_rotvec` `to_rotvec` `to_matrix` `normalized`；`IDENTITY` 是单位四元数 `w = 1.0`、`x = y = z = 0.0` |
 | `rotvec_to_matrix` / `so3_right_jacobian` / `skew` / `wrap_torsion` | SO(3) 工具 |
 
 `MIN_INTRA_BOND_DISTANCE = 4`——分子内项的最小图距。
@@ -143,10 +143,22 @@ pub trait ScoringFunction: Send + Sync {
 | `write_autodock_map_files(dir)` | 写 `.map` |
 | `map_stride()` | `GRID_TYPE_COUNT * MAPS_PER_TYPE`（`const fn`） |
 
-常量：`DEFAULT_SPACING = 0.375`、`MAPS_PER_TYPE = 4`、`MAX_GRID_POINTS = 1 << 28`。
+常量：`DEFAULT_SPACING = 0.375`、`MAPS_PER_TYPE = 4`、`MAX_GRID_POINTS = 107,374,182`。
 枚举 `MapSlot { Shape, HbFromDonor, HbFromAcceptor, Hydrophobic }`。
 
-`MAX_GRID_POINTS` 在**分配之前**检查并报出所需 MB。`spacing = 1e-9` 落在
+**`MAX_GRID_POINTS` 不是内存上限，而是 `energy.wgsl` 里 `idx * STRIDE` 的 `u32` 索引上限。**
+最大可寻址点数 = `u32::MAX / (GRID_TYPE_COUNT · MAPS_PER_TYPE)` = 4,294,967,295 / 40。
+旧值 `1 << 28` 是按内存预算定的，比内核能寻址的范围大 2.5 倍——**旧文档承诺了一个
+引擎兑现不了的上限**：GPU 后端算不出来的规模，`backend` 字段会答「跑了 CPU」，而
+调用方看到的是一次成功的运行，无从知道自己在用一个 GPU 够不着的规模。
+新值在当前步长下是 16.0 GiB，`grid.rs` 里有两条 `const` 断言把它钉在这个界上，
+**而且界跟着 `GRID_TYPE_COUNT` 或 `MAPS_PER_TYPE` 一起动**，不会留下过期数字。
+
+`MAX_GRID_POINTS` 在**分配之前**检查并报出所需 MB。**这个收窄是行为变更，不是一次
+整理**：0.375 Å 下 170 Å 立方（94,196,375 点）仍然可建，**180 Å（111,284,641 点）
+现在被拒绝**，而在一台 64 GiB 的机器上那些网格过去是能跑的。只在 CPU 上打分、且
+机器内存足够的调用方，原来能建的 16–40 GiB 网格现在会被拒绝——这是刻意的取舍。
+`spacing = 1e-9` 落在
 `(0, 1]` 区间内但会要求 2×10¹⁰ 点的轴，维度乘积溢出后 `vec!` 触发 capacity
 overflow，而 release profile 是 `panic = "abort"`——那会**杀掉宿主进程**
 （Python 调用方的解释器直接消失，退出码 `0xC0000409`），不是抛异常。
@@ -175,9 +187,19 @@ lga::evolve(&Ligand, &GridMaps, &dyn ScoringFunction, &LgaConfig) -> Result<Vec<
 
 批量入口 `evaluate_population(ligand, maps, scoring, conformations, prefer_gpu)`
 返回 `(energies, PopulationBackend, Option<GpuSkip>)`，`Cpu` / `Gpu { adapter }`。
-配体大于一个 workgroup、配体为空、没有可用适配器都会**静默回退到 CPU**——
-一个给出别的数字的后端比没有后端更糟，所以回退后的结果必须和 CPU 完全一致
-（单测 `a_large_ligand_falls_back_to_the_cpu` 断言这一点）。
+
+**上报契约**（`dock-core/src/search/mod.rs`，由 `a_decline_is_always_self_explaining`
+钉进 `cargo test`，`scripts/gpu_cpu_parity_check.py:513-539` 在运行时钉同一件事）：
+**GPU 跑了 XOR 给出了一个非空理由说明它没跑，从不两者兼具、从不两者皆无。**
+配体大于一个 workgroup、配体为空、没有可用适配器、以及**构建本身没有 `gpu` feature**
+这四种情况都**回退到 CPU 并带回一个理由**——所以它们**不是静默回退**。另一半方向：
+`prefer_gpu = false` 的调用**必须不报任何回退**，否则那是一次没发生的回退。
+
+**这个契约在本文件上一版里被写成了「静默回退到 CPU」，那是一份给缺陷发的许可证**：
+它把「不给理由」写成了规格，于是实现与规格一致，而调用方无法区分「按要求用 CPU」
+和「你要的 GPU 被丢掉了」。一个给出别的数字的后端比没有后端更糟，所以回退后的结果
+必须和 CPU 完全一致（单测 `a_large_ligand_falls_back_to_the_cpu` 断言这一点）——
+**但「结果一致」从来不等于「可以不说为什么」**。见 `VERIFICATION.md` 缺陷 286。
 
 `LbfgsConfig` 默认：`memory = 10`、`max_iterations = 200`、
 `gradient_tolerance = 1e-4`、`energy_tolerance = 1e-6`、
@@ -191,7 +213,12 @@ lga::evolve(&Ligand, &GridMaps, &dyn ScoringFunction, &LgaConfig) -> Result<Vec<
 `generations = 40`、`migration_interval = 5`、`crossover_rate = 0.9`、
 `mutation_rate = 0.3`、`variance_weight = 0.15`、局部优化 `max_iterations = 60`。
 
-`OUT_OF_BOX_PENALTY = 1000.0`。
+`OUT_OF_BOX_PENALTY = 1000.0`。**这个数字本身不是罚项** —— 罚项是
+`OUT_OF_BOX_PENALTY × out_of_box_violation_per_axis(p, box)`：按**每超出的一埃**、
+按**轴**算，再对三个面求和；角落同时越界按两面各收一次。所以一个原子在 x 方向
+超出 2 Å，收 2000，不是 1000。梯度就是这条斜坡自己的导数，因此
+`dE/dx = +1000.000000`（每一个悬挑量都一样），`−∇E` 指向盒内。
+定义与实测见 `docs/SCORING.md` §4.2。
 
 ### `docking`
 
@@ -202,10 +229,13 @@ lga::evolve(&Ligand, &GridMaps, &dyn ScoringFunction, &LgaConfig) -> Result<Vec<
 `min_contact_distance` 默认 `MIN_CONTACT_DISTANCE = 2.0` Å，设为 `0.0` 关闭。
 它是一道**安全网**：排斥项自己能工作了，它只是拒绝报告任何物理上不成立的结构。
 `0` 表示"关掉它，去看真正的能量极小值在哪"。
+同一个字段在 Python 侧的 `dock()` 里叫同名关键字 `min_contact_distance`，
+默认 `None` 表示不动引擎默认值。见下面 `## Python` 一节。
 
 `dock(ligand, maps, scoring, config) -> Result<DockingResult>`。
-`DockingResult { poses, elapsed_seconds, raw_pose_count, rejected_pose_count, mode, scoring_function }`，
+`DockingResult { poses, elapsed_seconds, raw_pose_count, rejected_pose_count, unknown_atom_types, mode, scoring_function }`，
 另有 `best()` `energies()` `pose_conformation()` `grid_box()` `ligand()` `maps()`。
+`unknown_atom_types` 由 `GridMaps` 携带而来，而不是每次从 `Receptor` 现算——原因见下面 `Receptor` 一节那一行的说明。
 `partition_by_clash(poses, receptor_heavy, min_distance) -> (clean, clashing)` 单独暴露。
 `cluster_poses(...)` 也单独暴露，可单独复用。
 
@@ -249,7 +279,7 @@ from opendocking import (
 | `Receptor.from_pdbqt(path)` / `.from_pdbqt_str(text)` | 构造 |
 | `num_atoms` | 原子数 |
 | `num_polar_hydrogens` | 显式极性氢数；**为 0 通常意味着受体准备时把极性氢合并掉了**，会在每个 Ser/Thr/Tyr 上损失氢键 |
-| `unknown_atom_types` | 无法识别的原子类型**计数**。不报错（否则本工具无法读别的工具产出的 PDBQT），但让它可见 |
+| `unknown_atom_types` | 无法识别的原子类型**计数**。不报错（否则本工具无法读别的工具产出的 PDBQT），但让它可见。**这是制表之前的视角**：手里只有一个 `Receptor`、还没 `precalculate` 的时候，这是唯一能问的地方。一旦制表完成，受体就被丢掉了（`Receptor` 不再参与后续任何计算），所以同一个计数被搬到了 `GridMaps` 上，并出现在 `DockingResult.unknown_atom_types` 里——想判断"这次跑出来的能量是不是低估了受体"，要读的是结果上的那个，不是这一个 |
 | `center` / `bounds` | 几何信息 |
 | `estimate_memory_mb(box_, spacing=0.375)` | 预估内存 |
 | `precalculate(box_, scoring="vina", spacing=0.375) -> GridMaps` | 制表 |
@@ -308,6 +338,7 @@ File 菜单提供 `Load receptor…` `Load ligand…` `Open poses…` `Dock now`
 | `num_poses` `energies` `best_energy` `intermolecular_energies` `rmsds` | |
 | `elapsed_seconds` `raw_pose_count` `scoring_function` | |
 | `rejected_pose_count` | **非 0 意味着搜索一个物理上成立的姿势都没找到**，引擎回退报告了最好的那几个。几乎总是"盒子里是实心蛋白而不是口袋"或 `exhaustiveness` 太低 |
+| `unknown_atom_types` | 受体里无法识别的原子类型数，由 `GridMaps` 带过来。**非 0 意味着跑成功了、但能量低估了受体**：这类原子仍贡献形状项，却丢掉了氢键与疏水特征，而姿势数量看不出这件事。数值取自 `GridMaps`：`#[serde(default)]`，所以**计数出现之前写出的 map 文件反序列化为 0**，而 0 不等于"这个受体的原子全都被认出来了"——它只意味着"至少这么多没被认出" |
 | `pose_coords(i=0)` `all_pose_coords()` | 坐标 |
 | `pose_conformation(i=0)` | 该姿势的 DOF 向量。可以拿去 `score_conformation` 重新打分、查梯度，或继续优化 |
 | `write_pdbqt(path)` `write_xyz(path)` `summary()` | 输出 |
@@ -321,7 +352,8 @@ File 菜单提供 `Load receptor…` `Load ligand…` `Open poses…` `Dock now`
 
 ```python
 dock(ligand, maps, *, exhaustiveness=8, num_modes=9, rmsd_cutoff=1.0,
-     seed=None, mode="mc", scoring=None, steps=None) -> DockingResult
+     seed=None, mode="mc", scoring=None, steps=None,
+     min_contact_distance=None) -> DockingResult
 
 score_conformation(ligand, maps, conformation, scoring="vina")
     -> (float, np.ndarray)          # 总能量 + 关于 DOF 的解析梯度
@@ -341,6 +373,12 @@ available_backends() -> list[str]
 scoring_functions() -> list[str]
 engine_version() -> str
 ```
+
+`min_contact_distance` 与上面 Rust 段的 `DockingConfig::min_contact_distance`
+是**同一个字段**，`None` 表示不动引擎默认的 2.0 Å，`0.0` 关闭过滤、报告原始能量极小值。
+这一段以前根本没提它，而 `dock()` 也没有这个关键字——引擎读这个字段，Python 却改不了，
+所以每一次 Python `dock()` 都被静默固定在 2.0 Å。现在两边都写在这里，
+`scripts/core_check.py` 会核对本段与 `dock()` 的签名是否一致。
 
 `report_backend` 是一个**会被填写的 dict**，不是 bool：
 
@@ -385,8 +423,19 @@ RDKit 化学感知预处理。**这是把化学判断留在 Python 侧的理由*
 ## Python: `opendocking.workbench`
 
 ```python
-from opendocking.workbench import launch, Workbench, MoleculeView, Camera
+from opendocking.workbench import launch, MoleculeView, Camera
 ```
+
+`Workbench` used to appear on this line and **does not exist**. The window class
+is `app.MainWindow` and the entry point is `launch`; `__all__` promised a name
+that no module defines, so `import *` raised `AttributeError` and the direct
+import raised `ImportError`. It is removed rather than created, because the only
+real binding would be an eager `from .app import MainWindow as Workbench`, and
+that would make PyQt6 and moderngl hard requirements of `odcli sites` / `info`
+/ `workbench` -- which breaks the invariant recorded at `cli.py:885-886`, that
+the workbench package imports only the standard library plus numpy at module
+scope and defers the GUI import to a call inside `launch`. Every other
+occurrence of the string "Workbench" in this repository is the window *title*.
 
 - `launch(receptor=None, ligand=None, poses=None) -> int`：CLI 入口。
 - `Camera`：轨道相机。

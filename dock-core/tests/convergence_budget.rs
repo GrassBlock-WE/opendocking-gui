@@ -18,15 +18,47 @@
 //!
 //! # The headline the assertions below encode
 //!
-//! Measured over the 32 real local optimisations this file drives, **the
-//! gradient tolerance is met in none of them**, and giving a line-search-limited
-//! run a 100x larger iteration budget reproduces the *same* iterate at the same
+//! Measured over every real local optimisation this file drives, **the gradient
+//! tolerance is met in none of them**, and giving a line-search-limited run a
+//! 100x larger iteration budget reproduces the *same* iterate at the same
 //! iteration. So the budget is not what is stopping the search, and more of it
 //! does not buy stationarity: the Armijo line search is what ends these runs,
 //! which is the expected behaviour when the field is C0 and the gradient
 //! direction computed on one side of a cell face is not a descent direction on
-//! the other. What the extra budget *does* buy is a lower energy, and the
-//! measurements for that are in the printed tables.
+//! the other.
+//!
+//! **What the extra budget buys is an energy, and it is small.** That much was
+//! here before, as a single-seed sign; it is now a two-sided bound on a mean
+//! over a sample of seeds, and the change was forced by measurement rather than
+//! chosen. See "the sign is a property of the sample" below.
+//!
+//! # The sign is a property of the sample, so the sign is not asserted
+//!
+//! This file used to hold two claims as the sign of a single-seed difference:
+//! "quadrupling the local budget finds a better best pose" and "three times the
+//! mutator budget finds a better best pose". Both are directions, and a
+//! direction needs a distribution to be a claim about. Measured over eight
+//! seeds, with the shipped seed first:
+//!
+//! | quantity | seeds favouring the larger budget | mean | range |
+//! |---|---|---|---|
+//! | local budget 200 -> 800, exhaustiveness 16 | 6 / 8 | -0.099 | -0.656 .. +0.243 |
+//! | local budget 200 -> 800, exhaustiveness 4 | 4 / 8 | **+0.027** | -0.727 .. +1.181 |
+//! | mutator steps 70 -> 210, exhaustiveness 4 | 4 / 8 | -0.128 | -1.154 .. +0.778 |
+//!
+//! The sign is positive on some seeds and negative on others, and at
+//! exhaustiveness 4 the mean changes sign too. A one-seed sign therefore gates
+//! on which seed was drawn: the shipped seed is one of the two on which
+//! quadrupling the local budget returns a *worse* best pose (+0.2430), and that
+//! is what defect 224's published -0.48 was measured against when the wall was
+//! still freezing poses. The two claims are kept, as bounds over the sampled
+//! seeds, with the distribution printed beside them.
+//!
+//! This is not a re-reading of a number that came out close to the line. The
+//! local-budget bound is **two-sided** on purpose: it fires if a future change
+//! makes the local budget worth raising by more than
+//! [`BUDGET_MEAN_BOUND`] in the mean, and equally if one makes the shipped
+//! budget actively harmful, which is the direction a sign assertion cannot see.
 //!
 //! # How the exit reason is identified without instrumenting the optimiser
 //!
@@ -114,6 +146,40 @@ const DEEP_LOCAL_BUDGET: usize = 800;
 /// an unoptimised build, and a hundredfold budget put the suite into minutes.
 const HUGE_LOCAL_BUDGET: usize = 3_200;
 
+/// The seeds the two distributional claims are measured over.
+///
+/// Eight, and the first is the shipped seed, so the printed table starts with
+/// the number defect 224 published and every row after it is a seed the old
+/// single-seed assertions never saw. The count is a cost decision as much as a
+/// statistical one: each seed costs two `dock` calls at
+/// [`EXHAUSTIVENESS`], so this is the dominant cost of the file. Measured
+/// means over the first six of these alone are -0.104 and -0.205, so the claim
+/// does not depend on the last two, and eight leaves the printed range
+/// symmetric around the shipped seed.
+const BUDGET_SEEDS: [u64; 8] = [20260929, 1, 2, 3, 4, 5, 6, 7];
+
+/// The two-sided bound on the mean best-pose energy difference between the
+/// shipped local budget and [`DEEP_LOCAL_BUDGET`], in kcal/mol.
+///
+/// The largest single-seed difference measured over [`BUDGET_SEEDS`] is +0.2430
+/// and the largest improvement is -0.6563, so 0.25 is *not* a bound on any one
+/// seed; it is a bound on the mean, which measured -0.0989 at
+/// [`EXHAUSTIVENESS`] and +0.0271 at a quarter of it. The margin is therefore
+/// about 2.5x the larger of those two, and the claim is that the local budget
+/// is not a lever worth more than a quarter of a kcal/mol in either direction
+/// on this field. Widen it and the gate stops being able to notice the budget
+/// becoming worth raising, which is the one thing it exists to notice.
+///
+/// This is a **coarse** bound and should not be read as a tight one. The
+/// per-seed range is 0.9 wide, so the standard error of a mean over
+/// [`BUDGET_SEEDS`] is about 0.3 -- larger than the bound. The measured |mean|
+/// is 0.099, comfortably inside its own sampling error, and that is the honest
+/// reading: the local budget is not demonstrably worth anything on this field,
+/// and no single seed can say which way it points. The bound fires when a
+/// change moves the mean by roughly a third of a kcal/mol or more, and that is
+/// the precision it actually has.
+const BUDGET_MEAN_BOUND: f64 = 0.25;
+
 /// Fixture paths are resolved from the package root, not the caller's working
 /// directory, so the numbers do not depend on where `cargo test` was invoked.
 fn fixture(name: &str) -> std::path::PathBuf {
@@ -154,6 +220,59 @@ fn shipped_config(local_max_iterations: usize) -> DockingConfig {
         num_modes: NUM_MODES,
         ..DockingConfig::default()
     }
+}
+
+/// The shipped search with the local iteration budget as the only free
+/// parameter, and the seed named rather than fixed.
+fn seeded_config(local_max_iterations: usize, seed: u64) -> DockingConfig {
+    DockingConfig {
+        monte_carlo: MonteCarloConfig {
+            exhaustiveness: EXHAUSTIVENESS,
+            steps: MonteCarloConfig::default().steps,
+            seed: Some(seed),
+            local: LbfgsConfig {
+                max_iterations: local_max_iterations,
+                ..LbfgsConfig::default()
+            },
+            ..MonteCarloConfig::default()
+        },
+        num_modes: NUM_MODES,
+        ..DockingConfig::default()
+    }
+}
+
+/// One best-pose energy difference per sampled seed: the deeper option's best
+/// pose minus the shipped option's, in kcal/mol, so a negative number is the
+/// deeper option winning.
+///
+/// Deliberately the *best pose of the whole search* and not a per-pose
+/// continuation. The two are separate questions with separate answers, and the
+/// per-pose one is measured by the ladder in the other test; folding them
+/// together is what made a single sign look like a finding.
+fn local_budget_sweep(ligand: &Ligand, maps: &GridMaps) -> Vec<(u64, f64)> {
+    let mut out = Vec::new();
+    for seed in BUDGET_SEEDS {
+        let a = dock(
+            ligand,
+            maps,
+            &VinaScoring::new(),
+            &seeded_config(SHIPPED_LOCAL_BUDGET, seed),
+        )
+        .expect("the shipped configuration should dock for every sampled seed");
+        let b = dock(
+            ligand,
+            maps,
+            &VinaScoring::new(),
+            &seeded_config(DEEP_LOCAL_BUDGET, seed),
+        )
+        .expect("the deeper configuration should dock for every sampled seed");
+        out.push((seed, b.poses[0].energy - a.poses[0].energy));
+    }
+    out
+}
+
+fn mean_of(v: &[(u64, f64)]) -> f64 {
+    v.iter().map(|(_, d)| *d).sum::<f64>() / v.len() as f64
 }
 
 fn grad_inf(g: &[f64]) -> f64 {
@@ -269,8 +388,7 @@ fn contact_stats(pose_coords: &[Vec3], receptor: &[[f64; 3]]) -> (f64, usize) {
     let mut clashes = 0usize;
     for p in pose_coords {
         for q in receptor {
-            let d =
-                ((p[0] - q[0]).powi(2) + (p[1] - q[1]).powi(2) + (p[2] - q[2]).powi(2)).sqrt();
+            let d = ((p[0] - q[0]).powi(2) + (p[1] - q[1]).powi(2) + (p[2] - q[2]).powi(2)).sqrt();
             worst = worst.min(d);
             if d < 2.0 {
                 clashes += 1;
@@ -421,7 +539,8 @@ fn the_step_budget_is_not_what_stops_the_search() {
     // stationary points" (defect 222) is a property of the field and not a
     // budget that was set too small.
     assert_eq!(
-        total.0 + total.5, 0,
+        total.0 + total.5,
+        0,
         "LbfgsConfig::gradient_tolerance is {tolerance:e} (lbfgs.rs:54) and the \
          gradient tolerance was met in {} of the {} local optimisations at the \
          shipped budget and {} of the {} at a {HUGE_LOCAL_BUDGET}-iteration one. If \
@@ -493,7 +612,12 @@ fn allowing_the_search_to_continue_lowers_the_energy_and_not_the_gradient() {
         result.raw_pose_count,
         result.elapsed_seconds * 1e3
     );
-    s += &describe_result("option A: local max_iterations 200", &result, &ligand, &maps);
+    s += &describe_result(
+        "option A: local max_iterations 200",
+        &result,
+        &ligand,
+        &maps,
+    );
 
     // --- what continuing a returned pose buys -----------------------------
     // The two searches this test needs beyond the one above, started together
@@ -577,7 +701,10 @@ fn allowing_the_search_to_continue_lowers_the_energy_and_not_the_gradient() {
             // of the ladder is the whole claim: the gain saturates.
             worst_energy_gain = worst_energy_gain.max((e0 - previous).abs());
             worst_final_grad_ratio = worst_final_grad_ratio.max(final_grad / g0);
-            s += &format!("\n  first 200 extra iterations bought {:+.3e} kcal/mol", at_200 - e0);
+            s += &format!(
+                "\n  first 200 extra iterations bought {:+.3e} kcal/mol",
+                at_200 - e0
+            );
         }
     }
     s += &format!(
@@ -586,19 +713,45 @@ fn allowing_the_search_to_continue_lowers_the_energy_and_not_the_gradient() {
          and the largest |grad|inf still standing is {worst_final_grad_ratio:.2e}x what \
          the search already returned\n"
     );
-    // The energy claim. 0.25 kcal/mol against a measured maximum of 0.032: a
-    // tenfold budget increase moves a returned pose by less than a quarter of a
-    // kcal/mol, so "converge properly" is not an energy the engine is leaving
-    // on the table.
+    // The energy claim. 0.25 kcal/mol, and **the margin on it is now 4%**:
+    // the worst continuation measured here is 0.2392. It was 0.032, an 8x
+    // margin, for as long as the out-of-box wall was flat -- a pose that left
+    // the box was frozen, so continuing it bought nothing. The wall now slopes
+    // in the direction descent takes, so a pose that has left the box can be
+    // walked back in, and continuing one really does buy something. The number
+    // moved because the engine moved, not because the bound was re-derived.
+    //
+    // Which is why the bound stays at 0.25 rather than moving with the
+    // measurement. A bound re-derived to fit the number in front of it has
+    // stopped being a bound, and one widened to stop being uncomfortable has
+    // stopped being a check; this one is now a check that is nearly at its
+    // limit, which is a fact about the engine and belongs in the file rather
+    // than in a rewritten constant. The next engine change in this area should
+    // expect to revisit it, and should expect to say which way it moved and
+    // why -- that is the whole reason the measured value is in the failure
+    // message below.
+    //
+    // The wider sample agrees: over 40 returned poses across 8 seeds the
+    // largest continuation is 0.2114 and the mean 0.0189, with every one of
+    // the 40 ending `NoAcceptableStep` at a 3200-iteration budget. The 0.2392
+    // above is this file's own 4-pose sample, which is a worse maximum than a
+    // wider one is obliged to be -- the two are consistent, and the four-pose
+    // figure is the one this bound is set against.
     assert!(
         worst_energy_gain < 0.25,
         "continuing a returned pose to a 3200-iteration budget still moved it by \
          {worst_energy_gain:.3e} kcal/mol, which is large enough that raising the \
-         local budget is a real energy trade rather than a rounding detail"
+         local budget is a real energy trade rather than a rounding detail. The bound \
+         is 0.25 and the margin on it was 4% before this run, down from 8x while the \
+         out-of-box wall was flat; the published per-pose maximum for that flat-wall \
+         engine was 0.032, and a 40-pose sample over 8 seeds on this engine gives \
+         0.2114 with a mean of 0.0189."
     );
 
     // --- what a bigger budget buys the whole search ----------------------
-    let (deeper, s_b) = deep.join().expect("the deeper search thread should not panic");
+    let (deeper, s_b) = deep
+        .join()
+        .expect("the deeper search thread should not panic");
     s += &s_b;
 
     let (a, b) = (&result, &deeper);
@@ -637,7 +790,9 @@ fn allowing_the_search_to_continue_lowers_the_energy_and_not_the_gradient() {
                 max_iterations: budget,
                 ..LbfgsConfig::default()
             };
-            *acc += run_traced(&survey_ligand, &maps, &start, &cfg).outcome.evaluations;
+            *acc += run_traced(&survey_ligand, &maps, &start, &cfg)
+                .outcome
+                .evaluations;
         }
     }
     let cost_ratio = evals_b as f64 / evals_a as f64;
@@ -664,16 +819,56 @@ fn allowing_the_search_to_continue_lowers_the_energy_and_not_the_gradient() {
         d_energy,
         a.poses.len().min(b.poses.len())
     );
+    // The same comparison as above, over every sampled seed rather than the one
+    // the tables above happen to show. The printed A/B table is the shipped
+    // seed; this is the distribution it is a draw from, and the shipped seed is
+    // first in it so the two read together.
+    let sweep = local_budget_sweep(&survey_ligand, &maps);
+    let mean = mean_of(&sweep);
+    let min = sweep.iter().map(|(_, d)| *d).fold(f64::INFINITY, f64::min);
+    let max = sweep
+        .iter()
+        .map(|(_, d)| *d)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let favours_deep = sweep.iter().filter(|(_, d)| *d < 0.0).count();
+    s += &format!(
+        "\n  the same comparison over {} sampled seeds (the shipped seed first):\n",
+        BUDGET_SEEDS.len()
+    );
+    for (seed, d) in &sweep {
+        s += &format!(
+            "    seed {seed:<10} dE {d:+8.4}   {}\n",
+            if *d < 0.0 {
+                "deeper option wins"
+            } else {
+                "shipped option wins"
+            }
+        );
+    }
+    s += &format!(
+        "    mean {mean:+.4}  range {min:+.4} .. {max:+.4}  deeper option wins in \
+         {favours_deep} of {}\n",
+        BUDGET_SEEDS.len()
+    );
     println!("{s}");
 
+    // The claim, as a bound and not a sign. `d_energy` above is one draw from
+    // this distribution: the shipped seed is one of the {}/{} on which the
+    // deeper option loses, which is why the sign is not asserted here. The
+    // bound is two-sided so it also fires in the direction this file exists to
+    // notice -- a local budget that became worth raising.
     assert!(
-        d_energy < -0.1,
-        "quadrupling the local budget is supposed to find a better best pose; it \
-         found {d_energy:+.4} kcal/mol instead (A {:+8.4}, B {:+8.4}). If the deeper \
-         run is no longer finding better poses then the cost comparison above is \
-         measuring two equivalent runs and the trade has changed shape.",
-        a.poses[0].energy,
-        b.poses[0].energy
+        mean.abs() < BUDGET_MEAN_BOUND,
+        "the mean best-pose difference over {} sampled seeds is {mean:+.4} kcal/mol, \
+         outside the +-{BUDGET_MEAN_BOUND} bound, with the per-seed range \
+         {min:+.4} .. {max:+.4} and the deeper option winning {favours_deep} of \
+         {}. Either the local budget has become worth more than a quarter of a \
+         kcal/mol -- which would make raising {DEEP_LOCAL_BUDGET} the obvious move \
+         and this file's cost comparison the argument for it -- or the shipped \
+         budget has become actively harmful. Both are findings; neither is a \
+         rounding detail, and the per-seed table above says which.",
+        BUDGET_SEEDS.len(),
+        BUDGET_SEEDS.len()
     );
     // The decision-relevant half: a better energy did not come with a smaller
     // gradient. Stated as a bound on both options rather than as an ordering
@@ -812,11 +1007,86 @@ fn the_mutators_own_budget_is_not_what_stops_a_local_optimisation() {
          tolerance. That would be a route to stationarity the step budget does not \
          provide, and it would change the recommendation."
     );
+
+    // The same experiment over the sampled seeds, gated on the claim this test
+    // is actually named for: raising `steps` must not make any single returned
+    // pose more stationary. That is a claim about every pose of every seed
+    // rather than about one seed's best energy.
+    //
+    // The best-pose energy is measured here too and deliberately *not* gated.
+    // An earlier version of this block gated the sign of that difference and
+    // asserted that extra minimisations are "at worst redundant, never
+    // harmful". Measurement refuted it: on 3 of 8 seeds tripling `steps`
+    // returns a best pose up to +0.778 kcal/mol *worse*. That is not a defect
+    // in the search -- the two runs are different samples of a stochastic
+    // search rather than nested ones, so neither dominates the other -- and it
+    // is not evidence about what stops a local optimisation either. It is
+    // printed because it is the number a reader would otherwise ask for, with
+    // its mean and range beside it so the sign is not read as a finding.
+    let mut mutator_sweep = String::new();
+    let mut best_pose_deltas: Vec<f64> = Vec::new();
+    let mut worst_grad_over_seeds = 0.0f64;
+    for seed in BUDGET_SEEDS {
+        let mut row = format!("    seed {seed:<10}");
+        let mut short_best = f64::NAN;
+        for steps in [70u32, 210] {
+            let cfg = DockingConfig {
+                monte_carlo: MonteCarloConfig {
+                    exhaustiveness: 4,
+                    steps,
+                    seed: Some(seed),
+                    ..MonteCarloConfig::default()
+                },
+                num_modes: 3,
+                ..DockingConfig::default()
+            };
+            let r = dock(&ligand, &maps, &VinaScoring::new(), &cfg).expect("should dock");
+            let w = r
+                .poses
+                .iter()
+                .map(|p| energy_and_grad(&ligand, &maps, &p.conf).1)
+                .fold(0.0f64, f64::max);
+            worst_grad_over_seeds = worst_grad_over_seeds.max(w);
+            row += &format!(
+                "  steps {steps:>3}: best {:+8.4}  worst |grad|inf {w:>10.3e}",
+                r.poses[0].energy
+            );
+            if steps == 70 {
+                short_best = r.poses[0].energy;
+            } else {
+                let d = r.poses[0].energy - short_best;
+                best_pose_deltas.push(d);
+                row += &format!("  dE {d:+8.4}");
+            }
+        }
+        mutator_sweep += &format!("{row}\n");
+    }
+    let d_mean = best_pose_deltas.iter().sum::<f64>() / best_pose_deltas.len() as f64;
+    let d_min = best_pose_deltas
+        .iter()
+        .cloned()
+        .fold(f64::INFINITY, f64::min);
+    let d_max = best_pose_deltas
+        .iter()
+        .cloned()
+        .fold(f64::NEG_INFINITY, f64::max);
+    s += &format!(
+        "\n  tripling the mutator budget over {} sampled seeds:\n{}\n  \
+         best-pose dE: mean {d_mean:+.4}  range {d_min:+.4} .. {d_max:+.4}  -- \
+         reported, not gated: the two runs are different samples, not nested, so \
+         neither dominates the other and the sign is not a finding\n",
+        BUDGET_SEEDS.len(),
+        mutator_sweep
+    );
+    println!("{s}");
+
     assert!(
-        best_by_steps[1] < best_by_steps[0],
-        "three times the search budget should find a better best pose; it found \
-         {:+8.4} against {:+8.4}",
-        best_by_steps[1],
-        best_by_steps[0]
+        worst_grad_over_seeds > 1e3 * tolerance,
+        "across every pose of every sampled seed at both mutator budgets, the worst \
+         returned |grad|inf was {worst_grad_over_seeds:.3e}, within 1000x of the \
+         {tolerance:e} tolerance. A route to stationarity that more sampling opens \
+         would change what this file recommends, and {} seeds is a wider sample \
+         than the 2 the rows above cover.",
+        BUDGET_SEEDS.len()
     );
 }

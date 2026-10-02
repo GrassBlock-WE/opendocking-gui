@@ -23,7 +23,7 @@ ROOT = Path(__file__).resolve().parent.parent
 # none. Putting `dock-py/python` on the path first imports the source copy of
 # `opendocking`, which a clean checkout cannot load because it has no compiled
 # `_dockpy` extension -- that file is gitignored and only exists in
-# site-packages. See `contacts_check.py` for the same note in full.
+# site-packages. See `contacts_criteria_check.py` for the same note in full.
 try:  # noqa: SIM105
     import opendocking  # noqa: F401
 except ImportError:  # pragma: no cover - only on an uninstalled checkout

@@ -66,6 +66,52 @@ from opendocking.prep import prepare_receptor_with_report  # noqa: E402
 FAILURES: list[str] = []
 CHECKS = 0
 
+#: How many checks this file records, **counted from a run and not derived from
+#: the source above**.
+#:
+#: `F:\python310\python.exe scripts\cli_prep_check.py` with
+#: `PYTHONIOENCODING=utf-8` and `PYTHONPATH=dock-py\python`: **`37/37 passed`,
+#: exit 0**, in 9.8 s. The pin is that run's 37 plus the tally check below, so
+#: 38, and the run that has to agree with the pin is the *second* run rather
+#: than the one the 37 came from.
+#:
+#: **34 call sites produce 37 checks, and neither number is the pin.** Three
+#: things move between them, and all three are the file's own shape rather than
+#: anything about the machine:
+#:
+#:   * the `--report` loop asserts six labels from one site (`+5`);
+#:   * the `if F is None:` arm carries a site that does not run on a working
+#:     checkout, and its `else` half carries the one that does (`-1`);
+#:   * the self-test near the end calls `check(False)` **and then puts
+#:     `CHECKS` and `FAILURES` back** (`-1`), which is the one that would
+#:     mislead anyone counting sites. The self-test is a result site and is
+#:     declared as one in `check_scripts_declare.py`'s `BLIND_SPOTS`; it is
+#:     deliberately *not* a row in this run's tally, because the whole point of
+#:     it is to see what `check()` does to the counters and then to undo it.
+#:
+#: So the census (31 unconditional + 2 guarded) and the run (37) are two claims
+#: about two different questions -- "could this site stop running" against "how
+#: many checks will the report" -- and the pin is the second one.
+#:
+#: **What is deliberately not asserted.** The `if F is None:` path returns
+#: before the tally check, so a checkout that cannot import
+#: `scripts/prep_check.py` records one check and does not compare it against
+#: this constant. That is the same choice `prep_check.py` documents for its own
+#: early return, and for the same reason: that path has already gone red on the
+#: fixture-import check, so a total that does not add up there would be a
+#: second red about the same missing file. A skipped assertion is a counted
+#: absence, and here the absence is visible in the output, because the summary
+#: line prints `(expected 38)` against a tally of 1.
+#:
+#: Nothing about the environment is in the 37. The fixtures come from
+#: `prep_check.py` and the run is against a checked-in receptor, so a missing
+#: input changes the *verdicts* rather than the number of verdicts; the
+#: subprocesses get their environment from `run()`, which sets `PYTHONPATH`
+#: per child, and the one check that deliberately measures the *installed* copy
+#: strips it in code. Measured both ways: 37 with `PYTHONPATH` set and 37
+#: without it.
+EXPECTED_CHECKS = 38
+
 
 def check(name, ok, detail=""):
     global CHECKS
@@ -81,7 +127,7 @@ def section(t):
 
 
 def finish() -> int:
-    print(f"\n{CHECKS - len(FAILURES)}/{CHECKS} passed")
+    print(f"\n{CHECKS - len(FAILURES)}/{CHECKS} passed (expected {EXPECTED_CHECKS})")
     for f in FAILURES:
         print(f"  FAILED: {f}")
     return 1 if FAILURES else 0
@@ -410,6 +456,19 @@ def main() -> int:
         check("the silence guard rejects a CLI that always reports",
               too_chatty(chatty, clean) and not too_chatty(result.stdout, clean),
               "two lines for a lossless input is rejected, one line is not")
+
+        # The pin, asserted on the way out rather than only in the declaration.
+        # The `+ 1` is this check, which has not been counted yet when the
+        # comparison is built.
+        #
+        # Only on the path that got this far, for the reason the note on the
+        # constant gives: the `if F is None:` return above has already gone red
+        # on the fixture import, so asserting a total there would be a second
+        # red about the same missing file. Its summary line still prints the
+        # declared number, so the gap is counted rather than hidden.
+        check("this file's own count is the count it declares",
+              CHECKS + 1 == EXPECTED_CHECKS,
+              f"{CHECKS} ran before this one and {EXPECTED_CHECKS} are declared")
 
     return finish()
 

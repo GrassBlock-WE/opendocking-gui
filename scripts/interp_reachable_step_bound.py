@@ -109,17 +109,16 @@ SIZE = 18.0
 SPACING = 0.375
 SCORING = "vina"
 
-#: The search settings `examples/audit_poses.py` docks with. The lever is
-#: measured on the poses that run returns, so it has to be the same run; the
-#: audit's own output is compared against these energies by the gate.
-EXHAUSTIVENESS = 16
-NUM_MODES = 5
-SEED = 20260929
-
-#: The audit's line-search steps, read out of `examples/audit_poses.py` rather
-#: than restated here. Duplicating a constant in two files is how a bound ends
-#: up describing a step the audit no longer takes.
+#: The audit's own declarations, read out of its source rather than restated
+#: here. Duplicating a constant in two files is how a bound ends up describing a
+#: step the audit no longer takes -- and, for the three settings below, a *run*
+#: the audit no longer makes. The first sentence is the comment that used to sit
+#: on `_STEPS_RE` alone, one line away from the constants it did not apply to.
 _STEPS_RE = re.compile(r"_LINE_SEARCH_STEPS\s*=\s*\(([^)]*)\)")
+_DOCK_CALL_RE = re.compile(r"opendocking\.dock\(([^)]*)\)")
+#: The same word-boundary this tree uses in `examples_check.py`: `\b` does not
+#: match after `(`, so `dock(exhaustiveness=16)` would read as empty.
+_DOCK_KWARG_RE = re.compile(r"(?<![^\s])(exhaustiveness|num_modes|seed)\s*=\s*(\d+)")
 
 
 def audit_steps() -> list[float]:
@@ -139,6 +138,82 @@ def audit_steps() -> list[float]:
     if not steps:
         raise ValueError(f"{AUDIT.name} declares an empty _LINE_SEARCH_STEPS")
     return steps
+
+
+def audit_dock_settings() -> dict[str, int]:
+    """`exhaustiveness`, `num_modes` and `seed` as the audit's `dock()` spells them.
+
+    Raises rather than falling back to a default, in all three ways it can fail:
+    no call, more than one call, or a call that no longer passes the keywords as
+    integer literals. A reader that guessed would describe a run the audit does
+    not make, which is the whole defect this replaced -- so a shape change in
+    the audit has to stop this file loudly instead of quietly.
+    """
+    text = AUDIT.read_text(encoding="utf-8")
+    calls = _DOCK_CALL_RE.findall(text)
+    if len(calls) != 1:
+        raise ValueError(
+            f"{AUDIT.name} has {len(calls)} `opendocking.dock(` call(s); the lever "
+            f"is measured on the poses one run returns and this file cannot say "
+            f"which run that is"
+        )
+    found = {name: int(value) for name, value in _DOCK_KWARG_RE.findall(calls[0])}
+    missing = [n for n in ("exhaustiveness", "num_modes", "seed") if n not in found]
+    if missing:
+        raise ValueError(
+            f"{AUDIT.name} no longer passes {', '.join(missing)} to "
+            f"`opendocking.dock()` as an integer literal, so the run this file "
+            f"measures cannot be read back and must not be guessed; that call "
+            f"carries {sorted(found) or 'none of them'}"
+        )
+    return found
+
+
+#: The search settings `examples/audit_poses.py` docks with. The lever and the
+#: steepest gradient below are measured on the poses that run returns, so it has
+#: to be the same run; the energies printed here are the human record of which
+#: run those were.
+#:
+#: **The claim this comment used to make was false, and it is worth correcting
+#: here rather than one line further down, because it is the same shape as the
+#: defect below.** It said "the audit's own output is compared against these
+#: energies by the gate". No gate reads them. `examples_check.py` takes
+#: `REACHABLE_BOUND`, `FINEST_STEP`, `LEVER`, `G_MAX` and `MAX_GRAD2` from the
+#: parseable block at the end of this file, and `FINEST_STEP` is the only one it
+#: cross-checks against the audit's own source. The pose energies are printed for
+#: a reader. So the coupling between the two files was narrower than this comment
+#: claimed -- which is a large part of why a duplicated setting could sit here
+#: unnoticed, and why fixing the coupling is worth more than fixing the wording.
+#:
+#: **These three used to be `16`, `5` and `20260929` written out here as well as
+#: inline in the audit's `dock()` call, and nothing tied the two together.**
+#: That shape is invisible to the sweep that found it and to
+#: `check_counted_constants.py` alike, and for the same reason: a constant handed
+#: to a call *looks* validated, because the detector stops at the first node that
+#: can act on the value, and `opendocking.dock(num_modes=NUM_MODES)` is one. The
+#: detector cannot see that the value is also written as a literal 4 000 lines
+#: away in another file, and the gate says so about itself: it does not follow a
+#: constant into another file.
+#:
+#: What was at stake is measured rather than asserted, and it is not a rounding
+#: difference: `num_modes` decides how many poses come back, so a `NUM_MODES = 3`
+#: here leaves the audit returning five and this file measuring three. Measured on
+#: `1crn`/`biotin` at this box and spacing: five modes returns 5 poses at -5.1697,
+#: -4.9103, -4.6164, -4.5858, -4.4554 kcal/mol and three modes returns the first
+#: three of those, identical to 1e-9 in energy and 1e-6 A in coordinates. So every
+#: energy the gate can see stays green -- it reads none of them, as above -- while
+#: the two files have stopped describing the same run, and `LEVER` is then
+#: differenced over 3 poses instead of 5 and the bound assembled from it
+#: describes a pose set the audit never printed.
+#:
+#: Read out rather than compared, so no second copy is left to drift. These three
+#: names are now computed, and the audit's `dock()` call is the only place any of
+#: them is written. Same mechanism as `audit_steps` above, on the same file, for
+#: the same reason.
+_AUDIT_DOCK = audit_dock_settings()
+EXHAUSTIVENESS = _AUDIT_DOCK["exhaustiveness"]
+NUM_MODES = _AUDIT_DOCK["num_modes"]
+SEED = _AUDIT_DOCK["seed"]
 
 
 #: Map slots, in storage order. Mirrors `MapSlot` in `dock-core/src/grid.rs`;
@@ -348,6 +423,13 @@ def main() -> int:
     finest = min(steps)
     print(f"reachable-step bound, derived from the map in {RECEPTOR.name}")
     print(f"box {SIZE:g} A about {CENTRE}, spacing {SPACING} A, scoring {SCORING}")
+    # Which run this file is about to measure, and where the three numbers came
+    # from. Printed because a bound derived from a lever over poses the audit
+    # never printed is exactly the failure the read-back prevents, and a reader
+    # of this output should not have to open the audit to confirm the two runs
+    # are the same one.
+    print(f"audit run  exhaustiveness {EXHAUSTIVENESS}, num_modes {NUM_MODES}, "
+          f"seed {SEED} -- read out of {AUDIT.name}'s own dock() call")
     print(f"audit line-search steps {steps} -> finest {finest:.1e}\n")
 
     with warnings.catch_warnings():

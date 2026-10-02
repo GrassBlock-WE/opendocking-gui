@@ -128,11 +128,29 @@ WALL: list[tuple[str, float]] = []
 #: the viewport-shim interception proof and its mutation twin, both counted
 #: because a check that cannot be reached is a bug in this file rather than a
 #: fact about the environment.
-#: Lower it only after a real green run. Note what is deliberately *not* pinned
-#: separately: the tree-guard outcome exits 2 before `finish()` runs, so a
-#: concurrent edit cannot change this number -- it changes the exit code
-#: instead, which is the whole point of splitting those two.
-EXPECTED_CHECKS = 131
+#:
+#: 132 adds the prose dock exit code, ahead of every check that reads the table
+#: it prints. That number is raised on the strength of a *reason*, not a green
+#: run: the run that motivated it was 128/131 with three reds whose messages all
+#: pointed at the table formatter while the command had exited 1 with
+#: `error: 'opendocking._dockpy.DockingResults' object has no attribute
+#: 'unknown_atom_types'` on stderr. Re-run before trusting 132/132. Do not
+#: lower it without one.
+#:
+#: 133 adds the other half of the same finding, after the engine owner reported
+#: that `unknown_atom_types` was in **neither** output mode -- the two modes
+#: already disagreed about a fact, and the record now carries both counts. The
+#: pin moved with the edit, in the same minute it was made, which is the only
+#: time it is cheap to move: a pin that is allowed to lag is a pin nobody reads.
+#:
+#: Neither 132 nor 133 has been observed green. The source tree's compiled
+#: extension is stale and `odcli dock -o` exits 1 against it, so the run that
+#: would settle this has not happened yet. Lower it only after a real green run.
+#: Note what is deliberately *not* pinned separately: the tree-guard outcome
+#: exits 2 before `finish()` runs, so a concurrent edit cannot change this
+#: number -- it changes the exit code instead, which is the whole point of
+#: splitting those two.
+EXPECTED_CHECKS = 133
 
 #: Exit vocabulary, shared with the GUI check scripts:
 #: 0 ran and everything passed, 1 ran and something failed, 2 did not finish.
@@ -213,6 +231,41 @@ class Result:
         see the `workbench` section for the case that made that necessary.
         """
         return self.stdout + self.stderr
+
+    @property
+    def error_line(self) -> str:
+        """The command's own diagnosis, or ``""`` if it never gave one.
+
+        A non-zero exit and a truncated stdout are two separate facts, and
+        every assertion made *downstream* of a failed command is a guess about
+        output that was never produced. That distinction was not free: when the
+        prose `dock` path died on a stale extension, three shape checks went
+        red reporting a *formatting change* -- header missing, row count
+        wrong, numbers disagreeing with the JSON -- while the actual cause, an
+        `AttributeError` for a field the compiled extension does not export,
+        sat on stderr and was quoted nowhere. The JSON mode of the same command
+        was healthy, which is what made "the two modes drifted" the obvious
+        and wrong story.
+
+        So the exit code is checked *before* anything derived from the output,
+        and when it is non-zero the reason is printed in the failure message
+        itself. A red check whose message points one layer below the cause
+        costs the next reader more than the check earns.
+
+        What this property is **not**: load-bearing for any verdict. The check
+        that uses it is `returncode == 0`; breaking the extraction loses the
+        cause from the message and moves nothing in the tally, because a check
+        whose verdict cannot be moved by its own mutation is not testing the
+        thing it is read as testing. Measured both ways: five cases over
+        healthy / the real failure / a traceback / a silent failure / a wrong
+        table with rc 0, and the mutated extraction against each. If you change
+        this, re-run that -- `EXPECTED_CHECKS` will not tell you.
+        """
+        for line in self.stderr.splitlines():
+            s = line.strip()
+            if s.startswith("error:") or s.startswith("Traceback"):
+                return s
+        return ""
 
 
 def say(*args) -> list[str]:
@@ -776,7 +829,7 @@ def main() -> int:
               f'from one that is not')
         radius = run(say("prep-ligand", "-l", str(SDF))).stdout
         check("the child's UTF-8 output survives the pipe intact",
-              "Å" in radius and "脜" not in radius,
+              "Å" in radius and "\u811c" not in radius,
               "decoded as UTF-8, not as this console's legacy code page: a GBK "
               "decode turns that A-ring into a different character entirely")
 
@@ -1229,11 +1282,24 @@ def main() -> int:
             check("dock --json is machine-readable, and is only that",
                   dj.returncode == 0 and isinstance(rec, dict),
                   f"rc={dj.returncode}, {len(dj.stdout)} bytes parsed")
-            check("the record has the nine documented keys",
+            # Nine -> eleven. `poses_outside_box_count` is the engine's
+            # out-of-box tally, made reportable; `unknown_atom_types` is older
+            # and was in **neither** mode, so the two output modes already
+            # disagreed about it before this round. Adding it here is the
+            # honest direction: the disagreement was that a fact existed in the
+            # engine and in neither surface a reader could reach.
+            check("the record has the eleven documented keys",
                   set(rec) == {"ligand", "output", "num_poses", "best_energy",
                                "energies", "rmsd", "elapsed_seconds",
-                               "rejected_pose_count", "num_torsions"},
+                               "rejected_pose_count", "unknown_atom_types",
+                               "poses_outside_box_count", "num_torsions"},
                   f"keys: {sorted(rec)}")
+            check("the two counts that describe what the engine rejected are reported",
+                  rec["unknown_atom_types"] == 0 and rec["poses_outside_box_count"] == 0,
+                  f"unknown_atom_types={rec['unknown_atom_types']}, "
+                  f"poses_outside_box_count={rec['poses_outside_box_count']} -- the "
+                  f"checked-in fixtures put every atom inside the box, so a "
+                  f"non-zero here means the search box does not contain the pose")
             check("num_poses is -m 3, and the arrays agree with it",
                   rec["num_poses"] == 3 and len(rec["energies"]) == 3
                   and len(rec["rmsd"]) == 3,
@@ -1283,6 +1349,18 @@ def main() -> int:
                   "the other has to be looked at again")
 
         dp = run(DOCK + ["-o", str(tmp / "ib_docked.pdbqt")])
+        # The exit code is judged before anything read out of `dp.stdout` is.
+        # Every check below this line describes a table; if the table was never
+        # printed they are all describing nothing, and reporting three of them
+        # as failures sends the reader to the formatter instead of to the
+        # error. `error_line` exists so the cause is in the message.
+        check("the prose dock run finished, and names its own cause if it did not",
+              dp.returncode == 0,
+              f"rc={dp.returncode}, stdout {len(nonempty(dp.stdout))} line(s), "
+              + (f"and it said: {dp.error_line}" if dp.error_line
+                 else "and it said nothing on stderr -- a command that fails "
+                      "without saying why is its own defect, so this is not "
+                      "readable as a formatting change either"))
         lines = nonempty(dp.stdout)
         # The table is located by its header, not by a fixed line number. The
         # units line added below shifted every index, and a check that indexes

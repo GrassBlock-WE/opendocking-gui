@@ -31,7 +31,17 @@ bytemuck = { version = "1.16", features = ["derive"] }
 
 # --- Serialisation / errors ---------------------------------------------
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# `float_roundtrip` makes the float parser exact, so a document this crate
+# writes parses back to the same bits. It is an empty feature in serde_json
+# 1.0.151 (no new dependency, so Cargo.lock is unchanged) and it costs parse
+# speed this crate does not need: a molecule file is kilobytes. Without it the
+# writer's own output came back one ULP away from what was written, which made
+# the round trip lossy in a format this crate owns. Its one behavioural
+# consequence is that an overflowing literal like `1e400` now parses to an
+# infinity instead of erroring -- which is *more* coverage, not less, because
+# the checked `Deserialize` runs the same non-finite validator the constructors
+# do. See `dock-core/tests/molecule_json.rs`.
+serde_json = { version = "1", features = ["float_roundtrip"] }
 thiserror = "1"
 anyhow = "1"
 log = "0.4"

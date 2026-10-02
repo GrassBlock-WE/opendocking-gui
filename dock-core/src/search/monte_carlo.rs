@@ -106,6 +106,22 @@ pub struct Pose {
     /// asking whether *this* point is stationary, and it is the only question it
     /// can answer.
     pub gradient: Vec<f64>,
+    /// How many of this pose's atoms lay outside the search box, as the
+    /// evaluation that produced it counted them.
+    ///
+    /// Carried from the same branch of the same loop that charges
+    /// [`OUT_OF_BOX_PENALTY`](crate::search::OUT_OF_BOX_PENALTY), so a pose
+    /// cannot report a different overhang from the one it was charged for.
+    /// Before this field existed the count existed and was dropped here, so the
+    /// one question a caller could not answer from a result -- *did any of the
+    /// poses you are reporting actually land in the box I asked for?* -- was
+    /// answerable only by re-walking `coords` against a box the result does not
+    /// carry.
+    ///
+    /// `coords.len()` is the atom count, so
+    /// [`Pose::every_atom_outside_box`] is a comparison of two counts and needs
+    /// no tolerance to decide.
+    pub atoms_outside_box: usize,
 }
 
 impl Pose {
@@ -121,6 +137,29 @@ impl Pose {
         } else {
             Some(&self.gradient)
         }
+    }
+
+    /// True if **no** atom of this pose is inside the search box.
+    ///
+    /// Two clauses, and the second one is the one that is easy to leave out.
+    ///
+    /// `atoms_outside_box >= coords.len()` rather than `==`: a pose is "wholly
+    /// outside" when the atoms that were counted outside cover every atom it
+    /// reports, and a count that *exceeds* the coordinate list covers them. A
+    /// producer that put a larger number in the field than it put coordinates in
+    /// the struct has still said that every atom it has is outside, and the only
+    /// reading that stays true is this one.
+    ///
+    /// `!coords.is_empty()` and not nothing, because `0 >= 0` is true. A pose
+    /// with no coordinates has no atom inside the box and no atom outside it
+    /// either, and the claim a caller makes with this method is "this pose is not
+    /// in the box I asked for" — which a pose nobody placed does not support.
+    /// `cluster_poses` drops such a pose before it can be reported, so this guard
+    /// is not load-bearing for [`DockingResult::poses_outside_box_count`]; it is
+    /// here because this is a public method and `0 >= 0` would be a wrong answer
+    /// to anyone who called it.
+    pub fn every_atom_outside_box(&self) -> bool {
+        !self.coords.is_empty() && self.atoms_outside_box >= self.coords.len()
     }
 }
 
@@ -263,6 +302,7 @@ pub(crate) fn pose_from(ctx: &mut ScoringContext<'_>, conf: Conformation, energy
         coords,
         rmsd: None,
         gradient,
+        atoms_outside_box: ctx.atoms_outside(),
     }
 }
 

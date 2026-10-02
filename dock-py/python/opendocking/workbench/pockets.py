@@ -147,7 +147,17 @@ Three things that measurement settles, and that a cleverer formula would not:
 The shortlist is ranked by the space a ligand **leaves**, so a site that fits
 its ligand snugly is a site with almost no free space, and it lands late. On
 crambin with ibuprofen docked into it, the site that holds all sixteen ligand
-atoms is **8th of 12** and **below the median volume** of the list. That is not
+atoms is **ninth of 12** and **below the median volume** of the list. That is
+the same position the table at the top of this file calls ninth of sixteen, and
+it has to be: `find_pockets` sorts once and returns `found[:max_pockets]`, so a
+truncated list is a *prefix* of the long one and truncation cannot move an
+occupant. Measured on the shipped fixture, the site is the only one of the
+sixteen that holds all sixteen ligand atoms, and it sits at position **9 of 12**,
+at **9 of 16** untruncated, and at **9 of 16** with the volume ceiling removed --
+`rank_score` 2.4037, between 2.4235 at position 8 and 2.3595 at position 10, and
+the first twelve `rank_score`s of the short and long lists are identical. (An
+earlier version of this paragraph said *8th of 12*, which no truncation of this
+list can produce; the position has always been ninth.) That is not
 a bug that a better coefficient would fix: the quantity being ranked does not
 mention the ligand. Retuning was tried and could not move it -- three mutations
 of `rank_score`, two parameter changes, a 42-cell sweep of `max_volume` x
@@ -591,8 +601,12 @@ class Pocket:
         The motivation is measured. The search ranks by ``volume ** (1/3) *
         burial`` -- the space a ligand **leaves** -- so a site that fits its
         ligand snugly is a site with almost no free space and lands late: on
-        crambin the site holding the docked ibuprofen is **8th of 12** and below
-        the median volume, and no retuning of the formula could move it (3
+        crambin the site holding the docked ibuprofen is **ninth of 12** and
+        below the median volume -- the same ninth the module docstring reports
+        as ninth of sixteen, since the shortlist is a prefix of the full list
+        rather than a re-ranking of it, and measured as 9 of 12, 9 of 16 and 9
+        of 16 with the ceiling removed on the shipped fixture -- and no
+        retuning of the formula could move it (3
         ranking mutations, 2 parameter changes, a 42-cell parameter sweep and 15
         alternative formulas all left it between 8th and 11th). The rank is
         stable because the ranking **cannot see the ligand**. These two

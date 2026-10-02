@@ -33,7 +33,7 @@ too. Those live outside the installed package and are not collected by
 - [ ] `python -m pytest --pyargs opendocking.tests -q` passes against a
       **rebuilt and reinstalled** wheel
 - [ ] `examples/` and `scripts/` re-run if this touched them
-- [ ] `python scripts/check_doc_encoding.py` reports 0 damaged documents
+- [ ] `python scripts/check_text_encoding.py` reports 0 damaged files across the source tree
 - [ ] `python scripts/check_repo_docs.py` reports no broken links
 - [ ] `#![forbid(unsafe_code)]` still present in `dock-core`
 - [ ] new tests assert behaviour or physics, not recorded output values

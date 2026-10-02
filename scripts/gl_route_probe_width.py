@@ -25,6 +25,13 @@ a deadline rather than entered, and the reporting block is byte-identical across
 variants. Only the construction differs. A variant that differs in two settings
 would be a guess; each row below changes exactly one.
 
+**What is checked rather than held constant.** The minimum size the stand-in
+applies is read from the same product module, so no widget here is configured
+from a hand-typed number, *and* it is compared against a declared pair. The
+comparison is the point: a product constant that moves turns the two variants
+that mirror the viewport red, by name, instead of leaving behind a probe that
+measures a construction the product no longer has.
+
 **The product is in the matrix, not a stand-in.** Two rows instantiate the real
 ``opendocking.workbench.app.Viewport`` and the real ``MainWindow``-shaped
 arrangement, because a stand-in that gets a context where the product does not is
@@ -34,10 +41,28 @@ cannot be confused with "the renderer could use it".
 
 **Output shape.** One JSON object on stdout, human progress on stderr, so
 ``python scripts/gl_route_probe_width.py > width.json`` leaves a file that
-``json.load`` accepts. Exit ``0`` when every declared variant produced a record,
-``2`` when one did not (a matrix that silently shrank is a bug in here; a matrix
-that found nothing is a finding). Mirrors ``gl_route_matrix.py`` on purpose, so
-the two files are read the same way.
+``json.load`` accepts. Exit ``0`` when every declared variant produced a record
+*and at least one of them reached a context*, ``2`` when a declared variant
+produced no record at all (a matrix that silently shrank is a bug in here), and
+``3`` when every declared variant produced a record and **none** of them reached
+one. Mirrors ``gl_route_matrix.py`` on purpose, so the two files are read the
+same way.
+
+**Why ``0`` is not "the loop finished."** The third state was missing, and its
+absence is the same defect class this file exists to catch. A child that dies
+inside ``show()`` has already printed ``before-show``, so it counts as *ran*, so
+``missing`` is empty, so the old code returned 0 -- while ``working`` and
+``product_working`` were both empty and the summary line below printed that the
+baseline construction behaved like the product. Sixteen children killed by a
+driver fault were a green run. Producing a record and measuring something are
+different facts, and the exit code is what tells them apart.
+
+So a matrix that measured nothing is a **counted result, not a pass**: it is
+tallied separately and the reason names the environment property, which is the
+convention ``binary_source_parity_check.py`` sets by recording a skip as a
+second number it never adds to the passes. It is deliberately not a permanent
+red either: this file never fails because the *viewer* is broken, and a code
+that is red on every machine without a GL adapter is a code people switch off.
 
 **This file is a measurement, not a gate.** It never fails because the viewer is
 broken. The gate is ``odgui_launch_check.py``, which asserts that the probe and
@@ -62,6 +87,24 @@ _DEV_TREE = Path(__file__).resolve().parent.parent / "dock-py" / "python"
 _PUMP_SECONDS = 10.0
 _CHILD_TIMEOUT = 60.0
 
+#: Windows reports a process killed by a fault as an NTSTATUS in the top half of
+#: the 32-bit range, so a child's ``returncode`` at or above this floor is a
+#: fault and not an exit status Python raised. The distinction matters because
+#: the two look identical to ``!= 0`` and mean opposite things here: a child that
+#: exited 4 said it finished without a context, and a child killed at this floor
+#: never got to say anything at all -- its stderr is empty, so the exit code is
+#: the only thing it left behind.
+_FAULT_FLOOR = 0xC0000000
+
+#: The two fault codes this file has actually seen here, by name. An unnamed one
+#: still prints its hex value, so the table is a convenience and not a filter:
+#: a code missing from it is reported, not swallowed.
+_FAULT_NAMES = {
+    0xC0000005: "STATUS_ACCESS_VIOLATION",
+    0xC000001D: "STATUS_ILLEGAL_INSTRUCTION",
+    0xC0000409: "STATUS_STACK_BUFFER_OVERRUN",
+}
+
 
 #: One child, one variant, dispatched by name. The construction table below is
 #: the entire experiment: everything after ``build()`` is identical, so any
@@ -75,7 +118,65 @@ variant = sys.argv[1]
 started = time.perf_counter()
 app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv[:1])
 
-from opendocking.workbench.app import MSAA_SAMPLES, Viewport
+from opendocking.workbench.app import (
+    MSAA_SAMPLES,
+    VIEWPORT_MIN_H,
+    VIEWPORT_MIN_W,
+    Viewport,
+)
+
+
+#: The minimum size this file claims the product's viewport applies, declared
+#: here rather than imported, on purpose.
+#:
+#: `MSAA_SAMPLES` above is imported because the *value* is the variable under
+#: test. This pair is a different kind of fact. The experiment isolates the
+#: **call**: every variant is resized to 1280x820, and 240 and 640 are both far
+#: below that, so the numbers do not decide any answer. What has to stay honest
+#: is the claim -- that the stand-in is built the way the product is built.
+#:
+#: So the value the stand-in applies is still read from the product (nothing
+#: here configures a widget from a hand-typed number) and this declared pair is
+#: **checked** against it, which is what makes a change to the product's floor
+#: red instead of leaving behind a probe that measures a viewport the product no
+#: longer has. It is a tripwire, not a mirror: it configures nothing, and the
+#: only way to satisfy it is to re-read the two variants against the product.
+#:
+#: **Do not "fix" a red here by deleting the comparison and importing instead.**
+#: That makes the two values provably equal and the guard unfailable, and this
+#: file's whole argument is that a guard which cannot go red is not a guard.
+#:
+#: The height moved from 480 to 240 as well as the width, and for a reason that is
+#: in the tree rather than in taste: with the floor muted the window's minimum
+#: height is 134 (view 0 + dock 81 + menu bar 33 + status bar 20), so 480 was
+#: making a 533 px window that did not fit a 408 px or 326 px screen. The
+#: measured fit threshold is a floor of 273; 240 sits 33 px below it, one
+#: menu-bar line being the largest chrome a font change could grow.
+_DECLARED_STANDIN_MINIMUM = (240, 240)
+
+
+def _apply_product_minimum(widget):
+    """The one construction-time call the product makes and the stand-in does not.
+
+    The pair comes from the product, so the stand-in cannot drift away from the
+    viewport it claims to mirror; the declared pair above is what says this file
+    has been reconciled against it. A mismatch raises before the widget is ever
+    shown, which the parent records as a harness failure and reports by name --
+    so a product change is one line of output rather than a silent difference in
+    what the two constructions are.
+    """
+    applied = (VIEWPORT_MIN_W, VIEWPORT_MIN_H)
+    if applied != _DECLARED_STANDIN_MINIMUM:
+        raise AssertionError(
+            "this file declares that its stand-in mirrors the product's "
+            f"setMinimumSize{_DECLARED_STANDIN_MINIMUM}, but this checkout's "
+            f"opendocking.workbench.app now says (VIEWPORT_MIN_W, "
+            f"VIEWPORT_MIN_H) = {applied}. The stand-in would measure a "
+            "construction the product no longer has. Re-read bare_minsize_only "
+            "and bare_both against the product, update "
+            "_DECLARED_STANDIN_MINIMUM and their descriptions, and re-run."
+        )
+    widget.setMinimumSize(*applied)
 
 
 def _format():
@@ -240,14 +341,14 @@ def _build_bare_focus_only():
 
 def _build_bare_minsize_only():
     widget = _Bare()
-    widget.setMinimumSize(640, 480)
+    _apply_product_minimum(widget)
     widget.resize(1280, 820)
     return widget, widget
 
 
 def _build_bare_both():
     widget = _Bare()
-    widget.setMinimumSize(640, 480)
+    _apply_product_minimum(widget)
     widget.setFocusPolicy(QtCore.Qt.FocusPolicy.StrongFocus)
     widget.resize(1280, 820)
     return widget, widget
@@ -435,8 +536,11 @@ VARIANTS: tuple[tuple[str, str, str], ...] = (
     (
         "bare_minsize_only",
         "minimum size",
-        "the stand-in plus only setMinimumSize(640, 480), the other "
-        "construction-time call the product makes and the stand-in does not",
+        "the stand-in plus only the product's own minimum size, read from "
+        "opendocking.workbench.app rather than restated here and checked "
+        "against _DECLARED_STANDIN_MINIMUM so a change to the product's floor "
+        "is red; the other construction-time call the product makes and the "
+        "stand-in does not",
     ),
     (
         "bare_both",
@@ -481,6 +585,106 @@ VARIANTS: tuple[tuple[str, str, str], ...] = (
         "function-table result is not confounded with a different holder",
     ),
 )
+
+
+def _first_failure_line(stderr: str) -> str:
+    """The child's own statement of what went wrong.
+
+    Taking `stderr.splitlines()[-1]` -- which is what this file did, and is kept
+    in `stderr` -- reports the same thing for every failure the file could ever
+    have: the product installs an excepthook whose last line is its own
+    "ending with exit code 70" notice, so a child that stopped because a product
+    constant moved and a child that stopped because a driver crashed are
+    indistinguishable from the last line alone. That is the difference between
+    "this variant produced no record" and "this variant produced no record
+    *because* the stand-in no longer matches the product".
+
+    The exception is stated *first*, in both shapes this produces: inside the
+    excepthook's one-line report when Qt got there first, and as the unindented
+    final line of a plain traceback when nothing did. So the first non-indented,
+    non-blank line that is not the traceback header is the reason either way,
+    and the rule does not have to know what the excepthook's wording is.
+    """
+    for line in stderr.splitlines():
+        text = line.strip()
+        if not text or line[:1].isspace():
+            continue
+        if text.startswith("Traceback (most recent call last):"):
+            continue
+        return text
+    return stderr.splitlines()[-1]
+
+
+def _describe_exit(code: object) -> str:
+    """A child's `returncode` in words, so a fault is not read as an exit.
+
+    A fault is a statement about the machine -- the driver, the platform plugin,
+    the adapter -- and printing it as a bare integer is what let eight (then
+    sixteen) identical fault codes sit in a green run unnoticed. `exit 4` and
+    `0xc0000005` are the whole difference between "the child finished and said
+    it had no context" and "the child was killed where it stood".
+    """
+    if not isinstance(code, int) or code < _FAULT_FLOOR:
+        return f"exit {code}"
+    name = _FAULT_NAMES.get(code, "unnamed Windows fault")
+    return f"Windows fault {code:#010x} ({name})"
+
+
+def _measurement_verdict(records: list[dict]) -> tuple[str, list[str]]:
+    """Whether this run measured anything, and if not, what stopped it.
+
+    Returns ``("measured", [])`` or ``("nothing_measured", [reasons])``. A
+    matrix in which no arm obtained a context measured nothing -- whether the
+    children were killed inside `show()` or finished cleanly without one -- and
+    that is a different fact from the one a matrix that did measure reports, so
+    it gets its own verdict and its own exit code rather than sharing either.
+
+    The reasons name the environment property rather than only counting the
+    arms, because "this machine cannot supply a GL context" and "this checkout
+    is broken" call for opposite responses and a reader cannot tell them apart
+    from a count. Two facts are read off the records rather than guessed:
+    whether the fault was a Windows fault at all, and whether any arm ever
+    emitted `initializeGL-entered` -- which separates a process faulted while
+    *showing* the widget from one faulted inside `initializeGL`, and so says
+    whether the GL bindings are implicated at all.
+    """
+    working = [
+        r["variant"] for r in records
+        if r.get("outcome") in ("moderngl", "widget")
+    ]
+    if working:
+        return "measured", []
+
+    ran = [r for r in records if r.get("outcome") != "harness"]
+    faults: dict[int, int] = {}
+    for record in ran:
+        code = record.get("child_exit")
+        if isinstance(code, int) and code >= _FAULT_FLOOR:
+            faults[code] = faults.get(code, 0) + 1
+
+    reasons: list[str] = []
+    if faults:
+        for code, count in sorted(faults.items()):
+            reasons.append(
+                f"{count} of {len(ran)} arm(s) that reached the experiment were "
+                f"killed by {_describe_exit(code)}, with no message on stderr"
+            )
+    elif ran:
+        reasons.append(
+            f"{len(ran)} arm(s) reached the experiment and finished cleanly "
+            "with no context (outcome no_context), so the platform gave a "
+            "window and no GL"
+        )
+    else:
+        reasons.append("no arm reached the experiment at all; see missing below")
+
+    stages = {s for r in records for s in r.get("stages") or ()}
+    if ran and "initializeGL-entered" not in stages:
+        reasons.append(
+            "no arm emitted initializeGL-entered, so nothing was faulted inside "
+            "the GL bindings: the process ended while the widget was being shown"
+        )
+    return "nothing_measured", reasons
 
 
 def _run_variant(name: str) -> dict:
@@ -555,6 +759,7 @@ def _run_variant(name: str) -> dict:
     stderr = (proc.stderr or "").strip()
     if stderr:
         record["stderr"] = stderr.splitlines()[-1]
+        record["stderr_reason"] = _first_failure_line(stderr)
     return record
 
 
@@ -569,6 +774,7 @@ def main() -> int:
 
     got = [r["variant"] for r in records if r.get("outcome") != "harness"]
     missing = [n for n in declared if n not in got]
+    verdict, why = _measurement_verdict(records)
     working = [r["variant"] for r in records if r.get("outcome") in ("moderngl", "widget")]
     product = [r for r in records if r.get("is_product")]
     product_ok = [r["variant"] for r in product if r.get("outcome") in ("moderngl", "widget")]
@@ -578,6 +784,15 @@ def main() -> int:
     summary = {
         "declared": len(declared),
         "attempted": len(got),
+        # The two numbers a reader needs, kept apart on purpose: `measured` is
+        # the count of arms that reached a context and `unmeasured` is every
+        # other arm, and the second is never added to the first. A run in which
+        # all sixteen arms produced a record and none of them measured is 0 + 16,
+        # not 16.
+        "measured": len(working),
+        "unmeasured": len(records) - len(working),
+        "verdict": verdict,
+        "unmeasured_reason": why,
         "missing": missing,
         "baseline_outcome": baseline.get("outcome"),
         "baseline_ran": baseline_ran,
@@ -607,7 +822,21 @@ def main() -> int:
             for k in ("gl", "moderngl", "child_exit")
             if k in record
         )
-        print(f"  {record['variant']:<20} {record.get('outcome', '?'):<10} {extra}")
+        note = f"  <- {_describe_exit(record['child_exit'])}" if (
+            "child_exit" in record
+            and not record.get("outcome") in ("moderngl", "widget")
+        ) else ""
+        print(
+            f"  {record['variant']:<20} {record.get('outcome', '?'):<10} "
+            f"{extra}{note}"
+        )
+    # The tally, in the shape `binary_source_parity_check.py` prints: the
+    # unmeasured count is on the line and is not folded into the measured one.
+    print()
+    print(
+        f"--- {len(working)} measured, {len(records) - len(working)} unmeasured, "
+        f"of {len(records)} arms ({len(declared)} declared)"
+    )
     print()
     if summary["divergence"]:
         print(
@@ -619,11 +848,45 @@ def main() -> int:
             "  NO CONCLUSION: the baseline variant never reached the experiment, "
             "so this run is a harness failure and not a measurement."
         )
+    elif verdict == "nothing_measured":
+        # The claim this file exists to falsify is a claim about agreement, and
+        # there is no agreement to report when not one arm obtained a context.
+        # Saying the baseline "behaved like the product" here would have been the
+        # defect, not the finding: a hard fault and a working construction are
+        # not the same observation, and only the second one is evidence.
+        print(
+            "  NO CONCLUSION: no arm reached a context, so this run measured "
+            "nothing and is not evidence either way about the width."
+        )
+        for line in why:
+            print(f"    {line}")
+        print(
+            "  This is a counted result, not a pass and not a failure of the "
+            "viewer: on a machine that cannot supply a context the matrix has "
+            "no answer to give, and reporting that as agreement is the error."
+        )
     else:
         print("  the baseline construction behaved like the product")
     if missing:
         print(f"  {len(missing)} declared variant(s) produced no record: {', '.join(missing)}")
+        # Naming the absence is not the same as naming the cause. A variant that
+        # never reached `before-show` failed in the harness rather than in the
+        # experiment, and the cause is on the child's stderr -- see
+        # `_first_failure_line` for why it is not simply the last line. For a
+        # product constant this file has not been reconciled against, that cause
+        # is the whole finding; without this the reader is told which variants are
+        # missing and nothing about why.
+        for record in records:
+            if record["variant"] in missing:
+                cause = record.get("stderr_reason") or record.get("stderr")
+                if cause:
+                    print(f"    {record['variant']}: {cause}")
+        # A harness failure is a bug in here, so it is reported ahead of the
+        # verdict: "no arm measured" is the honest description of a run in which
+        # nothing ran, and it would bury the more specific statement.
         return 2
+    if verdict == "nothing_measured":
+        return 3
     return 0
 
 

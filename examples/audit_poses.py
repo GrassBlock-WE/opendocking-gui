@@ -223,6 +223,16 @@ def main(
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
+        # **The three settings below are this file's, and the only copy of them
+        # in the tree.** `scripts/interp_reachable_step_bound.py` re-docks with
+        # them to measure LEVER on the poses this call returns, and it reads them
+        # back out of *this* call rather than restating them: see
+        # `audit_dock_settings` there. It used to carry its own `16 / 5 /
+        # 20260929`, and a change here would have left that file measuring a
+        # different run while every pose energy it is compared against stayed
+        # green -- the same hazard `_LINE_SEARCH_STEPS` above already warns about
+        # for the ladder, which is why the reader there is a regex and not a
+        # number. Change a setting here and nowhere else.
         result = opendocking.dock(lig, maps, exhaustiveness=16, num_modes=5, seed=20260929)
 
     print(f"poses    {result.num_poses} from {result.raw_pose_count} conformations\n")

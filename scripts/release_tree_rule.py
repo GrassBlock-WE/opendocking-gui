@@ -81,7 +81,28 @@ name has to be written down, and it is a list of what ships rather than a list
 of what does not: an unlisted root file is not shipped without anyone having
 thought of it, which is the property the inversion was for.
 
-**The bootstrap gap, stated as a limit and deliberately not closed.** "The copy
+**The bootstrap gap: past tense from the first sync, and a fresh gap on every
+clone.** The first sync has run. It carried 149 files and deleted 16, and the
+fingerprint below is now in the published tree, so "the copy that ships is the
+copy that runs" is a property this project *has*, not one it intends.
+
+It was false before that commit, and it is false again on every fresh clone.
+The rule is a source file, so a clone has the rule and not the compiled
+extension, and `_dockpy.pyd` is listed in `.gitignore` -- git never tracked it,
+so no published tree can carry one. Every CI job builds and installs the wheel
+itself. **That is the honest design and it is not a defect**, but it means the
+artefact a user clones is not a runnable tree, and a reader who wants one has to
+build it.
+
+So the thing a reader has to do to re-establish the property, now that the first
+commit carried it: **commit the rule, and let the next sync publish it.** There
+is no shortcut and there should not be one, because the ordering cannot be
+reversed -- this file has to exist in the development tree before any copy can
+carry it. A gate cannot close that: a check asserting the property would be
+false on a clean checkout and would have to be written to pass, which is the
+trade this repository refuses.
+
+"The copy
 that ships is the copy that runs" is true of this file *after* the first sync and
 false *before* it, and the ordering cannot be reversed: `_sync_release.py` imports
 this module in order to decide what to copy, so this file has to exist in the

@@ -54,6 +54,17 @@ name = "convergence_budget"
 path = "tests/convergence_budget.rs"
 required-features = ["convergence-budget"]
 
+# The same reason as the one above, and it is the same measurement taken apart:
+# `budget_monotonicity` separates the effect a larger local budget has on a
+# *fixed start* (non-negative by construction) from the effect it has on the
+# best pose of a *whole search* (a property of which trajectory the search
+# walked). It drives full `dock` calls over the same eight seeds, so it is
+# gated rather than paid for by every `cargo test`.
+[[test]]
+name = "budget_monotonicity"
+path = "tests/budget_monotonicity.rs"
+required-features = ["convergence-budget"]
+
 [[bench]]
 name = "docking_bench"
 harness = false

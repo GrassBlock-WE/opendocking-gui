@@ -496,10 +496,12 @@ pub struct TermBreakdown {
     pub hbond_from_acceptor: f64,
     /// Out-of-box penalty, in kcal/mol; zero unless an atom left the grid.
     ///
-    /// Reported separately because it is **not** a Vina term: the search adds a
-    /// flat linear penalty to pull a violating pose back, and folding it into
-    /// the nearest term would make a term's value depend on whether the pose
-    /// happened to be inside the box.
+    /// Reported separately because it is **not** a Vina term: the search adds
+    /// `OUT_OF_BOX_PENALTY` per angstrom of violation to pull a violating pose
+    /// back, and folding it into the nearest term would make a term's value
+    /// depend on whether the pose happened to be inside the box. It is the same
+    /// charge the search adds, so this field and the engine's intermolecular
+    /// energy cannot disagree about what a pose left the box by.
     pub out_of_box_penalty: f64,
 }
 
@@ -965,10 +967,29 @@ mod tests {
 ///
 /// # What is deliberately not here
 ///
-/// `OUT_OF_BOX_PENALTY`, `MAX_GRID_POINTS` and `TERM_FIELDS` have **no line in
-/// `SCORING.md` at all**. They are pinned in `grid.rs` with failure messages
-/// that say so, because a scoring constant with no specification is a finding
-/// the reader should be shown, not a blank to fill in here.
+/// `MAX_GRID_POINTS` and `TERM_FIELDS` have **no line in `SCORING.md` at all**.
+/// They are pinned in `grid.rs` with failure messages that say so, because a
+/// scoring constant with no specification is a finding the reader should be
+/// shown, not a blank to fill in here.
+///
+/// `OUT_OF_BOX_PENALTY` **was** in that list, and no longer is. It used to
+/// carry the same "no line in `SCORING.md` at all" note, on the grounds that
+/// the constant had no specification; `SCORING.md` §4.2 has since been given
+/// one, and it is a better specification than a bare number would have been —
+/// it states the per-axis formula, names this constant as the multiplier, and
+/// pins the four properties (per-ångström not per-atom, measured against the
+/// faces not the centre, a corner charged on both faces, and the charge's
+/// gradient being the ramp's own derivative). The note outlived the thing it
+/// described, which is the failure this module is about, so it is corrected
+/// here rather than left to be discovered by a reader who believes it.
+///
+/// That is also why the constant is pinned against the *formula* and not only
+/// against the number: `the_constant_a_sentinel_stands_in_for` in this module
+/// checks that the out-of-box charge is a ramp and not a step, which is the
+/// property a number alone cannot express. `docs/SCORING.md` §4.2's existence
+/// is itself checked, by `every_pinned_documentation_line_still_exists` in
+/// `grid.rs` — so a future edit that removes the section has to decide what
+/// happens to the code, rather than leaving the two quietly disagreeing.
 #[cfg(test)]
 mod pinned_constants {
     use super::*;

@@ -23,9 +23,32 @@ pub struct Receptor {
 
 impl Receptor {
     /// Build a receptor from a molecule.
+    ///
+    /// # Why a non-finite coordinate is refused here
+    ///
+    /// A receptor is where the failure is least visible, which is why this
+    /// constructor checks rather than trusting the caller. Both non-finite
+    /// values behave differently and neither announces itself: `NaN` fails every
+    /// comparison, so the `r2 > far * far` cutoff in
+    /// [`crate::grid::GridMaps::precalculate`] cannot discard the atom and it
+    /// poisons every grid point; an **infinity** passes that cutoff cleanly, so
+    /// the atom is skipped as if it were simply too far away. That second case is
+    /// the one worth refusing: measured on the shipped 30-atom receptor, one
+    /// coordinate overwritten to `inf` still docked and reported −5.52 kcal/mol
+    /// against a clean reference of −5.66 — a 2.5% error in a result with
+    /// nothing in it to say the receptor was one atom short.
+    ///
+    /// There is no count to report instead, and no way for a caller to see it
+    /// without re-walking 30–30000 atoms. The check is
+    /// [`crate::types::non_finite_coordinate_refusal`], the same definition the
+    /// parser and the ligand constructor use.
     pub fn from_molecule(molecule: Molecule) -> Result<Receptor> {
         if molecule.is_empty() {
             return Err(crate::DockError::molecule("receptor contains no atoms"));
+        }
+        if let Some(err) = crate::types::non_finite_coordinate_refusal("receptor", &molecule.atoms)
+        {
+            return Err(err);
         }
         let num_atoms = molecule.len();
         let num_polar_hydrogens = molecule
@@ -142,6 +165,67 @@ mod tests {
         assert_eq!(r.num_polar_hydrogens, 0);
     }
 
+    /// The one bad value is the whole point: an **infinity** is the case that
+    /// used to be silent, because it passes the `r2 > far * far` cutoff in
+    /// `precalculate` and the atom is then skipped as if it were simply far
+    /// away. A `NaN` at least poisons the maps visibly. Both are refused here,
+    /// and a refusal cannot be half-applied: the receptor is built once and
+    /// every later stage reads it.
+    #[test]
+    fn a_non_finite_coordinate_is_refused_by_a_receptor_built_in_memory() {
+        use crate::types::{Atom, AtomType, Element, Molecule};
+        let base: Vec<Atom> = (0..4)
+            .map(|i| {
+                Atom::new(
+                    i + 1,
+                    [1.3 * i as f64, -0.4 * i as f64, 2.0 * i as f64],
+                    Element::C,
+                    AtomType::CH,
+                )
+            })
+            .collect();
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut atoms = base.clone();
+            atoms[1].coord[0] = bad;
+            // Either gate refusing is the claim; which one notices is a
+            // separate question and is not what this test is about.
+            let err = match Molecule::from_atoms(atoms) {
+                Err(e) => e.to_string(),
+                Ok(mol) => match Receptor::from_molecule(mol) {
+                    Ok(_) => panic!("a receptor with a {bad} coordinate must be refused"),
+                    Err(e) => e.to_string(),
+                },
+            };
+            assert!(err.contains("non-finite"), "message: {err}");
+            assert!(err.contains("atom 1"), "message: {err}");
+        }
+    }
+
+    /// The accept direction, and the reason the check above is a finiteness
+    /// test and not a sanity limit. A receptor is routinely tens of ångströms
+    /// from the origin and a whole-protein input runs to hundreds; a rule
+    /// written as a distance-from-origin bound would refuse working inputs
+    /// while still missing `NaN`, which is the worst of both.
+    #[test]
+    fn an_ordinary_in_memory_receptor_is_still_accepted() {
+        use crate::types::{Atom, AtomType, Element, Molecule};
+        for offset in [0.0, 500.0, 25_000.0] {
+            let atoms: Vec<Atom> = (0..4)
+                .map(|i| {
+                    Atom::new(
+                        i + 1,
+                        [1.3 * i as f64 + offset, -0.4 * i as f64, 2.0 * i as f64],
+                        Element::C,
+                        AtomType::CH,
+                    )
+                })
+                .collect();
+            let r = Receptor::from_molecule(Molecule::from_atoms(atoms).unwrap())
+                .unwrap_or_else(|e| panic!("a receptor {offset} A from the origin is legal: {e}"));
+            assert_eq!(r.num_atoms, 4);
+        }
+    }
+
     #[test]
     fn precalculates_maps() {
         let r = Receptor::from_pdbqt_str(RECEPTOR).unwrap();
@@ -154,7 +238,17 @@ mod tests {
 
     #[test]
     fn empty_receptor_is_rejected() {
-        let err = Receptor::from_molecule(Molecule::default()).unwrap_err();
+        // The literal, not `Molecule::default()`: `Default` is gone from the
+        // public API precisely because an empty molecule is not a structure,
+        // and this test still needs one. A crate-internal literal is the
+        // remaining way to build it, and that is the residual gap the
+        // `Molecule` documentation names rather than hides.
+        let empty = Molecule {
+            atoms: Vec::new(),
+            bonds: Vec::new(),
+            neighbors: Vec::new(),
+        };
+        let err = Receptor::from_molecule(empty).unwrap_err();
         assert!(matches!(err, crate::DockError::InvalidMolecule(_)));
     }
 
@@ -164,7 +258,16 @@ mod tests {
         // typo silently became a different grid. Zero is a genuine "use the
         // default" request; a negative number is not.
         let r = Receptor::from_pdbqt_str(RECEPTOR).unwrap();
-        let b = GridBox::centered([0.0, 0.0, 0.0], [10.0, 10.0, 10.0]).unwrap();
+        // Centred on the receptor, not on the origin. This used to be a 10 Å
+        // cube at `[0,0,0]`, which is nowhere near `RECEPTOR`'s atoms -- they
+        // sit at y ≈ 13.5..15.0 -- so the `0.0` call below was tabulating an
+        // empty box and passing only because nothing objected. The subject of
+        // this test is what `spacing` does, and it is the *only* subject here:
+        // centring the box on the receptor changes nothing about which spacing
+        // values are accepted, and it stops the test resting on a box no caller
+        // would build. What it used to depend on accidentally is now stated
+        // where it can be read.
+        let b = GridBox::centered(r.centroid(), [10.0, 10.0, 10.0]).unwrap();
         let scoring = crate::scoring::VinaScoring::new();
         assert!(r.precalculate(&b, &scoring, -0.5).is_err());
         assert!(r.precalculate(&b, &scoring, f64::NAN).is_err());

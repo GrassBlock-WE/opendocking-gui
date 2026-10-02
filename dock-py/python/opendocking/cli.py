@@ -783,6 +783,20 @@ def _cmd_dock(args: argparse.Namespace) -> int:
                 "rmsd": result.rmsds.tolist(),
                 "elapsed_seconds": result.elapsed_seconds,
                 "rejected_pose_count": result.rejected_pose_count,
+                # Every diagnostic the prose table can print, in the record
+                # too, and unconditionally. `summary()` prints its two warning
+                # lines only when the count is non-zero, so a JSON consumer
+                # that compared the two modes had to know which fields those
+                # were: `unknown_atom_types` was in neither, which is the shape
+                # of bug this command already had once -- the JSON mode returned
+                # three healthy poses while the prose mode exited 1, and the two
+                # were reading the same run. A field is in both or in neither.
+                #
+                # Unconditional here is the point: `0` in JSON is a claim, and
+                # it is the cheap way for a reader to establish the absence that
+                # the prose output declines to state.
+                "unknown_atom_types": result.unknown_atom_types,
+                "poses_outside_box_count": result.poses_outside_box_count,
                 "num_torsions": ligand.num_torsions,
             }
         )

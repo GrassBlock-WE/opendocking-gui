@@ -58,42 +58,48 @@ pub const WALK_SEED_STRIDE: u64 = 0x9E37_79B9_7F4A_7C15;
 /// contract, though — changing it moves every seeded LGA population.
 pub const ISLAND_SEED_STRIDE: u64 = 0x1234_5678_9ABC_DEF0;
 
-/// Penalty charged, per atom, for that atom leaving the search box.
+/// Penalty charged, per atom, per ångström, for leaving the search box.
 ///
 /// The box is a hard constraint in AutoDock, and rather than trusting the
 /// sampler never to violate it, [`ScoringContext::evaluate_full`] charges this
-/// much for every atom whose position the maps cannot interpolate. A penalty is
-/// a claim about what the search would rather do, so what this one actually
-/// claims is worth stating rather than leaving to the arithmetic:
+/// much for every atom whose position the maps cannot interpolate. The charge
+/// is **this much per ångström of violation**, so the energy of an out-of-box
+/// atom is `OUT_OF_BOX_PENALTY x (distance outside)` and the gradient is the
+/// derivative of that — which is the whole reason for the per-ångström
+/// phrasing. What the term claims, and what it used to get wrong:
 ///
-/// * **The energy is a step, not a slope.** The full amount is charged at the
-///   boundary and the same amount 2000 Å outside, so outside the box the energy
-///   landscape is a flat shelf with no well in it. `docs/VERIFICATION.md`
-///   defect 38 records the same observation from the test-fixture side.
-/// * **Energy and gradient are not the gradient of one another.** Between two
-///   points a whole ångström apart outside the box the energy does not change at
-///   all, while the gradient the optimiser is handed across that gap is the full
-///   penalty.
-/// * **The restoring direction is inverted.** The direction added to the atom
-///   gradient is the unit vector towards the box *centre* (`mod.rs:216`), so for
-///   an atom outside on the +x side the reported `dE/dx` is negative: the energy
-///   is modelled as falling as the atom moves *further out*. Steepest descent
-///   follows the negative gradient, so the search is pointed out of the box,
-///   the step it is directed to take costs exactly what the start costs, and the
-///   pose is stranded. This contradicts the intent stated on this constant and
-///   on [`ScoringContext::evaluate`], and it is measured rather than inferred in
-///   `the_penalty_strands_an_outside_pose_and_its_magnitude_is_a_plateau`. It is
-///   not corrected here: the fix changes every out-of-box energy and gradient the
-///   engine produces, which is a decision for whoever owns that.
+/// * **The energy is a ramp, and the gradient is its derivative.** An atom 1 Å
+///   outside is charged [`OUT_OF_BOX_PENALTY`]; one 5 Å outside is charged five
+///   times that. This is new: the charge used to be a **step**, the full amount
+///   at the boundary and the same amount 2000 Å out, which made the penalty
+///   invisible to the line search — every trial step outside cost exactly what
+///   the start cost, no step size satisfied Armijo, and a pose with a
+///   full-size gradient was stranded exactly where it stood. `docs/VERIFICATION.md`
+///   defect 38 records the step behaviour from the test-fixture side, and the
+///   number it quotes is a property of the old form.
+/// * **The gradient points further out, so descent comes back.** For an atom
+///   outside on the +x face the reported `dE/dx` is **positive**: the energy
+///   rises as the atom moves out, steepest descent follows the negative
+///   gradient, and the atom moves back toward the box. The sign was the other
+///   way round for the life of the term — `dE/dx` measured −1000 at x = 7 in a
+///   6 Å box — so descent was *pointed* out of the box. Corrected, and measured
+///   in
+///   `an_out_of_box_atom_is_pulled_back_in_by_its_descent_direction`.
+/// * **The violation is measured per axis, against the faces, not from the
+///   centre.** An atom outside only on +x is corrected on +x. The old direction
+///   was the unit vector to the box *centre*, so an atom outside through a
+///   corner was pushed diagonally through the interior of the box, along axes
+///   where it was not out of bounds at all.
 /// * **The magnitude is a plateau rather than a dial.** `line_search` caps the
 ///   first trial at `max_step_norm` (4 Å) and a penalty-sized gradient saturates
 ///   that cap immediately, so any penalty above roughly 8 produces the identical
-///   first trial. The only thing 1000.0 decides is the energy a caller reads off
-///   an out-of-box pose; tuning it would change a reported number and nothing
-///   else.
+///   first trial. What 1000.0 still decides is the *energy* a caller reads off
+///   an out-of-box pose, and that energy now scales with how far out it is.
 ///
-/// `docs/API.md:194` is the only documentation of the value, and it gives the
-/// number without any of this.
+/// The value is documented at `docs/API.md:204`, and that line states the
+/// constant *and* the per-ångström per-axis shape of the term it multiplies --
+/// so a reader there learns the magnitude and the mechanism together. The pin
+/// that ties the two together is `OUT_OF_BOX_DOC` in this file's tests.
 pub const OUT_OF_BOX_PENALTY: f64 = 1000.0;
 
 /// The two halves of a docking energy.
@@ -124,8 +130,16 @@ pub struct ScoringContext<'a> {
     coords: Vec<Vec3>,
     /// Scratch: gradient with respect to each atom position.
     atom_grad: Vec<Vector3<f64>>,
-    /// True if any atom of the last evaluation fell outside the grid.
-    last_outside: bool,
+    /// How many atoms of the last evaluation fell outside the grid.
+    ///
+    /// This used to be a `bool` set on the same branch that charges
+    /// [`OUT_OF_BOX_PENALTY`], and the distinction it lost is the whole point
+    /// of carrying it. "One atom poked through a face by 0.2 Å" and "not one
+    /// atom of this pose is in the box at all" are the same `true`, and only the
+    /// second of those means the reported number describes nothing the caller
+    /// asked for. It was a count all along: the loop that sets it visits every
+    /// atom and branches once per atom, so nothing is computed to obtain it.
+    atoms_outside: usize,
 }
 
 impl<'a> ScoringContext<'a> {
@@ -138,7 +152,7 @@ impl<'a> ScoringContext<'a> {
             scoring,
             coords: vec![[0.0; 3]; n],
             atom_grad: vec![Vector3::zeros(); n],
-            last_outside: false,
+            atoms_outside: 0,
         }
     }
 
@@ -154,7 +168,19 @@ impl<'a> ScoringContext<'a> {
 
     /// True if the most recent evaluation placed an atom outside the grid.
     pub fn last_outside(&self) -> bool {
-        self.last_outside
+        self.atoms_outside > 0
+    }
+
+    /// How many atoms the most recent evaluation placed outside the grid.
+    ///
+    /// Read this, not [`ScoringContext::last_outside`], when the question is
+    /// whether a pose is *entirely* outside: that is
+    /// `atoms_outside() == ligand.len()`, a count against a count, and it needs
+    /// no threshold to express. The same branch of the same loop increments
+    /// this and adds [`OUT_OF_BOX_PENALTY`], so the count and the charge can
+    /// never describe different poses.
+    pub fn atoms_outside(&self) -> usize {
+        self.atoms_outside
     }
 
     /// Coordinates produced by the most recent evaluation, in atom order.
@@ -227,7 +253,7 @@ impl<'a> ScoringContext<'a> {
         for g in self.atom_grad.iter_mut() {
             g.fill(0.0);
         }
-        self.last_outside = false;
+        self.atoms_outside = 0;
 
         let scale = self.scoring.intramolecular_scale();
         let mut inter_grad = vec![Vector3::zeros(); self.ligand.len()];
@@ -243,21 +269,26 @@ impl<'a> ScoringContext<'a> {
                     inter_grad[i] += Vector3::new(g[0], g[1], g[2]);
                 }
                 None => {
-                    self.last_outside = true;
-                    let c = self.maps.grid_box().center();
-                    let mut dir = [0.0f64; 3];
-                    let mut norm = 0.0;
+                    self.atoms_outside += 1;
+                    // How far outside the box this atom is, per axis, and the
+                    // sum. Measured against the *faces* rather than from the
+                    // centre: an atom outside on +x is one axis wrong, and a
+                    // penalty that pulled it along the diagonal towards the
+                    // centre would shove it through the interior of the box to
+                    // get there.
+                    let b = self.maps.grid_box();
+                    let per_axis = crate::grid::out_of_box_violation_per_axis(p, &b);
                     for k in 0..3 {
-                        dir[k] = c[k] - p[k];
-                        norm += dir[k] * dir[k];
-                    }
-                    let norm = norm.sqrt();
-                    if norm > 1e-9 {
-                        for k in 0..3 {
-                            dir[k] /= norm;
-                            inter_grad[i][k] += OUT_OF_BOX_PENALTY * dir[k];
+                        if per_axis[k] > 0.0 {
+                            // The gradient of that ramp, pointing further out on
+                            // the axis this atom left by, so descent is inward.
+                            let outward = if p[k] > b.max[k] { 1.0 } else { -1.0 };
+                            inter_grad[i][k] += OUT_OF_BOX_PENALTY * outward;
                         }
-                        inter += OUT_OF_BOX_PENALTY;
+                    }
+                    let violation: f64 = per_axis.iter().sum();
+                    if violation > 0.0 {
+                        inter += OUT_OF_BOX_PENALTY * violation;
                     }
                 }
             }
@@ -364,6 +395,26 @@ impl std::fmt::Display for GpuSkip {
 /// Such ligands fall back to the CPU rather than being split up, because
 /// splitting a reduction across workgroups is a much bigger change than the
 /// benefit is worth here.
+///
+/// # What a decline reports
+///
+/// A **decline** is a call that asked for the GPU (`prefer_gpu`) and did not get
+/// one. The contract is:
+///
+/// - `prefer_gpu == true` — exactly one of these holds: the GPU ran
+///   ([`PopulationBackend::Gpu`] and `skip` is `None`), or it did not
+///   ([`PopulationBackend::Cpu`] and `skip` is `Some`) and the [`GpuSkip`] says
+///   why. Never both, never neither.
+/// - `prefer_gpu == false` — `skip` is `None`, always. Nobody asked, so nothing
+///   was declined, and a reason here would report a fallback that did not
+///   happen.
+///
+/// `backend` alone already answers *what ran*; [`GpuSkip`] answers *why the
+/// request was not honoured*, which is the half a caller needs in order to stop
+/// asking. The two are not the same claim: a build compiled without the `gpu`
+/// feature declines with "this build was compiled without the gpu feature",
+/// while a build that has it and cannot open an adapter declines with "no usable
+/// GPU adapter" — opposite repairs for the same missing speedup.
 pub fn evaluate_population(
     ligand: &Ligand,
     maps: &GridMaps,
@@ -386,7 +437,26 @@ pub fn evaluate_population(
         }
     }
     #[cfg(not(feature = "gpu"))]
-    let _ = prefer_gpu;
+    {
+        // A build without the feature cannot reach the kernel at all, so a
+        // caller who asked for the GPU and got the CPU has been declined, and
+        // a decline is reported rather than swallowed. This used to be
+        // `let _ = prefer_gpu;`, which dropped the request on the floor: the
+        // report said `backend: "cpu"` and `gpu_skip_reason: None`, which is
+        // indistinguishable from having run on purpose, so the only thing a
+        // caller could conclude was that their request had been ignored --
+        // an unexplained slowdown with no cause attached.
+        if prefer_gpu {
+            let (energies, _, _) = cpu_population(ligand, maps, scoring, conformations);
+            return (
+                energies,
+                PopulationBackend::Cpu,
+                Some(GpuSkip {
+                    reason: "this build was compiled without the gpu feature",
+                }),
+            );
+        }
+    }
 
     cpu_population(ligand, maps, scoring, conformations)
 }
@@ -429,9 +499,83 @@ fn try_gpu_population(
     for conf in conformations {
         ctx.apply(conf);
         for p in ctx.current_coords() {
-            coords.push(p[0] as f32);
-            coords.push(p[1] as f32);
-            coords.push(p[2] as f32);
+            // **The narrowing, and the one input it declines.** `GridMaps`
+            // stores `f32` and `Batch::coords` is `Vec<f32>`, so a coordinate
+            // has to survive the trip through `f32` to reach the kernel.
+            //
+            // Two things can go wrong on that trip, and the second is the one
+            // that bites first. A Rust float cast saturates, so a coordinate
+            // above `f32::MAX` (about 3.4e38 A) becomes `f32::INFINITY` on the
+            // way in. But well before that, an atom *outside* the box is
+            // charged `OUT_OF_BOX_PENALTY * violation` in `f32` inside
+            // `sample()`, and with the penalty at 1000.0 that multiply
+            // overflows once the violation exceeds `f32::MAX / 1000`, about
+            // **3.4e35 A**. So the representable range is set by the penalty,
+            // not by the coordinate, and a test against `f32::MAX` alone would
+            // decline the coordinate while letting through the one that
+            // actually returns an infinity.
+            //
+            // Both used to pass, and the two backends then disagreed by an
+            // unbounded amount on a row that was still returned and still
+            // ranked. Measured on an RTX 3050, a conformation translated
+            // 1e38 A along x scores 1.0e41 on the CPU -- the out-of-box
+            // penalty, large but finite, because the CPU narrows nothing and
+            // computes in f64 -- and `inf` on the GPU.
+            //
+            // It is declined rather than refused because the coordinate itself
+            // is not wrong: 1e38 A is a perfectly finite `f64`, so
+            // `first_non_finite` and `non_finite_coordinate_refusal` correctly
+            // let it through, and a CPU-only caller gets a usable number. What
+            // the GPU cannot do is *represent* the penalty for it. So the GPU
+            // declines, the CPU answers, and the caller is told why -- the same
+            // contract as every other decline here, and the reason the check is
+            // here rather than left to the cast.
+            // The narrowing itself moved into `Batch::from_coords`, which takes
+            // `f64` and does the `as f32` itself. It has to live there rather
+            // than here: the in-box test is discontinuous, so a coordinate one
+            // ULP apart can send the two backends down different branches, and
+            // the host needs the un-narrowed value to take that decision on --
+            // it uploads the answer as a per-atom flag rather than letting the
+            // kernel re-derive it from the narrowed value. See the `Batch`
+            // docs.
+            let narrow = [p[0], p[1], p[2]];
+            // **What has to survive the narrowing is the whole row, not one
+            // coordinate of it.** The first version of this check formed
+            // `OUT_OF_BOX_PENALTY * coordinate` per axis, which is exact for a
+            // one-atom ligand translated along one axis and **too permissive
+            // for every other shape**, for two reasons that are both in the
+            // shader rather than here:
+            //
+            //  * `sample()` sums the per-axis excesses -- `dot(max(per_axis,
+            //    vec3(0)), vec3(1))`, `energy.wgsl` -- and then multiplies by
+            //    the penalty, so a coordinate equal on all three axes costs
+            //    **three** times what the per-axis check budgets for it. At the
+            //    magnitude the per-axis check admits, a diagonal escape
+            //    returned `inf` from the GPU against a finite CPU number.
+            //  * `main()` reduces `partial[lid]` across the workgroup, one
+            //    entry per atom, so a ligand of `n` atoms costs `n` times as
+            //    much again.
+            //
+            // Measured on an RTX 3050 from a `--features gpu` build, the
+            // per-axis check admitted `3.402823e35` A, against safe ceilings of
+            // `1.134274e35` A for a diagonal one-atom escape (3x), `5.671e34` A
+            // for two atoms (6x) and `1.772e33` A for a 64-atom ligand (192x).
+            // So the divisor below is the row's worst case and not the
+            // coordinate's.
+            const AXES: f64 = 3.0;
+            let row = OUT_OF_BOX_PENALTY * AXES * n_atoms as f64;
+            // Formed in `f64` and only then narrowed, because that is the order
+            // the shader does it in: the penalty, the axes and the atom count
+            // are all `f32` arithmetic once the kernel has them.
+            let overflows = p
+                .iter()
+                .any(|c| !c.is_finite() || !((row * c.abs()) as f32).is_finite());
+            if overflows {
+                return Err(GpuSkip {
+                    reason: "a ligand coordinate is too large for the f32 grid",
+                });
+            }
+            coords.extend_from_slice(&narrow);
         }
         intra.push(ctx.intramolecular_energy_at_current_coords());
     }
@@ -745,6 +889,80 @@ mod tests {
         );
     }
 
+    /// The reporting contract, pinned here so it is enforced by `cargo test` on
+    /// a machine that never runs `scripts/gpu_cpu_parity_check.py`.
+    ///
+    /// This is the assertion that gate makes, in the only place CI actually
+    /// runs. The `#[cfg(not(feature = "gpu"))]` arm used to be
+    /// `let _ = prefer_gpu;`, so on a CPU-only build an explicit `use_gpu=True`
+    /// came back as `backend: "cpu"` with `gpu_skip_reason: None` — a report
+    /// that named what ran and said nothing about the request being dropped.
+    /// Nothing in `cargo test` noticed, because the only test that asked for the
+    /// GPU and expected a decline was itself `#[cfg(feature = "gpu")]`, so it
+    /// never compiled on the configuration it was about.
+    ///
+    /// Written to hold in **both** worlds: with the feature and an adapter this
+    /// run genuinely reaches the kernel and `skip` is `None`, and without it
+    /// `skip` is `Some`. The one thing asserted is the XOR, which is the part
+    /// that was false.
+    #[test]
+    fn a_decline_is_always_self_explaining() {
+        let (ligand, maps) = setup();
+        let sc = VinaScoring::new();
+        let confs = population(4, 0xDEC1_11E5, ligand.num_torsions());
+
+        let (asked, asked_backend, asked_skip) =
+            evaluate_population(&ligand, &maps, &sc, &confs, true);
+        let ran = asked_backend.is_gpu();
+        let said_why = asked_skip
+            .as_ref()
+            .is_some_and(|s| !s.reason.trim().is_empty());
+        assert_eq!(
+            ran,
+            !said_why,
+            "'the gpu ran' XOR 'a non-empty reason why it did not' is the contract \
+             that makes a decline audible: backend={asked_backend:?}, \
+             gpu_skip_reason={:?}",
+            asked_skip.map(|s| s.reason)
+        );
+
+        // The other half: not asking must not manufacture a decline. This is a
+        // different claim from "asked and was refused", and one field carries
+        // both correctly because the caller knows which one they made.
+        let (_, quiet_backend, quiet_skip) =
+            evaluate_population(&ligand, &maps, &sc, &confs, false);
+        assert_eq!(quiet_backend, PopulationBackend::Cpu);
+        assert!(
+            quiet_skip.is_none(),
+            "a call that never asked for the gpu declined nothing, so a reason \
+             here would report a fallback that did not happen: {:?}",
+            quiet_skip
+        );
+
+        // A declined call must still return the CPU's numbers: the reason is
+        // added information, never a licence to answer differently.
+        if let Some(skip) = &asked_skip {
+            let (unasked, _, _) = evaluate_population(&ligand, &maps, &sc, &confs, false);
+            assert_eq!(
+                asked, unasked,
+                "a call declined for {skip:?} must return the CPU answer exactly"
+            );
+        }
+
+        // And the reason must name a cause the caller can act on, because the
+        // two reasons mean opposite things: a missing feature is fixed by
+        // getting a different wheel, a missing adapter by fixing the driver.
+        #[cfg(not(feature = "gpu"))]
+        {
+            let skip = asked_skip.expect("a CPU-only build must decline with a reason");
+            assert!(
+                skip.reason.contains("gpu feature"),
+                "the reason must name the missing feature rather than the missing \
+                 adapter, because the two call for opposite repairs; got {skip:?}"
+            );
+        }
+    }
+
     /// The whole point of the GPU path is that it returns the same numbers.
     /// A backend that silently returns something else is worse than no backend.
     #[cfg(feature = "gpu")]
@@ -789,7 +1007,7 @@ mod tests {
     }
 
     /// A ligand larger than one workgroup cannot be batched, and the fallback
-    /// has to be silent-but-correct rather than wrong.
+    /// has to be correct **and say why** rather than be wrong or be silent.
     #[cfg(feature = "gpu")]
     #[test]
     fn a_large_ligand_falls_back_to_the_cpu() {
@@ -905,8 +1123,7 @@ mod tests {
         // that the ordinary accident — someone tuning the literal and not
         // noticing that every published seeded number moved with it — is red.
         assert_eq!(
-            WALK_SEED_STRIDE,
-            0x9E37_79B9_7F4A_7C15,
+            WALK_SEED_STRIDE, 0x9E37_79B9_7F4A_7C15,
             "WALK_SEED_STRIDE is {WALK_SEED_STRIDE:#018x}, not the value every \
              published seeded number in this project was produced with. Changing \
              it moves every seeded result: the workbench's poses for a given seed, \
@@ -915,8 +1132,7 @@ mod tests {
              release-note item, not a code edit"
         );
         assert_eq!(
-            ISLAND_SEED_STRIDE,
-            0x1234_5678_9ABC_DEF0,
+            ISLAND_SEED_STRIDE, 0x1234_5678_9ABC_DEF0,
             "ISLAND_SEED_STRIDE is {ISLAND_SEED_STRIDE:#018x}, not the value the \
              seeded LGA populations were produced with. Same contract as \
              WALK_SEED_STRIDE, and the same reason: it moves numbers that are \
@@ -982,32 +1198,33 @@ mod tests {
     //
     // The one scoring constant that never reaches `SCORING.md`, because it is
     // not a scoring-function weight: it is a constraint on the sampler, applied
-    // where the maps cannot be read. `docs/API.md:194` states the value and
-    // nothing else, so that line is what these assertions travel with, and the
-    // mechanism assertions below are pinned to `docs/VERIFICATION.md` defect 38,
-    // which is the only place the "step, not ramp" reading is written down.
-
-    /// The value `docs/API.md` documents.
-    const OUT_OF_BOX_DOC: &str =
-        "API.md:194: `OUT_OF_BOX_PENALTY = 1000.0`. -- this is the only \
-         documentation of the constant: it gives the number and says nothing \
-         about what the penalty does, which is what the three assertions below \
-         pin";
-    /// The one place the mechanism is written down.
-    const OUT_OF_BOX_MECHANISM_DOC: &str =
-        "VERIFICATION.md defect 38: \"OUT_OF_BOX_PENALTY = 1000 主导了能量，而罚函数是\
-         **阶跃**不是斜坡\" -- the penalty dominates the energy and is a STEP, not a \
-         slope. Read as a claim about the gradient as well, it is only half \
-         stated: the gradient is the full penalty at every distance, so the two \
-         are not the gradient of one another";
+    // where the maps cannot be read. `docs/API.md:204` states the value, and
+    // that line is what the value assertion travels with.
+    // The docs state the *mechanism* as well as the value now; they did not
+    // when these tests were written, which is why the tests exist. The only written-down description of the shape was
+    // `docs/VERIFICATION.md` defect 38 ("the penalty is a step, not a ramp"),
+    // and that line described the defect rather than an intent -- it is now
+    // stale against the code below and wants an owner. The shape these tests
+    // pin is the one the original `ScoringContext::evaluate` docstring asked
+    // for: a *linear* penalty that leaves the optimiser pointing back inside.
+    //
+    // The value `docs/API.md` documents.
+    const OUT_OF_BOX_DOC: &str = "API.md:204: `OUT_OF_BOX_PENALTY = 1000.0`. -- this is the \
+         documentation of the constant, and it states the value together with the \
+         per-angstrom, per-axis shape of the term it multiplies, which is what the \
+         three assertions below pin";
 
     /// A one-atom ligand, so `conf.position` places its only atom exactly there
     /// and a penalty can be counted per atom without reasoning about where a
     /// kinematic tree puts the rest of a real ligand.
     fn single_carbon() -> Ligand {
-        let mol =
-            Molecule::from_atoms(vec![Atom::new(1, [0.0, 0.0, 0.0], Element::C, AtomType::CH)])
-                .expect("a single carbon is a valid molecule");
+        let mol = Molecule::from_atoms(vec![Atom::new(
+            1,
+            [0.0, 0.0, 0.0],
+            Element::C,
+            AtomType::CH,
+        )])
+        .expect("a single carbon is a valid molecule");
         assert_eq!(mol.len(), 1, "the fixture must really be one atom");
         Ligand::from_molecule(mol).expect("a single carbon is a ligand")
     }
@@ -1021,41 +1238,54 @@ mod tests {
     }
 
     /// A one-atom ligand, placed outside the box at three distances, is charged
-    /// exactly one penalty each time — and the intramolecular half is untouched,
-    /// because the penalty is added to `intermolecular` before the scale is
-    /// applied and `intramolecular_scale` is 0.006 (a six-hundred-fold
+    /// the penalty **per ångström of violation** — and the intramolecular half is
+    /// untouched, because the penalty is added to `intermolecular` before the
+    /// scale is applied and `intramolecular_scale` is 0.006 (a six-hundred-fold
     /// difference if it were ever added to the wrong half).
+    ///
+    /// This used to assert the opposite shape: one flat charge at every distance,
+    /// which is what made the term invisible to the line search. The distance
+    /// scaling is not a cosmetic change to a number — it is the difference
+    /// between a penalty the optimiser can descend and one it cannot.
     #[test]
-    fn the_out_of_box_penalty_is_one_penalty_per_atom_at_every_distance() {
-        assert_pinned("OUT_OF_BOX_PENALTY", OUT_OF_BOX_PENALTY, 1000.0, OUT_OF_BOX_DOC);
+    fn the_out_of_box_penalty_is_per_angstrom_of_violation() {
+        assert_pinned(
+            "OUT_OF_BOX_PENALTY",
+            OUT_OF_BOX_PENALTY,
+            1000.0,
+            OUT_OF_BOX_DOC,
+        );
         let (_, maps) = setup();
         let ligand = single_carbon();
         let sc = VinaScoring::new();
         let mut ctx = ScoringContext::new(&ligand, &maps, &sc);
+        let half = maps.grid_box().size()[0] / 2.0;
 
-        for x in [20.0, 200.0, 2000.0] {
+        for x in [7.0, 20.0, 2000.0] {
             let (b, _) = ctx.evaluate_full(&at([x, 0.0, 0.0], 0));
             assert!(
                 ctx.last_outside(),
-                "the atom at x = {x} has to actually be outside the 12 A box, or \
-                 this is testing the interior"
+                "the atom at x = {x} has to actually be outside the {half} A half-box, \
+                 or this is testing the interior"
             );
-            assert_eq!(
-                b.intermolecular, OUT_OF_BOX_PENALTY,
-                "at x = {x}: one atom outside must cost exactly one penalty, in the \
-                 intermolecular half. A charge that grew with distance would be a \
-                 ramp; see {OUT_OF_BOX_MECHANISM_DOC}"
+            let violation = x - half;
+            assert!(
+                (b.intermolecular - OUT_OF_BOX_PENALTY * violation).abs() < 1e-6,
+                "at x = {x}: {violation} A outside must cost \
+                 {} kcal/mol, got {}. The charge is per angstrom, so a pose that \
+                 overhangs the box costs what it overhangs by",
+                OUT_OF_BOX_PENALTY * violation,
+                b.intermolecular
             );
             assert_eq!(
                 b.intramolecular, 0.0,
                 "a one-atom ligand has no intramolecular pairs, so this also pins \
                  that the penalty is not smuggled into the scaled half"
             );
-            assert_eq!(
-                b.total(sc.intramolecular_scale()),
-                OUT_OF_BOX_PENALTY,
-                "at x = {x}: the reported total must be the penalty and nothing else, \
-                 or a caller cannot recognise an out-of-box pose from its energy"
+            assert!(
+                (b.total(sc.intramolecular_scale()) - OUT_OF_BOX_PENALTY * violation).abs() < 1e-6,
+                "at x = {x}: the total must be the penalty and nothing else, or a \
+                 caller cannot recognise an out-of-box pose from its energy"
             );
         }
 
@@ -1085,114 +1315,225 @@ mod tests {
             ctx.last_outside(),
             "the clash flag has to agree with the coordinate count"
         );
-        assert_eq!(
-            b.intermolecular,
-            OUT_OF_BOX_PENALTY * outside as f64,
-            "{outside} atoms outside must cost {outside} penalties"
+        // Per atom, additive, and each atom charged for its own overhang, per
+        // axis. The chain is a butane, so the atoms are not all the same
+        // distance out and the sum is a real quantity rather than
+        // `outside x penalty`. Violations are summed over axes too, so an atom
+        // outside two faces pays for both and is pulled in on both at once.
+        // The coordinates are read here, before the next evaluation overwrites
+        // them: `evaluate_full` leaves behind the expansion of the conformer it
+        // just scored, and this sum has to be the one that produced `b`.
+        //
+        // The clamp is `max(0, max(p - max, min - p))` per axis, taken from the
+        // box rather than from a half-extent: an axis the atom is *inside* has
+        // to contribute nothing, and getting that wrong charges a pose for
+        // every axis it is lawfully in.
+        let gbox = maps.grid_box();
+        let sum_violation: f64 = ctx
+            .current_coords()
+            .iter()
+            .map(|p| {
+                (0..3)
+                    .map(|k| (p[k] - gbox.max[k]).max(gbox.min[k] - p[k]).max(0.0))
+                    .sum::<f64>()
+            })
+            .sum();
+        assert!(
+            (b.intermolecular - OUT_OF_BOX_PENALTY * sum_violation).abs() < 1e-6,
+            "{outside} atoms outside with a summed violation of {sum_violation:.4} A \
+             must cost {}, got {}. Each atom pays for its own overhang and its own \
+             axes, so a chain poking out sideways pays more than one reaching \
+             straight out",
+            OUT_OF_BOX_PENALTY * sum_violation,
+            b.intermolecular
+        );
+        // And the charge rises with the overhang: the same ligand, 20 A further
+        // out. A charge that does not move with the overhang is a step again.
+        let (b_farther, _) = ctx.evaluate_full(&at([60.0, 0.0, 0.0], butane.num_torsions()));
+        assert!(
+            b_farther.intermolecular > b.intermolecular,
+            "the same ligand 20 A further out costs {}, against {} nearer",
+            b_farther.intermolecular,
+            b.intermolecular
         );
     }
 
-    /// The gradient the optimiser is handed is the full penalty on a unit vector
-    /// towards the **box centre**, at every distance — so energy and gradient
-    /// are not the gradient of one another. That is the property worth pinning,
-    /// because a penalty whose gradient is not the gradient of its own energy is
-    /// telling the optimiser something the energy does not agree with.
+    /// `atoms_outside` is a count of atoms, not the boolean it replaced, and it
+    /// has to be the *same* count an independent walk over the coordinates
+    /// produces. Both directions, because either alone is satisfiable by a
+    /// constant: a field hard-wired to `1` passes "the flag is set" and a field
+    /// hard-wired to `0` passes "nothing is outside".
     #[test]
-    fn the_out_of_box_penalty_is_not_the_gradient_of_the_energy_it_adds() {
+    fn the_out_of_box_count_agrees_with_the_coordinates_it_was_taken_from() {
+        let (butane, maps) = setup();
+        let sc = VinaScoring::new();
+        let mut ctx = ScoringContext::new(&butane, &maps, &sc);
+        let gbox = maps.grid_box();
+        let n = butane.len();
+        assert!(
+            n > 1,
+            "the fixture needs several atoms for a count to mean anything"
+        );
+
+        // Expected values, counted from the expanded coordinates rather than
+        // from the field under test. `at(x, ..)` walks the whole chain out along
+        // +x, so x picks how many atoms have cleared the face.
+        let cases = [(-100.0, n), (-4.0, 0)];
+        for (x, want) in cases {
+            let conf = at([x, 0.0, 0.0], butane.num_torsions());
+            ctx.evaluate_full(&conf);
+            let coords = ctx.current_coords().to_vec();
+            let counted = coords
+                .iter()
+                .filter(|p| crate::grid::out_of_box_violation(**p, &gbox) > 0.0)
+                .count();
+            assert_eq!(
+                counted, want,
+                "fixture: at x = {x}, {want} of {n} butane atoms are outside. If this \
+                 assertion fails the fixture moved and every number below is about \
+                 a different placement"
+            );
+            assert_eq!(
+                ctx.atoms_outside(),
+                counted,
+                "at x = {x}: the engine counted {} atoms outside and the coordinates \
+                 say {counted} are. These are the same loop, so a disagreement means \
+                 the count and the penalty it accompanies are describing different \
+                 poses",
+                ctx.atoms_outside()
+            );
+            // The boolean is now a derived view of the count, not a second
+            // piece of state that can disagree with it.
+            assert_eq!(
+                ctx.last_outside(),
+                counted > 0,
+                "at x = {x}: the flag and the count are the same fact and must not \
+                 be able to answer differently"
+            );
+        }
+
+        // And the count is per evaluation, not cumulative: a placement wholly
+        // inside after a wholly-outside one must not inherit the earlier count.
+        let _ = ctx.evaluate_full(&at([-100.0, 0.0, 0.0], butane.num_torsions()));
+        assert_eq!(
+            ctx.atoms_outside(),
+            n,
+            "the far placement puts every atom outside"
+        );
+        let _ = ctx.evaluate_full(&at([0.0, 0.0, 0.0], butane.num_torsions()));
+        assert_eq!(
+            ctx.atoms_outside(),
+            0,
+            "a fresh evaluation wholly inside the box must report 0 outside atoms. \
+             A counter that only ever climbs would satisfy both assertions above \
+             once the fixture happened to be visited in that order"
+        );
+    }
+
+    /// The gradient the optimiser is handed **is** the gradient of the energy it
+    /// adds, and it points along the axis the atom actually left by, away from
+    /// the box — so steepest descent brings it back.
+    ///
+    /// This is the inverse of what it used to assert. It pinned the term being
+    /// broken: the gradient was the full penalty on a unit vector towards the
+    /// box *centre* at every distance, while the energy was flat, so the two
+    /// were not the gradient of one another and the optimiser was told something
+    /// the energy did not agree with. A penalty that fails that test is not a
+    /// soft constraint; it is a noise source with a large number in it.
+    #[test]
+    fn the_out_of_box_penalty_is_the_gradient_of_the_energy_it_adds() {
         let (_, maps) = setup();
         let ligand = single_carbon();
         let sc = VinaScoring::new();
         let mut ctx = ScoringContext::new(&ligand, &maps, &sc);
-        let centre = maps.grid_box().center();
+        let half = maps.grid_box().size()[0] / 2.0;
 
-        // Escaped through a corner: the engine trusts the direction to the
-        // centre, so the pull has a large component along an axis where this
-        // atom is not out of bounds at all.
-        let corner = [20.0, 20.0, 0.0];
-        let mut to_centre = [0.0f64; 3];
-        let mut norm = 0.0f64;
-        for k in 0..3 {
-            to_centre[k] = centre[k] - corner[k];
-            norm += to_centre[k] * to_centre[k];
-        }
-        let norm = norm.sqrt();
-        assert!(norm > 1e-9);
+        // Escaped through a corner: the correction is on the worst axis alone,
+        // so the two axes this atom is *not* out of bounds on get nothing. The
+        // old code pulled it diagonally towards the centre, through the interior
+        // of the box, along axes where it was perfectly legal.
+        let corner = [half + 14.0, half + 14.0, 0.0];
         let (_, g) = ctx.evaluate(&at(corner, 0));
         assert!(ctx.last_outside());
-        for k in 0..3 {
-            let want = OUT_OF_BOX_PENALTY * to_centre[k] / norm;
-            assert!(
-                (g[k] - want).abs() < 1e-9,
-                "translation component {k}: gradient {:+.9}, want {:+.9} \
-                 (= OUT_OF_BOX_PENALTY x the unit vector to the box centre). \
-                 A pull towards the nearest face would be {want:+.3} in magnitude \
-                 and {sign} in this axis; the engine trusts the centre, not the \
-                 face.",
-                g[k],
-                want,
-                sign = if want < 0.0 { "negative" } else { "positive" }
-            );
-        }
-        let measured = g[0..3].iter().map(|v| v * v).sum::<f64>().sqrt();
         assert!(
-            (measured - OUT_OF_BOX_PENALTY).abs() < 1e-6,
-            "the pull's magnitude is {measured:.9}, not the penalty {OUT_OF_BOX_PENALTY} \
-             at every distance"
+            (g[0] - OUT_OF_BOX_PENALTY).abs() < 1e-9 && (g[1] - OUT_OF_BOX_PENALTY).abs() < 1e-9,
+            "a corner escape corrects along the axes it left by: gradient is \
+             ({:+.9}, {:+.9}, {:+.9}), and both violated axes read +{OUT_OF_BOX_PENALTY}",
+            g[0],
+            g[1],
+            g[2]
+        );
+        assert!(
+            g[2].abs() < 1e-12,
+            "axis z is inside the box, so it must contribute nothing: got {:+.9}. \
+             A pull towards the box centre gave a large component here, which is \
+             how an atom leaves through one face and gets shoved further out of \
+             another",
+            g[2]
+        );
+        // Outward, on the axis, so descent is inward.
+        assert!(
+            g[0] > 0.0 && g[1] > 0.0,
+            "the gradient points further out, so `-grad` points back in: ({:+.9}, {:+.9})",
+            g[0],
+            g[1]
         );
 
-        // The asymmetry itself: two points a whole ångström apart, both outside,
-        // have the *same* energy, while the gradient across that gap is the full
-        // penalty. A ramp would have to show that energy difference; a step
-        // cannot, and this is the number that says so.
-        let (far, _) = ctx.evaluate(&at([20.0, 0.0, 0.0], 0));
-        let (near, _) = ctx.evaluate(&at([19.0, 0.0, 0.0], 0));
-        let (_, g_far) = ctx.evaluate(&at([20.0, 0.0, 0.0], 0));
-        assert_eq!(
-            far.to_bits(),
-            near.to_bits(),
-            "1 A apart, both outside, and the energy does not move: the outside \
-             region is a flat shelf. If this ever becomes a difference, the \
-             penalty has become a ramp and {OUT_OF_BOX_MECHANISM_DOC} is stale"
-        );
+        // The other half of the claim, and the number that used to be the tell:
+        // one ångström further out costs exactly one penalty more. A step cannot
+        // show that difference; a ramp can, and this is the difference.
+        let (far, _) = ctx.evaluate(&at([half + 15.0, 0.0, 0.0], 0));
+        let (near, _) = ctx.evaluate(&at([half + 14.0, 0.0, 0.0], 0));
         assert!(
-            (g_far[0] + OUT_OF_BOX_PENALTY).abs() < 1e-9,
-            "and yet the gradient handed to the line search across that same gap \
-             is {:+.6}, i.e. the full penalty per ångstrom",
-            g_far[0]
+            (far - near - OUT_OF_BOX_PENALTY).abs() < 1e-6,
+            "1 A further out costs {far}, 1 A nearer costs {near}: the difference is \
+             {diff:.6} and must be one penalty. This is the assertion that says the \
+             energy and the gradient agree; the flat version of this test asserted \
+             they did not",
+            diff = far - near
+        );
+        // And the corner's *energy*, which the gradient above cannot reach: an
+        // atom 14 A out on both x and y is 28 A out, not 14. Taking the largest
+        // axis instead of the sum halves this, and no guard that only reads the
+        // gradient would see it -- the gradient is per-axis either way.
+        let (corner_e, _) = ctx.evaluate(&at(corner, 0));
+        let (one_face, _) = ctx.evaluate(&at([half + 14.0, 0.0, 0.0], 0));
+        assert!(
+            (corner_e - one_face - 14.0 * OUT_OF_BOX_PENALTY).abs() < 1e-6,
+            "a corner 14 A out on x and y costs {corner_e} against {one_face} for one \
+             face: the difference must be 14 penalties, the second face. Charging the \
+             larger of the two axes instead of their sum would make it 0"
         );
     }
 
-    /// What the penalty actually does, which is less than "keeps the ligand in".
+    /// What the penalty actually does to a pose that has left the box, and what
+    /// that costs.
     ///
-    /// Measured, in three parts, and the first one contradicts this constant's
-    /// own doc comment:
+    /// This is the consequence the other two tests imply, measured on the
+    /// optimiser rather than on the energy function: the direction has to put a
+    /// pose back inside, and it has to be able to.
     ///
-    /// * **The restoring direction is the wrong way round.** `dir` is the unit
-    ///   vector from the atom *to* the box centre (mod.rs:216), and it is added
-    ///   to the atom gradient, so for an atom outside on the +x side the
-    ///   reported `dE/dx` is **negative** — meaning E falls as the atom moves
-    ///   further out. Steepest descent is `-|grad|`, so the search is pointed
-    ///   *away* from the box. The doc comment on this constant, and on
-    ///   `ScoringContext::evaluate`, both say the penalty pushes the optimiser
-    ///   back inside; measured, it does not. The energy it adds is a step, so
-    ///   the trial in that direction costs exactly what the start costs, the
-    ///   Armijo test rejects it, and the pose is left stranded.
-    /// * **The magnitude is a plateau, not a dial.** `line_search` caps the
-    ///   first trial at `max_step_norm` (lbfgs.rs:273) and a penalty-sized
-    ///   gradient saturates that cap immediately, so the number does not set the
-    ///   step length. Any value above roughly `2 * max_step_norm` gives the
-    ///   identical first trial, which means the only thing 1000.0 decides is
-    ///   the energy a caller reads off an out-of-box pose.
-    /// * **Nothing here is reachable for a pose the search returns.** `dock`
+    /// * **A descent step reduces the violation.** One atom 1 A outside a 6 A
+    ///   face: `dE/dx` is **positive**, so `-grad` is inward, and `minimize`
+    ///   brings it back inside. Before the correction this returned x = +7.0000
+    ///   after 33 evaluations -- directed outward, and frozen there, because a
+    ///   flat energy left Armijo no acceptable step at all.
+    /// * **The energy difference is what lets the step happen.** Two points 1 A
+    ///   apart, both outside, differ by exactly one penalty. That difference is
+    ///   why a step can be accepted; without it the optimiser is told to move
+    ///   somewhere that costs exactly what it already costs.
+    /// * **The magnitude is still a plateau for the step length.**
+    ///   `line_search` caps the first trial at `max_step_norm`, so what 1000.0
+    ///   decides is the *energy* of an out-of-box pose, which now scales with
+    ///   the overhang rather than counting atoms.
+    /// * **Still not reachable for a pose the search returns.** `dock`
     ///   partitions out-of-box poses out before clustering and
-    ///   `monte_carlo::search` rejects a box the ligand cannot fit in, so the
-    ///   stranded case is a property of the penalty as written rather than
-    ///   something a user sees in `poses.pdbqt`. It is pinned because a
-    ///   correction to the sign is a change to every out-of-box energy and
-    ///   gradient this engine produces, and that change should be made
-    ///   deliberately.
+    ///   `monte_carlo::search` rejects a box the ligand cannot fit in. So this is
+    ///   a property of the term as written rather than something a user sees in
+    ///   `poses.pdbqt` -- which is the one thing that made correcting the sign a
+    ///   decision rather than an obvious bug fix.
     #[test]
-    fn the_penalty_strands_an_outside_pose_and_its_magnitude_is_a_plateau() {
+    fn an_out_of_box_atom_is_pulled_back_in_by_its_descent_direction() {
         let (_, maps) = setup();
         let ligand = single_carbon();
         let sc = VinaScoring::new();
@@ -1201,31 +1542,32 @@ mod tests {
 
         let mut ctx = ScoringContext::new(&ligand, &maps, &sc);
 
-        // --- the direction is the wrong way round --------------------------
+        // --- the direction, which a magnitude test cannot see --------------
         let (e_at_7, g) = ctx.evaluate(&at([7.0, 0.0, 0.0], 0));
         assert!(ctx.last_outside(), "7.0 is outside the 6.0 face");
-        assert_eq!(e_at_7, OUT_OF_BOX_PENALTY);
         assert!(
-            g[0] < 0.0,
-            "dE/dx is {:+.6} at x = 7, so the reported energy FALLS as the atom \
-             moves further out. Steepest descent is -|grad|, i.e. +x, so the \
-             search is directed away from the box. `dir` is the unit vector to \
-             the centre (mod.rs:216) and it is added to the gradient, which is \
-             the opposite sign from the penalty this constant's doc comment \
-             describes. Correcting it is a change to every out-of-box energy \
-             and gradient the engine produces, so it is reported rather than \
-             done here; this assertion is what will go red when it is.",
+            (e_at_7 - OUT_OF_BOX_PENALTY).abs() < 1e-6,
+            "1 A outside costs one penalty, got {e_at_7}"
+        );
+        assert!(
+            g[0] > 0.0,
+            "dE/dx is {:+.6} at x = 7: the energy RISES as the atom moves out, so \
+             steepest descent (-grad) is inward. A negative dE/dx here points the \
+             search further out, which is what this term did for its whole life: \
+             `dE/dx == -1000` is as wrong as `dE/dx == 0`, and an assertion on the \
+             magnitude alone would have passed straight over the bug. The direction \
+             is the correction; the size was never the question.",
             g[0]
         );
         // The consequence, exactly: the trial the optimiser is directed to take
         // costs precisely what the start costs, because the penalty is a step.
         let (e_at_11, _) = ctx.evaluate(&at([11.0, 0.0, 0.0], 0));
-        assert_eq!(
-            e_at_11.to_bits(),
-            e_at_7.to_bits(),
-            "the direction the search is told to go (x = 11) is outside too, and \
-             costs the same as x = 7, so no step size satisfies Armijo and the \
-             pose cannot move at all"
+        assert!(
+            (e_at_11 - e_at_7 - 4.0 * OUT_OF_BOX_PENALTY).abs() < 1e-6,
+            "x = 11 is 4 A further out than x = 7 and costs {e_at_11} against \
+             {e_at_7}: the difference must be four penalties. While the charge was \
+             a step the two cost the same, no step size satisfied Armijo, and the \
+             pose could not move at all"
         );
         let start = at([7.0, 0.0, 0.0], 0);
         let (out, outcome) = {
@@ -1233,6 +1575,7 @@ mod tests {
             crate::search::lbfgs::minimize(&start, &cfg, &mut eval)
         };
         let (e_out, _) = ctx.evaluate(&out);
+        let e_out_1a = e_at_7;
         eprintln!(
             "OUT_OF_BOX: 1 atom at x=7, dE/dx {:+.6}; first trial would be {cap} A; \
              minimise returned E {e_out:+.4} at x {:+.4} after {} iterations and \
@@ -1243,18 +1586,26 @@ mod tests {
             outcome.evaluations,
             ctx.last_outside()
         );
-        assert_eq!(
-            (out.position[0], outcome.iterations),
-            (7.0, 1),
-            "a pose 1 A outside came back to x = {} after {} iterations; with the \
-             direction corrected this is the assertion that changes",
+        assert!(
+            out.position[0] < 7.0 - 1e-9,
+            "the descent step moved the atom from x = 7 to {:+.6} after {} \
+             iterations: a descent step must REDUCE the violation, and this \
+             assertion is unsatisfiable while the sign is inverted",
             out.position[0],
             outcome.iterations
         );
         assert!(
-            ctx.last_outside() && e_out == OUT_OF_BOX_PENALTY,
-            "so the pose keeps reporting the penalty: an out-of-box pose's energy \
-             is a statement about the pose, not a value the search climbed to"
+            !ctx.last_outside(),
+            "the atom ended at x {:+.6}, inside the 6.0 face, so the penalty no \
+             longer applies and the pose is scored on its interactions rather \
+             than on a wall",
+            out.position[0]
+        );
+        assert!(
+            e_out < e_out_1a,
+            "and the energy it comes back with is {e_out:+.4} against the \
+             {e_out_1a:+.4} it started on: the penalty is a cost the pose can \
+             climb down, which is the property a penalty exists for"
         );
 
         // --- the magnitude does not set the step length --------------------
