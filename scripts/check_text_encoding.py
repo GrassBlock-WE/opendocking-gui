@@ -28,16 +28,26 @@ is invisible is the same failure as an unpinned total: a reader cannot tell what
 
 The name was the other half of the same lie, and it was wrong for longer than the
 scope was: `check_doc_encoding.py` promised documents while the damage is in
-source. It was kept because the name is referenced from `.github/workflows/ci.yml`
-and `.github/PULL_REQUEST_TEMPLATE.md`, and renaming it to fix a word would break
-two files that change did not own. So the scope was corrected, the name was left
-alone, and the result was a gate named for documents reporting on `.rs` and
-`.wgsl` -- the fix was real and the sentence describing it had stopped being true
-without anyone noticing, which is the ordinary way this repository rots.
+source. It was kept because the name was referenced from
+`.github/workflows/ci.yml` and `.github/PULL_REQUEST_TEMPLATE.md`, and renaming
+it to fix a word would break two files that change did not own. So the scope was
+corrected, the name was left alone, and for a while the result was a gate named
+for documents reporting on `.rs` and `.wgsl` -- the fix was real and the sentence
+describing it had stopped being true without anyone noticing, which is the
+ordinary way this repository rots.
 
-It is now `check_text_encoding.py`, which says what it reads. Those two external
-references are the rename's whole remaining tail: until they follow, a clean
-checkout invokes a file that is not on disk.
+**`check_doc_encoding.py` is no longer a file, and that is why the paragraph
+above is entirely past tense.** A sync removed it from the mirror and then from
+this tree as "not a source in the development tree", so a sentence written while
+it existed is now a sentence about a file no run can resolve -- the same stale
+justification `check_exemptions_are_real` went red on. The rename it was
+stalled behind has since happened, and the two external references have followed
+it: `ci.yml` and `PULL_REQUEST_TEMPLATE.md` both name
+`scripts/check_text_encoding.py`, checked on 2026-10-03. The tense is the whole
+difference, and this file is the one entitled to say so: a name is present
+tense only while the file answering to it is on disk, and a paragraph that keeps
+its present after its subject has left sends the next reader looking for a file
+that has been gone for a session.
 
 # What is covered, and what is not
 
@@ -429,9 +439,12 @@ FIXTURE_BUILDER_NAME = "damaged_encoding_fixture.py"
 #:
 #: The measured costs were: `dist` 59 hits over 137 text files (every one of
 #: them `pred_bom`, i.e. build artefacts carrying the BOM PowerShell writes,
-#: which is the skip working), `opendocking-gui` 2 hits over 148 text files
-#: (the two hand-written sources `SKIP_REASONS` already names), and zero for
-#: every other directory that exists on this tree. `target` measured 86.8 MB
+#: which is the skip working), `opendocking-gui` 0 hits over 176 text files
+#: (nothing outside its own `.git/` trips a predicate any more; the two
+#: hand-written sources this figure used to name are the escaped `cli_check.py`
+#: and the removed `check_doc_encoding.py`, both accounted for in `skip_cost`),
+#: and zero for every other directory that exists on this tree. `target`
+#: measured 86.8 MB
 #: inside the first 197 files and was still climbing when the read budget for
 #: costing a skip stopped it, so it is `None` and says so.
 #:
@@ -457,13 +470,18 @@ SKIP_BUDGETS: dict[str, int | None] = {
 SKIP_REASONS: dict[str, tuple[str, str | None]] = {
     "opendocking-gui": (
         "a nested project with its own scope decision and its own gate set, "
-        "and it is NOT build output as the old scope heading claimed. Its "
-        "`check_doc_encoding.py` hunts 2 of the 9 signatures here -- "
-        "replacement and lost-byte -- and the other 7 are covered nowhere "
-        "inside it, so this skip is a *gap in that project's scope* and not a "
-        "licence. `skip_cost` prints what is actually in there on every run so "
-        "the gap is a number rather than a shrug",
-        "scripts/check_doc_encoding.py"),
+        "and it is NOT build output as the old scope heading claimed. It "
+        "carries this same gate under this same name, and that gate judges the "
+        "same 9 signatures over the mirror's own tree -- so all 9 of the 9 "
+        "signatures hunted here are hunted there too. The reason this entry "
+        "used to give, that its `check_doc_encoding.py` hunted 2 of them and "
+        "left 7 covered nowhere, described a gap in a file a sync has since "
+        "removed, and the gap is closed: that file became this one. What the "
+        "skip still costs is duplication, because the mirror holds copies of "
+        "these bytes and judging them twice finds the same damage twice. "
+        "`skip_cost` prints what is actually in there on every run, so that is "
+        "a number rather than a shrug",
+        "scripts/check_text_encoding.py"),
     "_wheelout": (
         "wheel build output. It is a zip archive, so every text predicate is "
         "meaningless on it, and `wheel_payload_check.py` and "
@@ -1979,23 +1997,37 @@ def skip_cost(where: Path) -> str:
     **Why a skip has to be measured instead of justified.** The skip list used
     to be printed as ten bare names under the heading "build or dependency
     output", and one of the ten -- `opendocking-gui` -- is neither. It is a
-    nested *project*: 149 files, 5.1 MB, with its own full `scripts/` tree.
-    Measured on 2026-10-02, that directory was hiding three predicate hits, and
-    all three are worth a reader's attention even though only two are in
-    hand-written source:
+    nested *project*: its own full `scripts/` tree, holding copies of these
+    bytes. The count is left to the line this function prints rather than
+    typed here, because a number transcribed into a docstring is the second
+    thing to forget and this paragraph is one of the things that forgot one.
+
+    **The list of hits below is empty, it used to hold three entries, and each
+    one is accounted for rather than quietly dropped.** Measured on 2026-10-02
+    that directory was hiding three predicate hits. Re-measured on 2026-10-03
+    it hides none outside its own `.git/`, whose objects are zlib-framed and
+    pruned by the walk before any predicate sees them:
 
     * `scripts/cli_check.py` -- a `pred_lossless_gbk` hit on a *deliberate
       oracle*, a line asserting a decode did **not** produce its cp936 image.
-      This is the quotation shape `_not_damage` is about, in a second copy of a
-      file whose root-level twin had already been escaped by the same author.
+      This was the quotation shape `_not_damage` is about, in a second copy of
+      a file whose root-level twin had already been escaped by the same author.
+      The two copies are now byte-identical and neither trips a predicate, so
+      there is no second copy left to diverge.
     * `scripts/check_doc_encoding.py` -- a `pred_replacement` hit, and the
       signature is `REPLACEMENT = "\\ufffd"`: an encoding gate holding the very
-      character it hunts, as a literal. The self-reference trap this file's own
-      module docstring records, sitting in the one file in the tree whose job is
-      the same as this one's.
+      character it hunts, as a literal. A sync removed that file as "not a
+      source in the development tree" and there is nothing left to hit. The
+      literal did not disappear with it -- it is in
+      `opendocking-gui/scripts/check_text_encoding.py`, this gate's own copy in
+      the mirror -- and it does not fire there, because the signature is
+      written as an escape and not as the character. That is the rule the rest
+      of this file follows, so the self-reference is now an example of the
+      escape rather than the last surviving instance of the trap.
     * `dock-py/python/opendocking/_dockpy.pyd` -- a compiled extension, which
-      `EXCLUDED_TYPES` already excludes by name and which is the only one of the
-      three that is *not* in scope for any reason other than the directory skip.
+      `EXCLUDED_TYPES` already excludes by name and which this measurement
+      never counted as a text file in the first place: its first 8,192 B carry
+      a NUL, and that test is what "text file" means to `measure_skip`.
 
     A heading that mislabels a skip is worse than no heading: it tells a reader
     the skip is free of consequence before anyone goes and measures whether it
@@ -2260,10 +2292,15 @@ def check_exemptions_are_real(root: Path) -> None:
     asked about it -- its comment asserted that every entry is named in
     `.gitignore`, and on 2026-10-02 seven of ten were and three were not, so the
     assertion had rotted silently. A reader trusting it would have believed
-    `opendocking-gui` was build output. It is a nested project, and it is hiding
-    two hand-written sources that trip a predicate, which is what
-    `print_scope`'s `skip_cost` now prints on every run so the gap is a number
-    rather than a comment.
+    `opendocking-gui` was build output. It is a nested project, and it used to
+    be hiding two hand-written sources that trip a predicate, which is what
+    `print_scope`'s `skip_cost` prints on every run so the gap is a number
+    rather than a comment. It hides none now, and this check is still worth
+    having: **the way it earned that is the argument for it.** The number
+    reached zero, the `check_doc_encoding.py` the justification rested on did
+    not, and a skip that had been allowed to lapse into a licence would have
+    gone on covering a nested project in silence -- which is the one outcome
+    `0 damaged` must never mean.
 
     So a skipped directory is justified by exactly one of two things: a name
     `.gitignore` still carries, or a reason here whose **witness file is

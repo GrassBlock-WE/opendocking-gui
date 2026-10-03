@@ -695,8 +695,8 @@ DISPOSITIONS: dict[str, tuple[str, str]] = {
             "constructor the product does use. The representation gates still "
             "call this one.",
     ),
-    # -- reached only inside its own module: 253 rows ----------
-    # The reason is one sentence and one constant, not 253
+    # -- reached only inside its own module: 256 rows ----------
+    # The reason is one sentence and one constant, not 256
     # sentences: the fact is identical across the tier, and
     # inventing a different one per row would manufacture a
     # specificity that is not there. What makes each row
@@ -784,6 +784,7 @@ DISPOSITIONS: dict[str, tuple[str, str]] = {
     "workbench.app:SPHERE_VERTEX_SHADER": ("OWN-MODULE-ONLY", OWN_MODULE_REASON),
     "workbench.app:SphereMesh": ("OWN-MODULE-ONLY", OWN_MODULE_REASON),
     "workbench.app:TermsWorker": ("OWN-MODULE-ONLY", OWN_MODULE_REASON),
+    "workbench.app:VIEW_MIN_FRAMED_WIDTH_PCT": ("OWN-MODULE-ONLY", OWN_MODULE_REASON),
     "workbench.app:VIEWPORT_MIN_H": ("OWN-CTOR-READ", CTOR_READ_REASON),
     "workbench.app:VIEWPORT_MIN_W": ("OWN-CTOR-READ", CTOR_READ_REASON),
     "workbench.app:Viewport": ("OWN-MODULE-ONLY", OWN_MODULE_REASON),
@@ -793,6 +794,8 @@ DISPOSITIONS: dict[str, tuple[str, str]] = {
     "workbench.app:Viewport.focus_selection": ("OWN-MODULE-ONLY", OWN_MODULE_REASON),
     "workbench.app:Viewport.frame_all": ("OWN-MODULE-ONLY", OWN_MODULE_REASON),
     "workbench.app:Viewport.framebuffer_size": ("OWN-MODULE-ONLY", OWN_MODULE_REASON),
+    "workbench.app:Viewport.framed_width_half_fill": ("OWN-MODULE-ONLY", OWN_MODULE_REASON),
+    "workbench.app:Viewport.framed_width_percent": ("OWN-MODULE-ONLY", OWN_MODULE_REASON),
     "workbench.app:Viewport.pair_screen_segment": ("OWN-MODULE-ONLY", OWN_MODULE_REASON),
     "workbench.app:Viewport.plan_selection": ("OWN-MODULE-ONLY", OWN_MODULE_REASON),
     "workbench.app:Viewport.rotate": ("OWN-MODULE-ONLY", OWN_MODULE_REASON),
@@ -874,7 +877,6 @@ DISPOSITIONS: dict[str, tuple[str, str]] = {
     "workbench.framing_selection:fit_drawn": ("OWN-MODULE-ONLY", OWN_MODULE_REASON),
     "workbench.framing_selection:fit_view": ("OWN-MODULE-ONLY", OWN_MODULE_REASON),
     "workbench.framing_selection:projected_fill": ("OWN-MODULE-ONLY", OWN_MODULE_REASON),
-    "workbench.framing_selection:selection_points": ("OWN-MODULE-ONLY", OWN_MODULE_REASON),
     "workbench.geometry:unit_cylinder": ("OWN-MODULE-ONLY", OWN_MODULE_REASON),
     "workbench.keys:CAMERA_NOTE": ("OWN-MODULE-ONLY", OWN_MODULE_REASON),
     "workbench.keys:CONTEXT_EXCEPTION_NOTE": ("OWN-MODULE-ONLY", OWN_MODULE_REASON),
