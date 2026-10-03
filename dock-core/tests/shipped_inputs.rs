@@ -136,15 +136,23 @@ struct Verdict {
 /// `paths.len()`, and a classified file never enters `paths` — so the table
 /// cannot be widened to make a number pass. Delete the leftover copy and this
 /// table goes with it.
-const GENERATED_UNDER_EXAMPLES: &[(&str, &str)] = &[
-    (
-        "_shifted_receptor.pdbqt",
-        "scripts/workbench_interaction_check.py section 9, derived from rec_prep.pdbqt",
-    ),
-];
+const GENERATED_UNDER_EXAMPLES: &[(&str, &str)] = &[(
+    "_shifted_receptor.pdbqt",
+    "scripts/workbench_interaction_check.py section 9, derived from rec_prep.pdbqt",
+)];
+
+/// What `sweep` reports, named because a four-element tuple of which three are
+/// vector types is not a thing a reader can hold in their head, and the
+/// elements are the four things the caller actually wants back.
+type SweepReport = (
+    PathBuf,
+    Vec<Verdict>,
+    Vec<(String, String)>,
+    Vec<(String, String)>,
+);
 
 /// Read every shipped structure file and record what the engine did with it.
-fn sweep() -> (PathBuf, Vec<Verdict>, Vec<(String, String)>, Vec<(String, String)>) {
+fn sweep() -> SweepReport {
     let root = examples_dir();
     let mut files = Vec::new();
     all_files(&root, &mut files);

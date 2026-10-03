@@ -157,12 +157,16 @@ jobs:
       # an AMD Ryzen 7 7735H whose load at the start of each measurement is
       # recorded with the number, so they are an upper bound and not a CI
       # expectation:
-      #   convergence_budget    27.3 s test / 28.9 s warm wall
-      #   budget_monotonicity  22.3 s test / 23.0 s warm wall
-      # An earlier revision of this comment quoted 35.0 s for the first and it
-      # did not reproduce across four runs; the test time moved and the wall
-      # time did not, so only the wall figure is quoted here now. Debug-profile
-      # cost is still not measured, so no debug figure is claimed.
+      #   convergence_budget    28.9 s warm wall
+      #   budget_monotonicity  23.0 s warm wall
+      # An earlier revision of this comment quoted a test-time figure alongside each of
+      # these (35.0 s, then 27.3 s, then 22.3 s) and it did not reproduce across four
+      # runs: the test time moved with the machine's load and the wall time did not, so
+      # only the wall figure is quoted here now. A later reading of the same tests under
+      # a concurrent build put the test times at 42.9 s and 38.7 s -- higher again, and
+      # that is a load artefact rather than a contradiction, which is exactly why no
+      # test-time figure is published. Debug-profile cost is still not measured, so no
+      # debug figure is claimed.
       - name: What a larger search budget buys (named feature, release profile)
         run: >-
           cargo test --locked --release

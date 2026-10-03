@@ -9864,6 +9864,17 @@ def main() -> int:
     #: shrink its own evidence without saying so.
     _mkr_probes = [0]
     _mkr_unstable = [0]
+    #: How many fresh reads the *reported* first-lit camera has to survive, and
+    #: how many cameras failed to. This is the only number in the section that
+    #: is a choice rather than a measurement, so it is worth saying what it
+    #: buys and what it costs. It buys the section its claim: a reported edge
+    #: that three reads taken after the search all agree is lit is a measured
+    #: crossing, and one that a single read reported is not. It costs three
+    #: probes per width (~2 s of a 230 s run) and, more honestly, it does not
+    #: explain the thing it survives: see `_mkr_edge`, which is where the
+    #: measurement of that is written down.
+    _mkr_confirm_reps = 3
+    _mkr_unconfirmed = [0]
 
     @contextlib.contextmanager
     def _mkr_lift():
@@ -9917,14 +9928,18 @@ def main() -> int:
         breaks that, and it breaks it silently: the read comes back, the count
         comes back, and the count is fiction.
 
-        This is not hypothetical. `_mkr_edge` below takes the first camera whose
-        lit count is above zero and walks the bisection onto it, and at
-        25.17 A the edge search reproduced six times on an idle machine gave
-        0.237 px of length four times and **0.008 px twice** -- the two bad
-        passes locking onto a camera where a *single* pixel crossed the 8/255
-        threshold, against seven pixels at the real edge. The check's band is
-        [0.15, 0.35] px, so one compositing artefact is a red out of a blue sky
-        and a coin flip decides it.
+        This is not hypothetical, but it is not what it was taken to be.
+        `_mkr_edge` below takes the first camera whose lit count is above zero
+        and walks the bisection onto it, and at 25.17 A the edge search
+        reproduced six times on an idle machine gave 0.237 px of length four
+        times and **0.008 px twice**. The guard was added on the reading that
+        the bad passes were a compositing artefact. Measured properly that
+        reading does not hold: this guard refuses 1 to 5 probes in 463 and the
+        bad reading arrived anyway. The pixels it accepted were the marker's
+        own, at full strength, dead centre, and they re-read dark. The guard is
+        kept because a grab pair taken of a moving surface is not evidence
+        about the marker either, but the fault was in the estimator and
+        `_mkr_edge` is where that is now written down.
 
         So the `off` read is taken **twice**, with a repaint between, and the
         two must be identical. If they are not, the surface is still moving and
@@ -9966,6 +9981,27 @@ def main() -> int:
         row = {"area": float(_mkr_mod._projected_area_px2(seg)),
                "len": float(seg["length"]), "width": float(seg["width"]),
                "n8": int(m8.sum())}
+        # **"Lit" means the marker, and the pixels are attributed to say so.**
+        # `n8` is every pixel in a 1126x989 frame that moved by 8/255 between
+        # the two grabs; the search below asks whether the *marker* has put a
+        # pixel down. Those are different questions, and the answer to the
+        # second is the pixels inside the rectangle the projection draws,
+        # padded by `_pair_marker`'s own pad -- half the declared width with a
+        # 1.0 px floor under it, the floor this file measured as the most an
+        # antialiased edge spills into on one side over widths from 0.162 to
+        # 1.353 px, at which `stray_px == 0` holds on a correct draw. The same
+        # attribution at the same pad is what section 14 uses to decide whether
+        # a draw belongs to the pair at all.
+        #
+        # **And this is recorded as a measurement, not as the fix.** On this
+        # machine it changes no verdict: every reading taken has been either
+        # entirely the marker's or entirely elsewhere. It is here because it is
+        # what identified the bad reading below as the marker's own pixel
+        # rather than something else on screen, and because a lit test with no
+        # spatial attribution cannot tell those two apart in the first place.
+        _mk = _pair_marker(seg, on, off)
+        row["own"] = int(_mk.get("on_axis_px", 0)) if _mk else 0
+        row["stray"] = int(_mk.get("stray_px", 0)) if _mk else 0
         if m8.any():
             ys, xs = np.nonzero(m8)
             ax, ay = seg["axis"]
@@ -9984,29 +10020,103 @@ def main() -> int:
             r["deg"] = deg
         return r
 
+    def _mkr_lit_again(vp_, g, deg, dist):
+        """Does this camera still light, on reads taken after the search left it?
+
+        Every one of `_mkr_confirm_reps` reads has to agree. A refused read
+        counts as "does not light", because a sample the instrument could not
+        take is not a sample that says the marker is there.
+        """
+        for _ in range(_mkr_confirm_reps):
+            r = _mkr_shoot(vp_, g, deg, dist)
+            if r is None or r["own"] <= 0:
+                return False
+        return True
+
     def _mkr_edge(vp_, g, dist):
-        """The first-lit camera at one distance, bisected from a log ladder."""
+        """The first-lit camera at one distance, bisected from a log ladder.
+
+        **And then the answer is re-read, because a minimum over single samples
+        is not a threshold.** The search reports the *smallest* lit camera it
+        sampled, and a minimum has no floor: one camera reporting "lit" when it
+        should not moves the reported edge by a factor of 36, and the bisection
+        then spends all nine of its steps walking onto it. Measured at 25.17 A
+        on this machine, that is not hypothetical. Twelve searches returned
+        0.23718 px eleven times, identical to six decimal places, and
+        0.00665 px once. The bad reading is *not* noise in the frame and
+        *not* a stray pixel: the difference held exactly one pixel, at
+        (563, 494), which is the framebuffer's own centre, at a difference of
+        **217** levels against the 22-43 the real edge's seven pixels carry --
+        a full-strength marker's colour, not a faint one -- and the
+        attribution put it on the marker's own axis (`on_axis_px` 1,
+        `stray_px` 0), dead centre, `along` 0.004 and `perp` 0.5. Away from
+        that camera nothing moves at all: `n8` read 13 fifteen times out of
+        fifteen at the camera above it and 0 fifteen times out of fifteen at
+        the one below, and the whole ladder is a step with no one-pixel value
+        anywhere on it.
+
+        So the fault is in the *question at that one camera*, not in the
+        rasteriser's answer everywhere else, and what that camera is is worth
+        naming rather than hiding: at 0.008 px of length the mark's two
+        projected ends are a thousandth of a pixel apart, the two triangles of
+        `_pair_quad` are degenerate, and they pinch at the framebuffer centre,
+        which is exactly where the fragment appears. **Why a degenerate quad
+        emits that fragment on some passes and not others is not established
+        here, and this file does not claim to know.** Re-reading the same
+        camera immediately after the search returned dark twice. That is the
+        measurement, and the honest instrument does not report a number it
+        cannot reproduce: `_mkr_lit_again` re-reads the winner afterwards, and
+        if the winner does not survive, the reported edge falls back to the
+        coarsest ladder camera that does, which is the upper end of the same
+        measured bracket. The failure is counted and printed.
+
+        Both ends of that bracket are measured lengths rather than angles, and
+        both are carried out, so the resolution of the reported number is
+        visible rather than implied.
+        """
         rows = [r for r in (_mkr_shoot(vp_, g, dd, dist) for dd in _mkr_ladder)
                 if r]
         if not rows:
             return None
         rows.sort(key=lambda r: r["area"])
-        lit = [r for r in rows if r["n8"] > 0]
+        lit = [r for r in rows if r["own"] > 0]
         if not lit:
             return None
         first = lit[0]
-        dark = [r for r in rows if r["n8"] == 0 and r["area"] < first["area"]]
+        dark = [r for r in rows if r["own"] == 0 and r["area"] < first["area"]]
         if not dark:
             return None
         lo, hi = dark[-1]["deg"], first["deg"]
+        _bracket = (float(dark[-1]["len"]), float(first["len"]))
         for _ in range(9):
             mid = 0.5 * (lo + hi)
             r = _mkr_shoot(vp_, g, mid, dist)
-            if r is None or r["n8"] > 0:
+            if r is None or r["own"] > 0:
                 hi, first = mid, (r or first)
             else:
                 lo = mid
-        return first
+        _edge = first if _mkr_lit_again(vp_, g, first["deg"], dist) else None
+        if _edge is None:
+            _mkr_unconfirmed[0] += 1
+            for _cand in lit:
+                if _mkr_lit_again(vp_, g, _cand["deg"], dist):
+                    _edge = _cand
+                    # **The bracket has to belong to the camera that is
+                    # actually reported.** When the fallback fires, the
+                    # bracket measured before the bisection is the rejected
+                    # camera's, and printing that beside a different length is
+                    # a sentence contradicting itself -- measured, in fact: the
+                    # run that fell back carried the bracket (0.005, 0.009)
+                    # while reporting 0.270 px. The dark ladder row below the
+                    # camera being reported is the other end of *its* bracket.
+                    _below = [r for r in dark if r["area"] < _cand["area"]]
+                    _bracket = (float(_below[-1]["len"]) if _below else 0.0,
+                                float(_cand["len"]))
+                    break
+        if _edge is None:
+            return None
+        _edge["bracket"] = _bracket
+        return _edge
 
     def _mkr_at(vp_, g, dist, want, iters=6, tol=0.02):
         """Aim at a wanted screen length: bracket, then a secant on the angle.
@@ -10146,6 +10256,10 @@ def main() -> int:
         _areas = [e["area"] for _d, e in _edges]
         _lens_ok = bool(_lens) and all(0.15 <= v <= 0.35 for v in _lens)
         _spread = (max(_areas) / min(_areas)) if len(_areas) > 1 else 1.0
+        _own = "; ".join(
+            f"{d} A: own {e['own']}, bracketed by "
+            f"{e['bracket'][0]:.3f} and {e['bracket'][1]:.3f} px"
+            for d, e in _edges if e.get("bracket"))
         pixel_check(
             "the rasteriser needs about a quarter of a pixel of screen length "
             "before it lights anything, and that is a property of the pixel "
@@ -10168,18 +10282,41 @@ def main() -> int:
               f"the surface was at rest while it was taken, so every probe "
               f"reads the un-highlighted frame twice and refuses the sample if "
               f"the two disagree: {_mkr_probes[0]} probes, "
-              f"{_mkr_unstable[0]} refused as not at rest. Before that guard "
-              f"this same search gave 0.237 px four times out of six and "
-              f"0.008 px twice, on one pixel above threshold against seven at "
-              f"the real edge, which is a red out of a blue sky decided by a "
-              f"coin flip"
+              f"{_mkr_unstable[0]} refused as not at rest. **The reported edge "
+              f"is re-read {_mkr_confirm_reps} times after the search leaves "
+              f"it, and a camera whose lighting does not survive that is not "
+              f"reported**: {_mkr_unconfirmed[0]} of 3 fell back to the "
+              f"coarsest end of their own bracket. That is the whole repair, "
+              f"and it is aimed at the estimator rather than the framebuffer, "
+              f"because the frame was never the problem: the bad reading was "
+              f"one pixel of the marker's own full-strength colour at the "
+              f"framebuffer's centre, where a 0.008 px mark's two triangles "
+              f"are degenerate, and whether it appears is not something this "
+              f"file can explain -- only that re-reading that camera returned "
+              f"dark twice. The pixels are attributed to the marker by "
+              f"`_pair_marker`'s own padded rectangle, so 'lit' cannot be "
+              f"satisfied by something else on screen, and both ends of the "
+              f"bracket are measured lengths: {_own}"
         )
 
+        # **The 1.00 px arm is the shipped constant, read rather than written.**
+        # It measured 1.0 here and the literal read the same, so this changes no
+        # number today. What it changes is what happens if somebody moves the
+        # constant: with the literal, a floor raised to 2.0 px left every check
+        # in this section reading 1.00 px and saying nothing about the constant
+        # whose own comment derives itself from these measurements, and the
+        # section would have gone on passing a floor it no longer described.
+        # Read from the module, the same edit puts this check's own subject
+        # under it and check three below goes red, because no declared width
+        # drops below two columns at 2.0 px of length. The 1.25 px arm stays a
+        # literal: it is the 1.23 px `PAIR_MARKER_MIN_LENGTH_PX` reports as the
+        # two-column requirement, rounded up so the assertion is not sitting on
+        # the number it quotes.
         with _mkr_lift():
             _b125 = {}
             _b100 = {}
             for _dist in (140.0, 25.17, 11.0):
-                for _want, _sink in ((1.25, _b125), (1.00, _b100)):
+                for _want, _sink in ((1.25, _b125), (_mkr_len0, _b100)):
                     _rows = _mkr_band(_mvp, _g, _dist, _want)
                     if _rows:
                         _sink[round(_rows[0]["width"], 2)] = [
@@ -10203,7 +10340,7 @@ def main() -> int:
             "widths -- so the constant is a geometric floor and not the "
             "two-column one its comment used to claim",
             bool(_thin),
-            "minimum column count over eight phases at 1.00 px of length, by "
+            f"minimum column count over eight phases at {_mkr_len0:.2f} px of length, by "
             "declared width: "
             + ", ".join(f"{w} px -> {v}" for w, v in sorted(_at100.items()))
             + f". Widths below two columns at some phase: {_thin or 'none'}. "

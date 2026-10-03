@@ -1582,11 +1582,7 @@ mod tests {
     /// `the_out_of_box_magnitude_is_the_hosts_and_putting_it_back_breaks_the_band`
     /// is the other half of this claim: it puts the old magnitude back and
     /// requires the band here to go red.
-    fn band_for(
-        maps: &crate::grid::GridMaps,
-        ligand: &crate::ligand::Ligand,
-        p: [f64; 3],
-    ) -> f64 {
+    fn band_for(maps: &crate::grid::GridMaps, ligand: &crate::ligand::Ligand, p: [f64; 3]) -> f64 {
         let mut band = read_band(maps, ligand, p);
         if maps.fractional(p).is_none() {
             let b = maps.grid_box();
@@ -1717,7 +1713,11 @@ mod tests {
         let mut worst = 0.0f64;
         let mut worst_at = 0usize;
         let mut worst_band = 0.0f64;
-        for (i, (&p, (&g, &w))) in placements.iter().zip(got.iter().zip(want.iter())).enumerate() {
+        for (i, (&p, (&g, &w))) in placements
+            .iter()
+            .zip(got.iter().zip(want.iter()))
+            .enumerate()
+        {
             let diff = (g - w).abs();
             let band = band_for(&maps, &ligand, [p, 0.0, 0.0]);
             assert!(
@@ -1803,7 +1803,9 @@ mod tests {
             .enumerate()
         {
             let w = maps.fractional([p, 0.0, 0.0]).is_some();
-            let w_mut = maps.fractional([honest.coords[i * 3] as f64, 0.0, 0.0]).is_some();
+            let w_mut = maps
+                .fractional([honest.coords[i * 3] as f64, 0.0, 0.0])
+                .is_some();
             if w != w_mut {
                 outsides += 1;
             }
@@ -2102,7 +2104,8 @@ mod tests {
         let r_f = outside[wi_f];
 
         assert_eq!(
-            over_new_band, 0,
+            over_new_band,
+            0,
             "{} of {} out-of-box rows are outside the band derived from the \
              penalty the two sides are summing. Worst {wd_h:e} at {:?} \
              (gpu {} vs cpu {}) against {}. The violation is the host's own \
@@ -2321,11 +2324,11 @@ mod tests {
                 }
                 compared += 1;
                 tightest_separated = tightest_separated.min(gap);
-                if (a.cpu - b.cpu).is_sign_positive() != (a.honest - b.honest).is_sign_positive()
-                {
+                if (a.cpu - b.cpu).is_sign_positive() != (a.honest - b.honest).is_sign_positive() {
                     inversions_honest.push((i, j));
                 }
-                if (a.cpu - b.cpu).is_sign_positive() != (a.from_f32 - b.from_f32).is_sign_positive()
+                if (a.cpu - b.cpu).is_sign_positive()
+                    != (a.from_f32 - b.from_f32).is_sign_positive()
                 {
                     inversions_f32.push((i, j));
                 }
@@ -2366,631 +2369,662 @@ mod tests {
         );
     }
 
-
-/// The host half of the GPU path, asserted on a machine with no adapter.
-///
-/// A nested module rather than more functions in `mod tests` so that the
-/// device-gated tests above and these read as two groups: one that needs a
-/// device and one that does not. `use super::*` is the only concession, and
-/// it changes nothing about what the fixtures above are visible to.
-mod host_side {
-    use super::*;
-
-    //
-    // Everything below runs and asserts on a machine with **no adapter**, because
-    // it calls `pack_upload` -- the production upload construction, lifted out of
-    // `GpuContext::score_with_violations` -- rather than a device.
-    //
-    // # Read this before counting these as GPU coverage
-    //
-    // These tests are not the GPU path. They are the CPU's half of it: the numbers
-    // the host decides and hands across. A green here says the *inputs* to the
-    // shader are right. It says nothing about what the shader does with them --
-    // not the trilinear weights, not the workgroup reduction, not the `u32` index
-    // arithmetic, not the driver's rounding. Every one of those is device-side,
-    // and on a runner without a GPU none of it is executed by anything.
-    //
-    // So: these tests make an end-to-end claim *possible to check later* on a
-    // machine that has an adapter. They do not discharge it. The claim "the GPU
-    // path is verified" is still only supported by the seven tests above, and only
-    // when `is_available()` is true. The counting this module's house rule demands
-    // -- a skip is a result -- is exactly why that distinction has to be written
-    // down here rather than left to the reader: the number of green tests went up
-    // and the amount of *device* verification did not change at all.
-    // ===========================================================================
-
-    /// The `f32` above and below `v`, by bit pattern, so a neighbour is exact.
-    fn f32_neighbours(v: f32) -> (f32, f32) {
-        let b = v.to_bits();
-        (
-            f32::from_bits(b.wrapping_sub(1)),
-            f32::from_bits(b.wrapping_add(1)),
-        )
-    }
-
-    /// A one-conformation batch from `xs` along `+x`, for a one-carbon probe.
-    fn x_axis_batch(xs: &[f64]) -> Batch {
-        let coords: Vec<f64> = xs.iter().flat_map(|&x| [x, 0.0, 0.0]).collect();
-        Batch::from_coords(coords, xs.len(), &one_carbon()).expect("a one-carbon batch")
-    }
-
-    /// The uploaded flag, as the shader would read it: `> 0.5`.
-    fn uploaded_flag(coords: &[f32], i: usize) -> bool {
-        coords[i * COORD_FLOATS + 3] > 0.5
-    }
-
-    /// The uploaded position of point `i`.
-    fn uploaded_xyz(coords: &[f32], i: usize) -> [f32; 3] {
-        [
-            coords[i * COORD_FLOATS],
-            coords[i * COORD_FLOATS + 1],
-            coords[i * COORD_FLOATS + 2],
-        ]
-    }
-
-    /// The uploaded out-of-box magnitude of point `i`.
-    fn uploaded_violation(coords: &[f32], i: usize) -> f32 {
-        coords[i * COORD_FLOATS + 4]
-    }
-
-    /// The flag is the CPU's own `fractional` answer, on the un-narrowed `f64`.
+    /// The host half of the GPU path, asserted on a machine with no adapter.
     ///
-    /// This is the assertion that is *only* about the host, and it is the one the
-    /// seven device-gated tests above could not make on a machine with no adapter.
-    /// For every point: the uploaded flag is exactly `0.0` or `1.0`, and it is
-    /// `1.0` exactly when [`crate::grid::GridMaps::fractional`] -- the same call
-    /// the CPU's own interpolation makes, on the same `f64` -- says the point is
-    /// in the box.
-    ///
-    /// Exactly `0.0`/`1.0` and not merely "positive" is deliberate: the shader
-    /// tests `> 0.5`, and a flag of, say, `1e-7` would pass a truthiness check
-    /// here and be read as out-of-box there.
-    #[test]
-    fn the_uploaded_flag_is_the_fractional_answer_on_the_un_narrowed_coordinate() {
-        let maps = face_fixture();
-        let box_ = maps.grid_box();
-        // Straddle the face, and include well inside and well outside, so both
-        // branches are exercised rather than just the interesting one.
-        let mut xs = face_placements(&maps, 4);
-        xs.push(box_.min[0] - 5.0);
-        xs.push(0.0);
-        xs.push(box_.max[0] + 5.0);
+    /// A nested module rather than more functions in `mod tests` so that the
+    /// device-gated tests above and these read as two groups: one that needs a
+    /// device and one that does not. `use super::*` is the only concession, and
+    /// it changes nothing about what the fixtures above are visible to.
+    mod host_side {
+        use super::*;
 
-        let batch = x_axis_batch(&xs);
-        let (coords, _) = pack_upload(&batch, &maps, None).expect("pack");
-        assert_eq!(coords.len(), xs.len() * COORD_FLOATS);
+        //
+        // Everything below runs and asserts on a machine with **no adapter**, because
+        // it calls `pack_upload` -- the production upload construction, lifted out of
+        // `GpuContext::score_with_violations` -- rather than a device.
+        //
+        // # Read this before counting these as GPU coverage
+        //
+        // These tests are not the GPU path. They are the CPU's half of it: the numbers
+        // the host decides and hands across. A green here says the *inputs* to the
+        // shader are right. It says nothing about what the shader does with them --
+        // not the trilinear weights, not the workgroup reduction, not the `u32` index
+        // arithmetic, not the driver's rounding. Every one of those is device-side,
+        // and on a runner without a GPU none of it is executed by anything.
+        //
+        // So: these tests make an end-to-end claim *possible to check later* on a
+        // machine that has an adapter. They do not discharge it. The claim "the GPU
+        // path is verified" is still only supported by the seven tests above, and only
+        // when `is_available()` is true. The counting this module's house rule demands
+        // -- a skip is a result -- is exactly why that distinction has to be written
+        // down here rather than left to the reader: the number of green tests went up
+        // and the amount of *device* verification did not change at all.
+        // ===========================================================================
 
-        let mut saw_in = 0usize;
-        let mut saw_out = 0usize;
-        for (i, &x) in xs.iter().enumerate() {
-            let p = [x, 0.0, 0.0];
-            let expect_in = maps.fractional(p).is_some();
-            let flag = coords[i * COORD_FLOATS + 3];
-            assert!(
-                flag == 0.0 || flag == 1.0,
-                "point {i} at x={x:.12}: the uploaded flag is {flag:?}, which is neither \
+        /// The `f32` above and below `v`, by bit pattern, so a neighbour is exact.
+        fn f32_neighbours(v: f32) -> (f32, f32) {
+            let b = v.to_bits();
+            (
+                f32::from_bits(b.wrapping_sub(1)),
+                f32::from_bits(b.wrapping_add(1)),
+            )
+        }
+
+        /// A one-conformation batch from `xs` along `+x`, for a one-carbon probe.
+        fn x_axis_batch(xs: &[f64]) -> Batch {
+            let coords: Vec<f64> = xs.iter().flat_map(|&x| [x, 0.0, 0.0]).collect();
+            Batch::from_coords(coords, xs.len(), &one_carbon()).expect("a one-carbon batch")
+        }
+
+        /// The uploaded flag, as the shader would read it: `> 0.5`.
+        fn uploaded_flag(coords: &[f32], i: usize) -> bool {
+            coords[i * COORD_FLOATS + 3] > 0.5
+        }
+
+        /// The uploaded position of point `i`.
+        fn uploaded_xyz(coords: &[f32], i: usize) -> [f32; 3] {
+            [
+                coords[i * COORD_FLOATS],
+                coords[i * COORD_FLOATS + 1],
+                coords[i * COORD_FLOATS + 2],
+            ]
+        }
+
+        /// The uploaded out-of-box magnitude of point `i`.
+        fn uploaded_violation(coords: &[f32], i: usize) -> f32 {
+            coords[i * COORD_FLOATS + 4]
+        }
+
+        /// The flag is the CPU's own `fractional` answer, on the un-narrowed `f64`.
+        ///
+        /// This is the assertion that is *only* about the host, and it is the one the
+        /// seven device-gated tests above could not make on a machine with no adapter.
+        /// For every point: the uploaded flag is exactly `0.0` or `1.0`, and it is
+        /// `1.0` exactly when [`crate::grid::GridMaps::fractional`] -- the same call
+        /// the CPU's own interpolation makes, on the same `f64` -- says the point is
+        /// in the box.
+        ///
+        /// Exactly `0.0`/`1.0` and not merely "positive" is deliberate: the shader
+        /// tests `> 0.5`, and a flag of, say, `1e-7` would pass a truthiness check
+        /// here and be read as out-of-box there.
+        #[test]
+        fn the_uploaded_flag_is_the_fractional_answer_on_the_un_narrowed_coordinate() {
+            let maps = face_fixture();
+            let box_ = maps.grid_box();
+            // Straddle the face, and include well inside and well outside, so both
+            // branches are exercised rather than just the interesting one.
+            let mut xs = face_placements(&maps, 4);
+            xs.push(box_.min[0] - 5.0);
+            xs.push(0.0);
+            xs.push(box_.max[0] + 5.0);
+
+            let batch = x_axis_batch(&xs);
+            let (coords, _) = pack_upload(&batch, &maps, None).expect("pack");
+            assert_eq!(coords.len(), xs.len() * COORD_FLOATS);
+
+            let mut saw_in = 0usize;
+            let mut saw_out = 0usize;
+            for (i, &x) in xs.iter().enumerate() {
+                let p = [x, 0.0, 0.0];
+                let expect_in = maps.fractional(p).is_some();
+                let flag = coords[i * COORD_FLOATS + 3];
+                assert!(
+                    flag == 0.0 || flag == 1.0,
+                    "point {i} at x={x:.12}: the uploaded flag is {flag:?}, which is neither \
                  0.0 nor 1.0. energy.wgsl tests `> 0.5`, so a flag outside {{0.0, 1.0}} \
                  could be read as the opposite of what the host meant."
-            );
-            assert_eq!(
-                uploaded_flag(&coords, i),
-                expect_in,
-                "point {i} at x={x:.12} (face at {}): the host uploaded a flag saying \
+                );
+                assert_eq!(
+                    uploaded_flag(&coords, i),
+                    expect_in,
+                    "point {i} at x={x:.12} (face at {}): the host uploaded a flag saying \
                  {} but `fractional` on the un-narrowed f64 says {}. The flag is the \
                  CPU's own decision and it must be the CPU's own answer.",
-                maps.min[0] + (maps.dims()[0] - 1) as f64 * maps.spacing[0],
-                if uploaded_flag(&coords, i) { "in-box" } else { "out-of-box" },
-                if expect_in { "in-box" } else { "out-of-box" },
-            );
-            if expect_in {
-                saw_in += 1;
-            } else {
-                saw_out += 1;
+                    maps.min[0] + (maps.dims()[0] - 1) as f64 * maps.spacing[0],
+                    if uploaded_flag(&coords, i) {
+                        "in-box"
+                    } else {
+                        "out-of-box"
+                    },
+                    if expect_in { "in-box" } else { "out-of-box" },
+                );
+                if expect_in {
+                    saw_in += 1;
+                } else {
+                    saw_out += 1;
+                }
             }
-        }
-        // Both branches, or the loop above proved only half the predicate.
-        assert!(
-            saw_in > 0 && saw_out > 0,
-            "the fixture produced {saw_in} in-box and {saw_out} out-of-box points; \
+            // Both branches, or the loop above proved only half the predicate.
+            assert!(
+                saw_in > 0 && saw_out > 0,
+                "the fixture produced {saw_in} in-box and {saw_out} out-of-box points; \
              both have to be non-zero for this to be a test of the branch"
-        );
-        eprintln!(
-            "MEASURED (no device required): {} points packed, {} flagged in-box and {} \
+            );
+            eprintln!(
+                "MEASURED (no device required): {} points packed, {} flagged in-box and {} \
              out-of-box, every flag exactly 0.0 or 1.0 and every one equal to \
              `fractional` on the un-narrowed f64",
-            xs.len(),
-            saw_in,
-            saw_out
-        );
-    }
+                xs.len(),
+                saw_in,
+                saw_out
+            );
+        }
 
-    /// The strongest thing this file buys, and it needs no adapter at all.
-    ///
-    /// The older round's finding was that the `f32` narrowing fed a *discontinuous*
-    /// predicate: the kernel derived "am I in the box" from the narrowed `f32`
-    /// coordinate, and the CPU from the `f64`, so a point within one `f32` ULP of a
-    /// face could take **different branches** on the two sides -- and then charge
-    /// completely different penalties for it. The host-side flag is what removed
-    /// that.
-    ///
-    /// Whether the flag is narrowing-derived is a property of *which array the
-    /// function reads*, and that is checkable with no device: build two batches
-    /// whose uploaded positions are **bit-identical** and whose `f64` inputs are
-    /// not, and observe the flag.
-    ///
-    /// * If the flag were narrowing-derived, the two uploads would be identical,
-    ///   because `coords` -- the only thing the kernel can see -- is identical.
-    /// * It is not, so the flag moved, so the flag is a function of `coords64`.
-    ///
-    /// Concretely: take the face fixture and a placement one `f32` ULP inside the
-    /// `+x` face, which `f64` says is in the box. The `f32` that represents it also
-    /// lies inside. Now nudge the `f64` a hair so that *its nearest `f32`* is the
-    /// same value but the `f64` itself is on the other side of the face, and check
-    /// that the flag follows the `f64`. `old_f32_inside` is the removed derivation,
-    /// transcribed from the shader as it stood, kept here so the test can show the
-    /// two derivations genuinely disagree on this fixture rather than agreeing by
-    /// accident.
-    #[test]
-    fn the_flag_is_not_narrowing_derived_and_that_needs_no_adapter_to_show() {
-        let maps = face_fixture();
-        let ligand = one_carbon();
-        let face = maps.min[0] + (maps.dims()[0] - 1) as f64 * maps.spacing[0];
+        /// The strongest thing this file buys, and it needs no adapter at all.
+        ///
+        /// The older round's finding was that the `f32` narrowing fed a *discontinuous*
+        /// predicate: the kernel derived "am I in the box" from the narrowed `f32`
+        /// coordinate, and the CPU from the `f64`, so a point within one `f32` ULP of a
+        /// face could take **different branches** on the two sides -- and then charge
+        /// completely different penalties for it. The host-side flag is what removed
+        /// that.
+        ///
+        /// Whether the flag is narrowing-derived is a property of *which array the
+        /// function reads*, and that is checkable with no device: build two batches
+        /// whose uploaded positions are **bit-identical** and whose `f64` inputs are
+        /// not, and observe the flag.
+        ///
+        /// * If the flag were narrowing-derived, the two uploads would be identical,
+        ///   because `coords` -- the only thing the kernel can see -- is identical.
+        /// * It is not, so the flag moved, so the flag is a function of `coords64`.
+        ///
+        /// Concretely: take the face fixture and a placement one `f32` ULP inside the
+        /// `+x` face, which `f64` says is in the box. The `f32` that represents it also
+        /// lies inside. Now nudge the `f64` a hair so that *its nearest `f32`* is the
+        /// same value but the `f64` itself is on the other side of the face, and check
+        /// that the flag follows the `f64`. `old_f32_inside` is the removed derivation,
+        /// transcribed from the shader as it stood, kept here so the test can show the
+        /// two derivations genuinely disagree on this fixture rather than agreeing by
+        /// accident.
+        #[test]
+        fn the_flag_is_not_narrowing_derived_and_that_needs_no_adapter_to_show() {
+            let maps = face_fixture();
+            let ligand = one_carbon();
+            let face = maps.min[0] + (maps.dims()[0] - 1) as f64 * maps.spacing[0];
 
-        // The single `f32` bucket whose midpoint sits on the face. Anything inside
-        // this bucket narrows to the same `f32` regardless of which side of the
-        // face the `f64` is on -- which is the whole mechanism of the defect.
-        let bucket = face as f32;
-        let (below, above) = f32_neighbours(bucket);
-        let eps = (above as f64 - below as f64) / 2.0;
-        assert!(
-            eps > 0.0,
-            "the face must not be exactly an f32: got neighbours {below} and {above}"
-        );
+            // The single `f32` bucket whose midpoint sits on the face. Anything inside
+            // this bucket narrows to the same `f32` regardless of which side of the
+            // face the `f64` is on -- which is the whole mechanism of the defect.
+            let bucket = face as f32;
+            let (below, above) = f32_neighbours(bucket);
+            let eps = (above as f64 - below as f64) / 2.0;
+            assert!(
+                eps > 0.0,
+                "the face must not be exactly an f32: got neighbours {below} and {above}"
+            );
 
-        // Two `f64` placements inside the *same* f32 bucket, straddling the face.
-        let inside = face - eps * 0.25;
-        let outside = face + eps * 0.25;
-        assert_eq!(
-            inside as f32, bucket,
-            "the inside placement must narrow to the bucket's f32"
-        );
-        assert_eq!(
-            outside as f32, bucket,
-            "the outside placement must narrow to the SAME f32 as the inside one -- \
+            // Two `f64` placements inside the *same* f32 bucket, straddling the face.
+            let inside = face - eps * 0.25;
+            let outside = face + eps * 0.25;
+            assert_eq!(
+                inside as f32, bucket,
+                "the inside placement must narrow to the bucket's f32"
+            );
+            assert_eq!(
+                outside as f32, bucket,
+                "the outside placement must narrow to the SAME f32 as the inside one -- \
              that identity is the defect, and without it this fixture proves nothing"
-        );
+            );
 
-        // The CPU's answer, from the `f64`.
-        assert!(
-            maps.fractional([inside, 0.0, 0.0]).is_some(),
-            "the inside placement must be in the box for the f64"
-        );
-        assert!(
-            maps.fractional([outside, 0.0, 0.0]).is_none(),
-            "the outside placement must be out of the box for the f64"
-        );
-        // The removed shader's answer, from the `f32`. It cannot tell them apart,
-        // and that is precisely why a narrowing-derived flag was wrong.
-        assert_eq!(
-            old_f32_inside(&maps, inside),
-            old_f32_inside(&maps, outside),
-            "the removed f32 derivation branches the same way on both placements"
-        );
-        assert!(
-            maps.fractional([inside, 0.0, 0.0]).is_some() != old_f32_inside(&maps, inside),
-            "the f32 derivation must disagree with the CPU on at least one of these, \
+            // The CPU's answer, from the `f64`.
+            assert!(
+                maps.fractional([inside, 0.0, 0.0]).is_some(),
+                "the inside placement must be in the box for the f64"
+            );
+            assert!(
+                maps.fractional([outside, 0.0, 0.0]).is_none(),
+                "the outside placement must be out of the box for the f64"
+            );
+            // The removed shader's answer, from the `f32`. It cannot tell them apart,
+            // and that is precisely why a narrowing-derived flag was wrong.
+            assert_eq!(
+                old_f32_inside(&maps, inside),
+                old_f32_inside(&maps, outside),
+                "the removed f32 derivation branches the same way on both placements"
+            );
+            assert!(
+                maps.fractional([inside, 0.0, 0.0]).is_some() != old_f32_inside(&maps, inside),
+                "the f32 derivation must disagree with the CPU on at least one of these, \
              or this fixture is not one where the bug was live"
-        );
+            );
 
-        // Now the actual claim, through the production upload path. Both batches
-        // carry the same `f64` *narrowed*; only the `f64` differs.
-        let a = x_axis_batch(&[inside]);
-        let b = x_axis_batch(&[outside]);
-        assert_eq!(
-            a.coords, b.coords,
-            "the two uploaded position buffers must be bit-identical, or the \
+            // Now the actual claim, through the production upload path. Both batches
+            // carry the same `f64` *narrowed*; only the `f64` differs.
+            let a = x_axis_batch(&[inside]);
+            let b = x_axis_batch(&[outside]);
+            assert_eq!(
+                a.coords, b.coords,
+                "the two uploaded position buffers must be bit-identical, or the \
              difference below could come from the position rather than the flag"
-        );
-        let (ua, _) = pack_upload(&a, &maps, None).expect("pack inside");
-        let (ub, _) = pack_upload(&b, &maps, None).expect("pack outside");
+            );
+            let (ua, _) = pack_upload(&a, &maps, None).expect("pack inside");
+            let (ub, _) = pack_upload(&b, &maps, None).expect("pack outside");
 
-        assert_eq!(
-            uploaded_xyz(&ua, 0),
-            uploaded_xyz(&ub, 0),
-            "the uploaded positions are the same f32, as asserted above"
-        );
-        assert_eq!(
-            ua[0..3], ub[0..3],
-            "the first vec4's position half must be identical"
-        );
-        assert!(
-            uploaded_flag(&ua, 0) != uploaded_flag(&ub, 0),
-            "two batches with bit-identical uploaded positions and different f64 \
+            assert_eq!(
+                uploaded_xyz(&ua, 0),
+                uploaded_xyz(&ub, 0),
+                "the uploaded positions are the same f32, as asserted above"
+            );
+            assert_eq!(
+                ua[0..3],
+                ub[0..3],
+                "the first vec4's position half must be identical"
+            );
+            assert!(
+                uploaded_flag(&ua, 0) != uploaded_flag(&ub, 0),
+                "two batches with bit-identical uploaded positions and different f64 \
              inputs produced the SAME in-box flag ({}). The flag is therefore a \
              function of the narrowed coordinate, which is the defect this test \
              exists to rule out.",
-            ua[3]
-        );
-        assert!(
-            uploaded_flag(&ua, 0),
-            "the f64 in-box placement must upload an in-box flag"
-        );
-        assert!(
-            !uploaded_flag(&ub, 0),
-            "the f64 out-of-box placement must upload an out-of-box flag"
-        );
+                ua[3]
+            );
+            assert!(
+                uploaded_flag(&ua, 0),
+                "the f64 in-box placement must upload an in-box flag"
+            );
+            assert!(
+                !uploaded_flag(&ub, 0),
+                "the f64 out-of-box placement must upload an out-of-box flag"
+            );
 
-        // And the violation, which is the other half of the same branch, followed
-        // the `f64` too rather than the `f32`.
-        let v_out = uploaded_violation(&ub, 0);
-        let want = crate::grid::out_of_box_violation_per_axis([outside, 0.0, 0.0], &maps.grid_box())
-            .iter()
-            .sum::<f64>();
-        assert_eq!(
-            v_out as f64, want as f32 as f64,
-            "the uploaded violation must be the host's f64 violation, narrowed once"
-        );
-        assert!(
-            v_out > 0.0,
-            "the out-of-box point uploaded a zero violation ({v_out}); the branch and \
+            // And the violation, which is the other half of the same branch, followed
+            // the `f64` too rather than the `f32`.
+            let v_out = uploaded_violation(&ub, 0);
+            let want =
+                crate::grid::out_of_box_violation_per_axis([outside, 0.0, 0.0], &maps.grid_box())
+                    .iter()
+                    .sum::<f64>();
+            assert_eq!(
+                v_out as f64, want as f32 as f64,
+                "the uploaded violation must be the host's f64 violation, narrowed once"
+            );
+            assert!(
+                v_out > 0.0,
+                "the out-of-box point uploaded a zero violation ({v_out}); the branch and \
              the magnitude have to come from the same f64 or the penalty is charged \
              on the wrong side of the face"
-        );
-        assert_eq!(
-            uploaded_violation(&ua, 0),
-            0.0,
-            "the in-box point must upload a zero violation: the CPU interpolates and \
+            );
+            assert_eq!(
+                uploaded_violation(&ua, 0),
+                0.0,
+                "the in-box point must upload a zero violation: the CPU interpolates and \
              charges nothing there"
-        );
+            );
 
-        eprintln!(
-            "MEASURED (no device required): two placements {inside:.12} and \
+            eprintln!(
+                "MEASURED (no device required): two placements {inside:.12} and \
              {outside:.12} A, straddling the +x face at {face:.6}, narrow to the same \
              f32 {bucket} and upload bit-identical positions, yet carry different \
              in-box flags ({}) and different violations ({v_out:e} vs 0). The flag is \
              a function of the un-narrowed f64, not of the narrowing.",
-            ua[3]
-        );
-        let _ = ligand;
-    }
+                ua[3]
+            );
+            let _ = ligand;
+        }
 
-    /// The uploaded violation is the number the CPU would have charged.
-    ///
-    /// Not "close to" it. The shader multiplies this by `OUT_OF_BOX_PENALTY`, so
-    /// the only rounding between the host's decision and the charge is the one
-    /// narrowing below, and a test allowing a wider tolerance than that would
-    /// absorb exactly the defect (a magnitude measured from the narrowed
-    /// coordinate) it is supposed to catch.
-    #[test]
-    fn the_uploaded_violation_is_the_number_the_cpu_would_charge() {
-        let maps = face_fixture();
-        let box_ = maps.grid_box();
-        // Far enough out on each axis that the per-axis excess is unambiguous, and
-        // one well inside so the zero arm is covered too.
-        let cases: Vec<[f64; 3]> = vec![
-            [0.0, 0.0, 0.0],
-            [box_.max[0] + 3.5, 0.0, 0.0],
-            [0.0, box_.min[1] - 2.25, 0.0],
-            [0.0, 0.0, box_.max[2] + 11.0],
-            [box_.max[0] + 3.5, box_.min[1] - 2.25, box_.max[2] + 11.0],
-        ];
-        let coords: Vec<f64> = cases.iter().flat_map(|p| p.iter().copied()).collect();
-        let batch = Batch::from_coords(coords, cases.len(), &one_carbon()).expect("batch");
-        let (uploaded, _) = pack_upload(&batch, &maps, None).expect("pack");
+        /// The uploaded violation is the number the CPU would have charged.
+        ///
+        /// Not "close to" it. The shader multiplies this by `OUT_OF_BOX_PENALTY`, so
+        /// the only rounding between the host's decision and the charge is the one
+        /// narrowing below, and a test allowing a wider tolerance than that would
+        /// absorb exactly the defect (a magnitude measured from the narrowed
+        /// coordinate) it is supposed to catch.
+        #[test]
+        fn the_uploaded_violation_is_the_number_the_cpu_would_charge() {
+            let maps = face_fixture();
+            let box_ = maps.grid_box();
+            // Far enough out on each axis that the per-axis excess is unambiguous, and
+            // one well inside so the zero arm is covered too.
+            let cases: Vec<[f64; 3]> = vec![
+                [0.0, 0.0, 0.0],
+                [box_.max[0] + 3.5, 0.0, 0.0],
+                [0.0, box_.min[1] - 2.25, 0.0],
+                [0.0, 0.0, box_.max[2] + 11.0],
+                [box_.max[0] + 3.5, box_.min[1] - 2.25, box_.max[2] + 11.0],
+            ];
+            let coords: Vec<f64> = cases.iter().flat_map(|p| p.iter().copied()).collect();
+            let batch = Batch::from_coords(coords, cases.len(), &one_carbon()).expect("batch");
+            let (uploaded, _) = pack_upload(&batch, &maps, None).expect("pack");
 
-        let mut charged = 0usize;
-        for (i, p) in cases.iter().enumerate() {
-            let in_box = maps.fractional(*p).is_some();
-            let want = if in_box {
-                0.0
-            } else {
-                crate::grid::out_of_box_violation_per_axis(*p, &box_)
-                    .iter()
-                    .sum()
-            };
-            let got = uploaded_violation(&uploaded, i);
-            assert_eq!(
-                got as f64,
-                want as f32 as f64,
-                "point {i} at {p:?}: uploaded violation {got:e}, CPU would charge \
+            let mut charged = 0usize;
+            for (i, p) in cases.iter().enumerate() {
+                let in_box = maps.fractional(*p).is_some();
+                let want = if in_box {
+                    0.0
+                } else {
+                    crate::grid::out_of_box_violation_per_axis(*p, &box_)
+                        .iter()
+                        .sum()
+                };
+                let got = uploaded_violation(&uploaded, i);
+                assert_eq!(
+                    got as f64, want as f32 as f64,
+                    "point {i} at {p:?}: uploaded violation {got:e}, CPU would charge \
                  {want:e}. energy.wgsl multiplies this by OUT_OF_BOX_PENALTY, so the \
                  host's f64 narrowing is the only rounding permitted here."
-            );
-            if in_box {
-                assert_eq!(got, 0.0, "point {i} is in the box and must charge nothing");
-            } else {
-                assert!(got > 0.0, "point {i} is out of the box and must charge something");
-                charged += 1;
+                );
+                if in_box {
+                    assert_eq!(got, 0.0, "point {i} is in the box and must charge nothing");
+                } else {
+                    assert!(
+                        got > 0.0,
+                        "point {i} is out of the box and must charge something"
+                    );
+                    charged += 1;
+                }
             }
-        }
-        assert_eq!(charged, 4, "the out-of-box arm must have been taken four times");
-        eprintln!(
-            "MEASURED (no device required): {} placements packed, {} out-of-box, every \
-             uploaded violation exactly `f64 as f32` of the CPU's own per-axis excess sum",
-            cases.len(),
-            charged
-        );
-    }
-
-    /// The uploaded position is the nearest `f32` to the `f64`, and nothing else.
-    ///
-    /// Three separate claims, because they fail separately:
-    ///   * the upload is `f64 as f32` (the saturating cast, not a wrap);
-    ///   * that `f32` really is the *nearest* one, checked against both
-    ///     bit-adjacent neighbours rather than assumed from the cast;
-    ///   * the host did **not** nudge it, which it used to: a coordinate the kernel
-    ///     never asked to move is one fewer way for the two sides to diverge.
-    #[test]
-    fn the_uploaded_position_is_the_nearest_f32_and_is_not_nudged() {
-        let maps = face_fixture();
-        let xs = face_placements(&maps, 3);
-        let batch = x_axis_batch(&xs);
-        let (coords, _) = pack_upload(&batch, &maps, None).expect("pack");
-
-        for (i, &x) in xs.iter().enumerate() {
-            let want = x as f32;
-            let got = uploaded_xyz(&coords, i)[0];
             assert_eq!(
-                got.to_bits(),
-                want.to_bits(),
-                "point {i} at x={x:.17}: uploaded {got:.9} against the f32 nearest \
+                charged, 4,
+                "the out-of-box arm must have been taken four times"
+            );
+            eprintln!(
+                "MEASURED (no device required): {} placements packed, {} out-of-box, every \
+             uploaded violation exactly `f64 as f32` of the CPU's own per-axis excess sum",
+                cases.len(),
+                charged
+            );
+        }
+
+        /// The uploaded position is the nearest `f32` to the `f64`, and nothing else.
+        ///
+        /// Three separate claims, because they fail separately:
+        ///   * the upload is `f64 as f32` (the saturating cast, not a wrap);
+        ///   * that `f32` really is the *nearest* one, checked against both
+        ///     bit-adjacent neighbours rather than assumed from the cast;
+        ///   * the host did **not** nudge it, which it used to: a coordinate the kernel
+        ///     never asked to move is one fewer way for the two sides to diverge.
+        #[test]
+        fn the_uploaded_position_is_the_nearest_f32_and_is_not_nudged() {
+            let maps = face_fixture();
+            let xs = face_placements(&maps, 3);
+            let batch = x_axis_batch(&xs);
+            let (coords, _) = pack_upload(&batch, &maps, None).expect("pack");
+
+            for (i, &x) in xs.iter().enumerate() {
+                let want = x as f32;
+                let got = uploaded_xyz(&coords, i)[0];
+                assert_eq!(
+                    got.to_bits(),
+                    want.to_bits(),
+                    "point {i} at x={x:.17}: uploaded {got:.9} against the f32 nearest \
                  {want:.9}. A position the host has moved is a position the shader \
                  and the CPU are no longer scoring at the same place."
-            );
-            // Nearest-ness, proven rather than assumed from the cast: no
-            // bit-adjacent f32 is *strictly* closer to the f64 than the one
-            // uploaded. Non-strict, and that is not a weakening: this fixture
-            // walks `f32` bucket boundaries on purpose, so at the boundary
-            // between two buckets the two candidates are exactly equidistant
-            // and either is a nearest. A strict `>` here went red on that tie
-            // and was wrong to -- a tie is not a nearer neighbour. What would
-            // make this fail is a *strictly* nearer f32, which is what a
-            // truncating cast or a ULP nudge would produce.
-            let (below, above) = f32_neighbours(got);
-            for n in [below, above] {
-                assert!(
-                    (n as f64 - x).abs() >= (got as f64 - x).abs(),
-                    "point {i}: the f32 {n:.9} is strictly closer to {x:.17} than the \
-                     uploaded {got:.9}, so the upload is not a nearest f32"
                 );
+                // Nearest-ness, proven rather than assumed from the cast: no
+                // bit-adjacent f32 is *strictly* closer to the f64 than the one
+                // uploaded. Non-strict, and that is not a weakening: this fixture
+                // walks `f32` bucket boundaries on purpose, so at the boundary
+                // between two buckets the two candidates are exactly equidistant
+                // and either is a nearest. A strict `>` here went red on that tie
+                // and was wrong to -- a tie is not a nearer neighbour. What would
+                // make this fail is a *strictly* nearer f32, which is what a
+                // truncating cast or a ULP nudge would produce.
+                let (below, above) = f32_neighbours(got);
+                for n in [below, above] {
+                    assert!(
+                        (n as f64 - x).abs() >= (got as f64 - x).abs(),
+                        "point {i}: the f32 {n:.9} is strictly closer to {x:.17} than the \
+                     uploaded {got:.9}, so the upload is not a nearest f32"
+                    );
+                }
+                // The other two axes were 0.0 in and must be 0.0 out.
+                assert_eq!(uploaded_xyz(&coords, i)[1], 0.0);
+                assert_eq!(uploaded_xyz(&coords, i)[2], 0.0);
+                // Padding: the shader reads a `vec4` here, and the fourth component is
+                // the flag. Everything after it is the violation vec4's padding.
+                assert_eq!(coords[i * COORD_FLOATS + 5], 0.0);
+                assert_eq!(coords[i * COORD_FLOATS + 6], 0.0);
+                assert_eq!(coords[i * COORD_FLOATS + 7], 0.0);
             }
-            // The other two axes were 0.0 in and must be 0.0 out.
-            assert_eq!(uploaded_xyz(&coords, i)[1], 0.0);
-            assert_eq!(uploaded_xyz(&coords, i)[2], 0.0);
-            // Padding: the shader reads a `vec4` here, and the fourth component is
-            // the flag. Everything after it is the violation vec4's padding.
-            assert_eq!(coords[i * COORD_FLOATS + 5], 0.0);
-            assert_eq!(coords[i * COORD_FLOATS + 6], 0.0);
-            assert_eq!(coords[i * COORD_FLOATS + 7], 0.0);
-        }
-        eprintln!(
-            "MEASURED (no device required): {} positions packed, each the bit-exact \
+            eprintln!(
+                "MEASURED (no device required): {} positions packed, each the bit-exact \
              `f64 as f32` of its coordinate, with no bit-adjacent f32 strictly \
              closer to it and no ULP nudging (this fixture walks f32 bucket \
              boundaries on purpose, so exact ties are expected and are not \
              evidence of a nearer neighbour)",
-            xs.len()
-        );
-    }
-
-    /// The parameter block is the grid's own numbers, in range, unaltered.
-    ///
-    /// The shader's `u32` index arithmetic and its trilinear weights are device-side
-    /// and untested here, but the *inputs* to both are not: `nx`/`ny`/`nz` decide how
-    /// far the kernel can address, `min`/`spacing` decide which cell a coordinate
-    /// lands in, and `bmax` is the face the host measures the out-of-box charge
-    /// against. A mistake in any of them is a wrong energy with no other test able
-    /// to see it on a device-free machine.
-    #[test]
-    fn the_parameter_block_is_the_grids_own_numbers_in_range() {
-        let maps = face_fixture();
-        let batch = x_axis_batch(&[0.0]);
-        let (_, params) = pack_upload(&batch, &maps, None).expect("pack");
-        let dims = maps.dims();
-        let box_ = maps.grid_box();
-
-        assert_eq!(params.nx as usize, dims[0]);
-        assert_eq!(params.ny as usize, dims[1]);
-        assert_eq!(params.nz as usize, dims[2]);
-        // The published ceiling, applied to the numbers the shader will actually
-        // receive rather than to the `dims` that produced them.
-        for (n, d) in [("nx", params.nx), ("ny", params.ny), ("nz", params.nz)] {
-            assert!(d >= 2, "{n} is {d}; the shader's `n - 2` clamp has no cell to clamp to");
+                xs.len()
+            );
         }
-        let points = u128::from(params.nx) * u128::from(params.ny) * u128::from(params.nz);
-        assert!(
-            points <= crate::grid::MAX_GRID_POINTS as u128,
-            "the uploaded dims address {points} points, above the {} energy.wgsl's u32 \
-             flat index can reach",
-            crate::grid::MAX_GRID_POINTS
-        );
-        assert_eq!(params.n_atoms as usize, batch.n_atoms);
-        assert_eq!(params.n_conf as usize, batch.n_conf);
 
-        // The `f64` -> `f32` narrowing of each, and the padding each vec4 carries.
-        assert_eq!(params.min[0], maps.min[0] as f32);
-        assert_eq!(params.min[1], maps.min[1] as f32);
-        assert_eq!(params.min[2], maps.min[2] as f32);
-        assert_eq!(params.spacing[0], maps.spacing[0] as f32);
-        assert_eq!(params.spacing[1], maps.spacing[1] as f32);
-        assert_eq!(params.spacing[2], maps.spacing[2] as f32);
-        assert_eq!(params.bmax[0], box_.max[0] as f32);
-        assert_eq!(params.bmax[1], box_.max[1] as f32);
-        assert_eq!(params.bmax[2], box_.max[2] as f32);
-        for v in [params.min[3], params.spacing[3], params.bmax[3]] {
-            assert_eq!(v, 0.0, "the fourth component of each vec4 is padding and must be 0");
-        }
-        assert_eq!(params._pad, [0u32; 3], "the 12-byte hole before the first vec4");
+        /// The parameter block is the grid's own numbers, in range, unaltered.
+        ///
+        /// The shader's `u32` index arithmetic and its trilinear weights are device-side
+        /// and untested here, but the *inputs* to both are not: `nx`/`ny`/`nz` decide how
+        /// far the kernel can address, `min`/`spacing` decide which cell a coordinate
+        /// lands in, and `bmax` is the face the host measures the out-of-box charge
+        /// against. A mistake in any of them is a wrong energy with no other test able
+        /// to see it on a device-free machine.
+        #[test]
+        fn the_parameter_block_is_the_grids_own_numbers_in_range() {
+            let maps = face_fixture();
+            let batch = x_axis_batch(&[0.0]);
+            let (_, params) = pack_upload(&batch, &maps, None).expect("pack");
+            let dims = maps.dims();
+            let box_ = maps.grid_box();
 
-        // Finite, and not silently zeroed by a narrowing overflow.
-        for (name, v) in [
-            ("min", params.min),
-            ("spacing", params.spacing),
-            ("bmax", params.bmax),
-        ] {
-            for (k, f) in v.iter().enumerate() {
+            assert_eq!(params.nx as usize, dims[0]);
+            assert_eq!(params.ny as usize, dims[1]);
+            assert_eq!(params.nz as usize, dims[2]);
+            // The published ceiling, applied to the numbers the shader will actually
+            // receive rather than to the `dims` that produced them.
+            for (n, d) in [("nx", params.nx), ("ny", params.ny), ("nz", params.nz)] {
                 assert!(
-                    f.is_finite(),
-                    "params.{name}[{k}] is {f:?}; a non-finite parameter makes every \
-                     sampled coordinate NaN on the device"
+                    d >= 2,
+                    "{n} is {d}; the shader's `n - 2` clamp has no cell to clamp to"
                 );
             }
-        }
-        assert!(params.spacing[0] > 0.0, "a zero spacing divides by zero in the shader");
-        eprintln!(
-            "MEASURED (no device required): params carry {dims:?} points, n_atoms {}, \
+            let points = u128::from(params.nx) * u128::from(params.ny) * u128::from(params.nz);
+            assert!(
+                points <= crate::grid::MAX_GRID_POINTS as u128,
+                "the uploaded dims address {points} points, above the {} energy.wgsl's u32 \
+             flat index can reach",
+                crate::grid::MAX_GRID_POINTS
+            );
+            assert_eq!(params.n_atoms as usize, batch.n_atoms);
+            assert_eq!(params.n_conf as usize, batch.n_conf);
+
+            // The `f64` -> `f32` narrowing of each, and the padding each vec4 carries.
+            assert_eq!(params.min[0], maps.min[0] as f32);
+            assert_eq!(params.min[1], maps.min[1] as f32);
+            assert_eq!(params.min[2], maps.min[2] as f32);
+            assert_eq!(params.spacing[0], maps.spacing[0] as f32);
+            assert_eq!(params.spacing[1], maps.spacing[1] as f32);
+            assert_eq!(params.spacing[2], maps.spacing[2] as f32);
+            assert_eq!(params.bmax[0], box_.max[0] as f32);
+            assert_eq!(params.bmax[1], box_.max[1] as f32);
+            assert_eq!(params.bmax[2], box_.max[2] as f32);
+            for v in [params.min[3], params.spacing[3], params.bmax[3]] {
+                assert_eq!(
+                    v, 0.0,
+                    "the fourth component of each vec4 is padding and must be 0"
+                );
+            }
+            assert_eq!(
+                params._pad, [0u32; 3],
+                "the 12-byte hole before the first vec4"
+            );
+
+            // Finite, and not silently zeroed by a narrowing overflow.
+            for (name, v) in [
+                ("min", params.min),
+                ("spacing", params.spacing),
+                ("bmax", params.bmax),
+            ] {
+                for (k, f) in v.iter().enumerate() {
+                    assert!(
+                        f.is_finite(),
+                        "params.{name}[{k}] is {f:?}; a non-finite parameter makes every \
+                     sampled coordinate NaN on the device"
+                    );
+                }
+            }
+            assert!(
+                params.spacing[0] > 0.0,
+                "a zero spacing divides by zero in the shader"
+            );
+            eprintln!(
+                "MEASURED (no device required): params carry {dims:?} points, n_atoms {}, \
              n_conf {}, min {min:?}, spacing {sp:?}, bmax {bmax:?}",
-            params.n_atoms,
-            params.n_conf,
-            min = params.min,
-            sp = params.spacing,
-            bmax = params.bmax,
-        );
-    }
+                params.n_atoms,
+                params.n_conf,
+                min = params.min,
+                sp = params.spacing,
+                bmax = params.bmax,
+            );
+        }
 
-    /// The override is honoured, so the mutation above is a real injection.
-    ///
-    /// `score_with_violations`'s `violations` argument exists for exactly one
-    /// caller, a test, and its only purpose is to let a test put the old defect
-    /// back. A test that cannot install it is not testing the production path. This
-    /// checks the override reaches the upload, on no adapter, so the mutation the
-    /// device-gated tests perform is known to be landing where they think.
-    #[test]
-    fn the_violation_override_reaches_the_upload_without_a_device() {
-        let maps = face_fixture();
-        let face = maps.min[0] + (maps.dims()[0] - 1) as f64 * maps.spacing[0];
-        // A point *just* outside the face, by a fraction of one `f32` ULP. This
-        // is the shape of the original defect and it is why the coordinate is
-        // not simply `max + 4.0`: at 4.0 out, 7.0 is exactly representable in
-        // `f32`, the narrowing changes nothing, and the injection is a no-op.
-        // A first attempt used that point and the test caught it -- the
-        // "narrowed" measurement came back bit-identical to the honest one, so
-        // the mutation would have injected nothing and proved nothing.
-        let (below, above) = f32_neighbours(face as f32);
-        let eps = (above as f64 - below as f64) / 2.0;
-        assert!(eps > 0.0, "the face must not be exactly an f32");
-        let out = face + eps * 0.25;
+        /// The override is honoured, so the mutation above is a real injection.
+        ///
+        /// `score_with_violations`'s `violations` argument exists for exactly one
+        /// caller, a test, and its only purpose is to let a test put the old defect
+        /// back. A test that cannot install it is not testing the production path. This
+        /// checks the override reaches the upload, on no adapter, so the mutation the
+        /// device-gated tests perform is known to be landing where they think.
+        #[test]
+        fn the_violation_override_reaches_the_upload_without_a_device() {
+            let maps = face_fixture();
+            let face = maps.min[0] + (maps.dims()[0] - 1) as f64 * maps.spacing[0];
+            // A point *just* outside the face, by a fraction of one `f32` ULP. This
+            // is the shape of the original defect and it is why the coordinate is
+            // not simply `max + 4.0`: at 4.0 out, 7.0 is exactly representable in
+            // `f32`, the narrowing changes nothing, and the injection is a no-op.
+            // A first attempt used that point and the test caught it -- the
+            // "narrowed" measurement came back bit-identical to the honest one, so
+            // the mutation would have injected nothing and proved nothing.
+            let (below, above) = f32_neighbours(face as f32);
+            let eps = (above as f64 - below as f64) / 2.0;
+            assert!(eps > 0.0, "the face must not be exactly an f32");
+            let out = face + eps * 0.25;
 
-        // The precondition that makes this the defect and not a rounding
-        // curiosity: narrowing moves the point back to the face or inside it,
-        // so the old kernel's measurement was zero where the CPU charged a
-        // penalty. `<=` and not `<`: a quarter-ULP outside rounds back to
-        // *exactly* the face, and the excess at the face is zero, so that is
-        // the defective measurement just as much as landing inside is. The
-        // assertion below pins the measurement rather than the geometry,
-        // which is the thing that actually matters.
-        assert!(
-            ((out as f32) as f64) <= face,
-            "narrowing x={out:.17} must land at or inside the face at {face:.9}, got \
+            // The precondition that makes this the defect and not a rounding
+            // curiosity: narrowing moves the point back to the face or inside it,
+            // so the old kernel's measurement was zero where the CPU charged a
+            // penalty. `<=` and not `<`: a quarter-ULP outside rounds back to
+            // *exactly* the face, and the excess at the face is zero, so that is
+            // the defective measurement just as much as landing inside is. The
+            // assertion below pins the measurement rather than the geometry,
+            // which is the thing that actually matters.
+            assert!(
+                ((out as f32) as f64) <= face,
+                "narrowing x={out:.17} must land at or inside the face at {face:.9}, got \
              {:.9}; otherwise the narrowed measurement is not the defective one",
-            out as f32
-        );
-        assert!(
-            out > face,
-            "the honest placement must be strictly outside the face, or there is no \
+                out as f32
+            );
+            assert!(
+                out > face,
+                "the honest placement must be strictly outside the face, or there is no \
              penalty for the mutation to lose"
-        );
-        assert!(
-            maps.fractional([out, 0.0, 0.0]).is_none(),
-            "the honest placement must be out of the box"
-        );
+            );
+            assert!(
+                maps.fractional([out, 0.0, 0.0]).is_none(),
+                "the honest placement must be out of the box"
+            );
 
-        let batch = x_axis_batch(&[out]);
-        let honest = out_of_box_violation_per_axis_sum(&maps, out);
+            let batch = x_axis_batch(&[out]);
+            let honest = out_of_box_violation_per_axis_sum(&maps, out);
 
-        let (default, _) = pack_upload(&batch, &maps, None).expect("pack default");
-        assert_eq!(
-            uploaded_violation(&default, 0) as f64,
-            honest as f32 as f64,
-            "the default path must upload the host's own measurement"
-        );
+            let (default, _) = pack_upload(&batch, &maps, None).expect("pack default");
+            assert_eq!(
+                uploaded_violation(&default, 0) as f64,
+                honest as f32 as f64,
+                "the default path must upload the host's own measurement"
+            );
 
-        // The old kernel measured the violation from the *narrowed* coordinate,
-        // which for this point is inside the box, so it charged nothing.
-        let from_narrowed = out_of_box_violation_per_axis_sum(&maps, out as f32 as f64);
-        assert_eq!(
-            from_narrowed, 0.0,
-            "the narrowed placement is inside the box, so the old measurement is \
+            // The old kernel measured the violation from the *narrowed* coordinate,
+            // which for this point is inside the box, so it charged nothing.
+            let from_narrowed = out_of_box_violation_per_axis_sum(&maps, out as f32 as f64);
+            assert_eq!(
+                from_narrowed, 0.0,
+                "the narrowed placement is inside the box, so the old measurement is \
              zero; got {from_narrowed:e}"
-        );
-        assert!(
-            from_narrowed < honest,
-            "the narrowed measurement must be smaller than the honest one for this \
+            );
+            assert!(
+                from_narrowed < honest,
+                "the narrowed measurement must be smaller than the honest one for this \
              fixture to reproduce the defect, got {from_narrowed:e} vs {honest:e}"
-        );
+            );
 
-        let (mutated, _) = pack_upload(&batch, &maps, Some(&[from_narrowed])).expect("pack override");
-        assert_eq!(
-            uploaded_violation(&mutated, 0),
-            0.0,
-            "the override must be what gets uploaded, or the mutation is not injected"
-        );
-        assert_ne!(
-            uploaded_violation(&default, 0),
-            uploaded_violation(&mutated, 0),
-            "the override and the default produced the same upload, so it is not \
+            let (mutated, _) =
+                pack_upload(&batch, &maps, Some(&[from_narrowed])).expect("pack override");
+            assert_eq!(
+                uploaded_violation(&mutated, 0),
+                0.0,
+                "the override must be what gets uploaded, or the mutation is not injected"
+            );
+            assert_ne!(
+                uploaded_violation(&default, 0),
+                uploaded_violation(&mutated, 0),
+                "the override and the default produced the same upload, so it is not \
              reaching the buffer at all"
-        );
-        eprintln!(
-            "MEASURED (no device required): a point {out:.17} A, {delta:e} A outside \
+            );
+            eprintln!(
+                "MEASURED (no device required): a point {out:.17} A, {delta:e} A outside \
              the +x face at {face:.9}, narrows to {:.9} -- the face, where the excess \
              is zero. The host uploads {honest:e} and the old f32-derived \
              measurement was 0, a difference of {honest:e} kcal/mol of penalty the \
              device-gated mutation has something to inject.",
-            out as f32,
-            delta = out - face
-        );
-    }
-
-    /// The `f64` per-axis excess sum, the host's own arithmetic.
-    fn out_of_box_violation_per_axis_sum(maps: &crate::grid::GridMaps, x: f64) -> f64 {
-        crate::grid::out_of_box_violation_per_axis([x, 0.0, 0.0], &maps.grid_box())
-            .iter()
-            .sum()
-    }
-
-    /// A mis-sized `violations` slice is refused, on no adapter.
-    #[test]
-    fn a_mis_sized_violation_override_is_refused_without_a_device() {
-        let maps = face_fixture();
-        let batch = x_axis_batch(&[0.0, 1.0, 2.0]);
-        let err = pack_upload(&batch, &maps, Some(&[0.0, 0.0]))
-            .expect_err("2 violations for 3 points must be refused");
-        let text = err.to_string();
-        assert!(
-            text.contains("3 out-of-box violations") && text.contains("got 2"),
-            "the refusal must name the expected and found counts, got: {text}"
-        );
-    }
-
-    /// The upload is sized for the batch, and an empty batch is a real answer.
-    ///
-    /// `score_with_violations` short-circuits `n_conf == 0 || n_atoms == 0` before
-    /// it ever reaches `pack_upload`, so this checks the *other* end: that the
-    /// buffer length is exactly `n_points * COORD_FLOATS` and that the binding's
-    /// `min_binding_size` still holds for it.
-    #[test]
-    fn the_upload_is_sized_for_the_batch_and_no_shorter() {
-        let maps = face_fixture();
-        for n_conf in 1..=4usize {
-            let xs: Vec<f64> = (0..n_conf).map(|k| k as f64 * 1.5).collect();
-            let batch = x_axis_batch(&xs);
-            let (coords, params) = pack_upload(&batch, &maps, None).expect("pack");
-            assert_eq!(coords.len(), n_conf * COORD_FLOATS, "{n_conf} conformations");
-            assert_eq!(params.n_conf as usize, n_conf);
-            assert!(
-                coords.len() * 4 >= 32,
-                "a one-point upload is {} bytes and the binding declares a 32-byte \
-                 minimum, so wgpu would reject the bind group",
-                coords.len() * 4
+                out as f32,
+                delta = out - face
             );
         }
-        assert_eq!(COORD_FLOATS * 4, 32, "energy.wgsl's `min_binding_size` is 32 bytes");
-        eprintln!(
-            "MEASURED (no device required): uploads of 1..=4 conformations are exactly \
+
+        /// The `f64` per-axis excess sum, the host's own arithmetic.
+        fn out_of_box_violation_per_axis_sum(maps: &crate::grid::GridMaps, x: f64) -> f64 {
+            crate::grid::out_of_box_violation_per_axis([x, 0.0, 0.0], &maps.grid_box())
+                .iter()
+                .sum()
+        }
+
+        /// A mis-sized `violations` slice is refused, on no adapter.
+        #[test]
+        fn a_mis_sized_violation_override_is_refused_without_a_device() {
+            let maps = face_fixture();
+            let batch = x_axis_batch(&[0.0, 1.0, 2.0]);
+            let err = pack_upload(&batch, &maps, Some(&[0.0, 0.0]))
+                .expect_err("2 violations for 3 points must be refused");
+            let text = err.to_string();
+            assert!(
+                text.contains("3 out-of-box violations") && text.contains("got 2"),
+                "the refusal must name the expected and found counts, got: {text}"
+            );
+        }
+
+        /// The upload is sized for the batch, and an empty batch is a real answer.
+        ///
+        /// `score_with_violations` short-circuits `n_conf == 0 || n_atoms == 0` before
+        /// it ever reaches `pack_upload`, so this checks the *other* end: that the
+        /// buffer length is exactly `n_points * COORD_FLOATS` and that the binding's
+        /// `min_binding_size` still holds for it.
+        #[test]
+        fn the_upload_is_sized_for_the_batch_and_no_shorter() {
+            let maps = face_fixture();
+            for n_conf in 1..=4usize {
+                let xs: Vec<f64> = (0..n_conf).map(|k| k as f64 * 1.5).collect();
+                let batch = x_axis_batch(&xs);
+                let (coords, params) = pack_upload(&batch, &maps, None).expect("pack");
+                assert_eq!(
+                    coords.len(),
+                    n_conf * COORD_FLOATS,
+                    "{n_conf} conformations"
+                );
+                assert_eq!(params.n_conf as usize, n_conf);
+                assert!(
+                    coords.len() * 4 >= 32,
+                    "a one-point upload is {} bytes and the binding declares a 32-byte \
+                 minimum, so wgpu would reject the bind group",
+                    coords.len() * 4
+                );
+            }
+            assert_eq!(
+                COORD_FLOATS * 4,
+                32,
+                "energy.wgsl's `min_binding_size` is 32 bytes"
+            );
+            eprintln!(
+                "MEASURED (no device required): uploads of 1..=4 conformations are exactly \
              n_points * {COORD_FLOATS} f32, and the smallest is 32 bytes, the binding's \
              declared minimum"
-        );
+            );
+        }
     }
-}
 }

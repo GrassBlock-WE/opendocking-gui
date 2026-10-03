@@ -364,7 +364,6 @@ pub fn check_gpu_dims(dims: [usize; 3]) -> Result<()> {
     Ok(())
 }
 
-
 /// Refuse a `data` length that disagrees with the `dims` beside it.
 ///
 /// The third constraint, and the only one of the three that is about the
@@ -507,7 +506,10 @@ fn check_payload_len(kind: PayloadKind, dims: [usize; 3], data_len: usize) -> Re
             dims,
             data_len,
             Some(points),
-            &format!("{expected} ({points} points x {} = {stride})", kind.stride_fn_name()),
+            &format!(
+                "{expected} ({points} points x {} = {stride})",
+                kind.stride_fn_name()
+            ),
         ));
     }
     Ok(())
@@ -678,7 +680,6 @@ pub struct GridMaps {
     /// read an older file would be worse than reporting the weaker claim.
     unknown_atom_types: usize,
 }
-
 
 /// The on-the-wire form of [`GridMaps`], and the reason `data` cannot lie.
 ///
@@ -1201,7 +1202,11 @@ impl GridMaps {
             let u = (p[k] - self.min[k]) / self.spacing[k];
             let i = u.floor();
             let n = self.dims[k] as f64 - 1.0;
-            if !(i >= 0.0) || !(i < n) {
+            // `contains` is false for NaN, so a NaN cell index is rejected
+            // here exactly as the two negated comparisons it replaced rejected
+            // it. Do not rewrite this as `i < 0.0 || i >= n`: both comparisons
+            // are false for NaN, so that form would let a NaN through.
+            if !(0.0..n).contains(&i) {
                 return None;
             }
             cell[k] = i as usize;
@@ -2014,8 +2019,10 @@ impl TermMaps {
         let n0 = self.dims[0] as f64 - 1.0;
         let n1 = self.dims[1] as f64 - 1.0;
         let n2 = self.dims[2] as f64 - 1.0;
-        if !(i0 >= 0.0) || !(i1 >= 0.0) || !(i2 >= 0.0) || !(i0 < n0) || !(i1 < n1) || !(i2 < n2)
-        {
+        // Same NaN reasoning as the crate-level `fractional` above: a range
+        // `contains` is false for NaN, so a NaN cell index is rejected. A
+        // `i < 0.0 || i >= n` rewrite would not be equivalent.
+        if !(0.0..n0).contains(&i0) || !(0.0..n1).contains(&i1) || !(0.0..n2).contains(&i2) {
             return None;
         }
         Some((
@@ -3568,7 +3575,7 @@ mod pinned_grid_constants {
             "MAX_GRID_POINTS",
             MAX_GRID_POINTS,
             (u32::MAX as u64) / (map_stride() as u64),
-            DOC
+            DOC,
         );
         // The claim the comment makes is checkable, so check it. `sample()`'s
         // last read is `points * STRIDE - 1`, in a u32, and it fits.
@@ -4094,6 +4101,108 @@ mod degenerate_axes {
         }
     }
 
+    /// A NaN coordinate is rejected by **both** `fractional` paths, and the
+    /// reason the bounds test is a negated `contains` rather than the plainer
+    /// `i < 0.0 || i >= n` is exactly this: both of those comparisons are false
+    /// for NaN, so the un-negated form would let a NaN through to the
+    /// `i as usize` cast below the guard, where a NaN becomes 0 and the point
+    /// is silently read off the wrong corner of the grid.
+    ///
+    /// This was written after that guard was rewritten to silence a clippy
+    /// lint, which is the worst possible order: the rewrite touched the only
+    /// thing standing between a NaN and a wrong-but-plausible index, and
+    /// **nothing tested it**. A rewrite of untested behaviour is a rewrite
+    /// whose correctness is a claim rather than a measurement.
+    #[test]
+    fn a_nan_coordinate_is_rejected_by_both_fractional_paths() {
+        let dims = [4usize; 3];
+        let maps = maps_with(dims, dims[0] * dims[1] * dims[2]);
+
+        // `data` is empty on purpose: `fractional` reads only `min`, `spacing`
+        // and `dims`, so a payload-length fixture here would be a second thing
+        // to keep in step with `dims` for no gain. The tests that are about the
+        // payload are in `tests/map_data_len.rs` and `tests/term_data_len.rs`.
+        let terms = TermMaps {
+            min: [0.0, 0.0, 0.0],
+            dims,
+            spacing: [1.0, 1.0, 1.0],
+            data: Vec::new(),
+            box_: GridBox {
+                min: [0.0, 0.0, 0.0],
+                max: [10.0, 10.0, 10.0],
+            },
+        };
+
+        // A finite point well inside the grid is accepted by both, so a
+        // rejection below is the NaN and not a fixture that refuses everything.
+        let inside = [1.5, 1.5, 1.5];
+        assert!(
+            maps.fractional(inside).is_some(),
+            "GridMaps::fractional refused a finite interior point {inside:?}, so a refusal \
+             below would prove nothing"
+        );
+        assert!(
+            terms.fractional(inside).is_some(),
+            "TermMaps::fractional refused a finite interior point {inside:?}, so a refusal \
+             below would prove nothing"
+        );
+
+        // One NaN axis at a time, so the message names which axis got through
+        // rather than reporting a single opaque refusal.
+        for axis in 0..3 {
+            let mut p = inside;
+            p[axis] = f64::NAN;
+            assert!(
+                maps.fractional(p).is_none(),
+                "GridMaps::fractional accepted a NaN on axis {axis}: {p:?} -- the bounds \
+                 guard let a NaN through to `i as usize`, which turns it into 0 and \
+                 reads the wrong corner of the grid"
+            );
+            assert!(
+                terms.fractional(p).is_none(),
+                "TermMaps::fractional accepted a NaN on axis {axis}: {p:?} -- the bounds \
+                 guard let a NaN through to `i as usize`, which turns it into 0 and \
+                 reads the wrong corner of the grid"
+            );
+        }
+
+        // All three at once, which is what a caller computing a position from
+        // an uninitialised accumulator actually produces.
+        let all_nan = [f64::NAN, f64::NAN, f64::NAN];
+        assert!(maps.fractional(all_nan).is_none());
+        assert!(terms.fractional(all_nan).is_none());
+
+        // The two ends of the range, so a future "simplification" to a plain
+        // half-open comparison cannot quietly move either edge. -0.0 is the
+        // interesting one: it is accepted, and an `i <= 0` guard would not be.
+        //
+        // The high end is `dims - 1` and it is **exclusive**: the result is the
+        // base cell of a trilinear interpolation, so the neighbour at `i + 1`
+        // has to exist and the last stored point cannot be a base. That is why
+        // [3, 3, 3] on a 4-point axis is refused while [2.5, 1, 1] is not --
+        // writing the edge table the other way round was the mistake that
+        // caught this test's first draft, which is why the case is written out
+        // rather than left as a bare boundary.
+        let edge_lo = [0.0, 0.0, 0.0];
+        let last_base = [(dims[0] - 2) as f64 + 0.5, 1.0, 1.0];
+        let first_refused = [dims[0] as f64 - 1.0, 1.0, 1.0];
+        let well_past = [dims[0] as f64, 1.0, 1.0];
+        for (label, p, want) in [
+            ("at the low edge", edge_lo, true),
+            ("at -0.0", [-0.0, 1.0, 1.0], true),
+            ("at the last usable base", last_base, true),
+            ("at the last stored point", first_refused, false),
+            ("one axis past the grid", well_past, false),
+        ] {
+            assert_eq!(
+                maps.fractional(p).is_some(),
+                want,
+                "GridMaps::fractional {label} {p:?} disagreed with the bound it is supposed \
+                 to enforce"
+            );
+        }
+    }
+
     /// The payload length `dims` implies, for a grid small enough to build.
     fn consistent_len(dims: [usize; 3]) -> usize {
         map_stride() * dims.iter().product::<usize>()
@@ -4105,7 +4214,7 @@ mod degenerate_axes {
     fn axis_probes(lo: f64, n: usize, spacing: f64) -> Vec<f64> {
         let hi = lo + (n as f64 - 1.0) * spacing;
         vec![
-            lo,                                        // the lower face: inclusive
+            lo, // the lower face: inclusive
             lo - spacing,
             lo - 1.0,
             0.0,
@@ -4113,7 +4222,7 @@ mod degenerate_axes {
             lo + spacing * 0.5,
             lo + (n as f64 - 1.0) * spacing * 0.5,
             f64::from_bits(hi.to_bits().wrapping_sub(1)), // last f64 below the face
-            hi,                                        // the upper face: exclusive
+            hi,                                           // the upper face: exclusive
             f64::from_bits(hi.to_bits().wrapping_add(1)), // first f64 above the face
             hi + spacing,
             hi + 1.0,
@@ -4176,13 +4285,7 @@ mod degenerate_axes {
         for dims in degenerate {
             for (min, spacing) in configs {
                 let max = [min[0] + 3.0, min[1] + 3.0, min[2] + 3.0];
-                let maps = maps_from_json(
-                    dims,
-                    min,
-                    spacing,
-                    max,
-                    consistent_len(dims),
-                );
+                let maps = maps_from_json(dims, min, spacing, max, consistent_len(dims));
                 assert_eq!(
                     maps.dims(),
                     dims,
@@ -4207,8 +4310,7 @@ mod degenerate_axes {
                                  clamp would stop holding the eight corner reads \
                                  inside the grid",
                                 dims.iter().copied().min().unwrap_or(0),
-                                (dims.iter().copied().min().unwrap_or(0) as u32)
-                                    .wrapping_sub(2)
+                                (dims.iter().copied().min().unwrap_or(0) as u32).wrapping_sub(2)
                             );
                             asked += 1;
                         }
@@ -4270,7 +4372,10 @@ mod degenerate_axes {
                 }
             }
         }
-        assert!(checked > 400, "only {checked} interior points carried the invariant");
+        assert!(
+            checked > 400,
+            "only {checked} interior points carried the invariant"
+        );
         eprintln!(
             "MEASURED: {asked} probe points over 8 degenerate dims x 2 origins, every \
              one refused; the same sweep on a legal [4,4,4] grid is answered \
@@ -4319,7 +4424,13 @@ mod degenerate_axes {
                 min[1] + (dims[1] - 1) as f64 * spacing[1],
                 min[2] + (dims[2] - 1) as f64 * spacing[2],
             ];
-            let maps = maps_from_json(dims, min, spacing, max, map_stride() * dims[0] * dims[1] * dims[2]);
+            let maps = maps_from_json(
+                dims,
+                min,
+                spacing,
+                max,
+                map_stride() * dims[0] * dims[1] * dims[2],
+            );
             // At `f32` resolution, because that is the only resolution the
             // kernel ever sees -- but a bounded window, because the number of
             // `f32` values along a 8.6 A axis is 1.8e7 and walking all of them

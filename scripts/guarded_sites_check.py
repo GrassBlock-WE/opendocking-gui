@@ -427,9 +427,9 @@ ROLE_FACTS: tuple[tuple[str, str, str], ...] = (
 )
 
 #: GATE-DECLARE 1
-#: sites: 10 unconditional + 0 guarded
+#: sites: 12 unconditional + 0 guarded
 #: guards: sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
-#: Ten, and none guarded, on purpose rather than by accident. Every check site
+#: Twelve, and none guarded, on purpose rather than by accident. Every check site
 #: below is a flat statement in `main()`, and the helpers return `(verdict,
 #: detail)` pairs instead of recording, so that no site in this file is one that
 #: could stop running -- which is the defect this file is about, and it would be
@@ -442,14 +442,23 @@ ROLE_FACTS: tuple[tuple[str, str, str], ...] = (
 #: has no permitted way to clear. The empty-string digest is sha256 of nothing,
 #: which is what a file with no guards hashes to.
 #: **The first version of this block said eight, and the census caught it.** Ten
-#: is the number of `check(` calls in `main()`: the census, the category table
+#: was the number of `check(` calls in `main()`: the census, the category table
 #: read from both ends, the environment inventory in both directions, the
 #: declared machine-reading names, the headline file, the file set, the two
 #: probes, and the tally. Two had been added without the number moving, which is
 #: exactly the failure the pin exists to catch, caught here by the pin rather
 #: than by a reader.
+#:
+#: **Ten -> twelve, and the two are the cross-auditor section.** Not a new axis
+#: of measurement: the same walk, asked a second question. The reason they are
+#: two checks and not one is that they can fail for unrelated reasons, and a
+#: single check over both would report "the two auditors disagree" whether what
+#: happened was a classification disagreement or a name that left a census.
+#: The two are flat `check(...)` statements in `main()` like every other site
+#: here, so the guarded column stays 0 and the digest does not move -- which is
+#: the only reason this edit was available without `--pin`.
 #: EXPECTED_CHECKS is measured from a run, not typed.
-EXPECTED_CHECKS = 10
+EXPECTED_CHECKS = 12
 
 CHECKS = 0
 FAILURES: list[str] = []
@@ -1594,46 +1603,596 @@ def probe_directions() -> tuple:
 
 
 # --------------------------------------------------------------------------
+# Axis 3: the two auditors, cross-checked
+# --------------------------------------------------------------------------
+
+#: The functions lifted out of `check_scripts_declare.py` for the cross-check.
+#: `_short` is here because `_sites_of` calls it, and a lift that left a called
+#: helper behind raises `NameError` on the first guard rather than answering --
+#: a loud failure, which is why it is listed rather than discovered.
+CROSS_LIFT_FUNCS = ("_short", "_sites_of")
+
+#: The two vocabularies this file has to keep apart, and what a reader is owed
+#: when they disagree.
+#:
+#: `check_scripts_declare.py` and this file both walk every `scripts/*.py` and
+#: both emit an unconditional column and a guarded column. They answer two
+#: different questions and **the two numbers are not supposed to meet**: one is
+#: a drift contract ("can this site stop running?"), the other feeds a leak
+#: detector ("which sites might fail to record?"). What is supposed to hold is
+#: narrower and is what the two checks below assert:
+#:
+#:   * **On the sites both of them see, the two must agree** -- or say which
+#:     construct difference explains the disagreement, out loud and counted.
+#:   * **The universes may differ, but only by a name set read off the code**,
+#:     and never in the direction that would blind this file to a site the
+#:     other one can see.
+#:
+#: **What is derived, and how.** Nothing in this section types a check-like
+#: name, a call-site count, or a guard construct. The auditor's name set is the
+#: tuple in its own filter expression, read out of its parse tree; the three
+#: lines the tracer watches are the three statements where its walk makes its
+#: own decisions; the constructs it treats as guards are the classes its own
+#: `isinstance` tests name, told apart from the ones that guard nothing by
+#: whether their body appends to `guards`. Change any of those in that file and
+#: the comparison below moves, because it is running that file's code.
+
+#: `(id, one line on what this section asserts)`, so a reader of the output can
+#: find the claim rather than the number. Not a table of results.
+CROSS_SECTIONS = (
+    ("shared-sites", "sites both censuses see, and where they are classified "
+                     "the same way"),
+    ("deliberate-difference", "the names only one census counts, and the "
+                              "constructs only one census models as a guard"),
+)
+
+
+def _call_name(node):
+    """`isinstance` if that is what this is, `ast.If` if it is that."""
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return node.attr
+    return None
+
+
+def _next_sibling(fn, node):
+    """The statement after `node` in whatever body holds it."""
+    for parent in ast.walk(fn):
+        for field in ("body", "orelse", "finalbody"):
+            lst = getattr(parent, field, None)
+            if isinstance(lst, list):
+                for i, x in enumerate(lst):
+                    if x is node and i + 1 < len(lst):
+                        return lst[i + 1]
+    return None
+
+
+def _declarer_constructs(fn):
+    """The AST classes the auditor's own walk treats as a guard, read off it.
+
+    **An `isinstance(p, X)` test counts as a guard exactly when its body
+    appends to `guards`.** That is the whole rule, and it is what separates the
+    four guards from the `ast.Module` test two lines below them, which only
+    breaks out of the walk. A name in a table here would be a second copy of a
+    decision that file has already made, and a second copy is the defect this
+    whole file is about.
+    """
+    out: dict[str, bool] = {}
+    for n in ast.walk(fn):
+        t = n.test if isinstance(n, ast.If) else None
+        if not (isinstance(t, ast.Call) and _call_name(t.func) == "isinstance"
+                and isinstance(t.args[0], ast.Name) and t.args[0].id == "p"):
+            continue
+        arg = t.args[1]
+        seq = arg.elts if isinstance(arg, ast.Tuple) else [arg]
+        appends = any(isinstance(x, ast.Call) and isinstance(x.func, ast.Attribute)
+                      and x.func.attr == "append" and isinstance(x.func.value, ast.Name)
+                      and x.func.value.id == "guards"
+                      for st in n.body for x in ast.walk(st))
+        for a in seq:
+            nm = _call_name(a)
+            if nm:
+                out[nm] = out.get(nm, False) or appends
+    return out
+
+
+def cross_lift():
+    """The auditor's `_sites_of`, lifted by AST, with its own shape read off it.
+
+    Same reasoning as `lift_role_of` and for the same reason: importing that
+    file runs its whole audit and exits, and re-implementing the walk would put
+    two readers of "what is a check site" in this tree, which is the thing the
+    cross-check exists to catch rather than to add to.
+
+    **Every locator here fails loudly.** A name, a guard, or a shape that is not
+    found uniquely raises, and the two checks below turn that into a red --
+    because the failure mode of a comparison that quietly compares nothing is a
+    green gate, which is the one thing worse than a red one.
+    """
+    tree = _auditor_tree()
+    body, fn = [], None
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name in CROSS_LIFT_FUNCS:
+            body.append(node)
+            if node.name == "_sites_of":
+                fn = node
+    if fn is None or len(body) != len(CROSS_LIFT_FUNCS):
+        raise ValueError("the auditor no longer defines %s at module level, or "
+                         "defines one of them twice" % (CROSS_LIFT_FUNCS,))
+    filt, classify, raw = None, None, None
+    for n in ast.walk(fn):
+        if isinstance(n, ast.If) and isinstance(n.test, ast.Compare):
+            ops, cmp_ = n.test.ops, n.test.comparators[0]
+            if (len(ops) == 1 and type(ops[0]).__name__ == "NotIn"
+                    and isinstance(cmp_, ast.Tuple)
+                    and all(isinstance(e, ast.Constant) and isinstance(e.value, str)
+                            for e in cmp_.elts)):
+                filt = (n, tuple(e.value for e in cmp_.elts))
+        if isinstance(n, ast.If) and isinstance(n.test, ast.Name) and n.test.id == "guards":
+            classify = n
+        if (isinstance(n, ast.Assign) and isinstance(n.value, ast.ListComp)
+                and any(isinstance(t, ast.Name) and t.id == "guards"
+                        for t in n.targets)):
+            raw = n
+    if filt is None or classify is None or raw is None:
+        raise ValueError("the auditor's _sites_of no longer has a name filter, "
+                         "a `if guards:` decision or a guard exclusion this "
+                         "could read; the three statements it watches are found "
+                         "by shape, and the shape moved")
+    accept = _next_sibling(fn, filt[0])
+    if accept is None:
+        raise ValueError("the name filter is the last statement in its body, so "
+                         "there is no line after it to read the accepted site on")
+    ns = {"__name__": "guarded_sites_census_lift", "ast": ast, "Path": Path,
+          "__file__": str(AUDITOR)}
+    mod = ast.Module(body=body, type_ignores=[])
+    ast.fix_missing_locations(mod)
+    exec(compile(mod, "lifted_from_check_scripts_declare", "exec"), ns)
+    return {"ns": ns, "calls": filt[1], "accept": accept.lineno,
+            "classify": classify.lineno, "raw": raw.lineno,
+            "constructs": _declarer_constructs(fn)}
+
+
+def declarer_sites(src_text: str, lift) -> tuple:
+    """The auditor's census of one file, one row per site, off its own loop.
+
+    **Why a tracer at all.** `_sites_of` returns two numbers and a sorted list
+    of guard strings. That is enough to compare totals and not enough to name a
+    site, and "a disagreement somewhere" is not a report. So the lifted
+    function is executed with a line tracer on the three lines where it makes
+    its own decisions, and each row is read out of its frame at the moment it
+    makes it: the call it accepted, the guards it had collected *before* it
+    dropped the ones it excludes, and the list it was holding when it decided
+    guarded-or-not. The name set is the auditor's own tuple, read off its own
+    filter node, so nothing here spells a check-like name and a change to that
+    tuple moves this comparison.
+
+    **The `continue` on the filter's own line is why the watch is on a
+    successor statement and not on "any line after the filter".** A rejected
+    site fires a line event on the `continue` and one on the loop head, both of
+    which sit below the filter, so watching "past the filter" collects the
+    rejections too. The first version of this did that and over-counted 35
+    sites in a file the walk had called zero; the self-check below is what
+    turns that class of mistake into a red rather than a number.
+
+    **The cost is real and is paid on purpose.** A line event fires for every
+    statement the walk executes: about 20s over this tree against well under a
+    second untraced, which is most of what this gate now costs. What it buys is
+    `path:line` for both sides of every disagreement. Only the lifted frame is
+    traced -- every other frame is released on arrival -- and `finally` clears
+    the tracer whatever the walk does, so nothing else in the process is left
+    instrumented.
+    """
+    want = {lift["accept"]: "site", lift["classify"]: "kept", lift["raw"]: "raw"}
+    log = []
+    def tracer(frame, event, arg):
+        if frame.f_code.co_name != "_sites_of":
+            return None
+        if event == "line" and frame.f_lineno in want:
+            g = frame.f_locals.get("guards")
+            log.append((want[frame.f_lineno], frame.f_locals.get("child"),
+                        list(g) if isinstance(g, list) else None))
+        return tracer
+    sys.settrace(tracer)
+    try:
+        uncond, guards = lift["ns"]["_sites_of"](src_text)
+    finally:
+        sys.settrace(None)
+    rows, cur = [], None
+    for what, child, g in log:
+        if what == "site":
+            cur = {"line": child.value.lineno, "call": child.value.func.id,
+                   "raw": None, "guards": None}
+            rows.append(cur)
+        elif what == "raw" and cur is not None:
+            cur["raw"] = g or []
+        elif what == "kept" and cur is not None:
+            cur["guards"] = g or []
+    # **The trace is validated against the walk's own return value on every
+    # file**, in all three columns. A tracer that read the wrong lines would
+    # otherwise produce a confident, wrong, smaller number.
+    problems = []
+    if len(rows) != uncond + len(guards):
+        problems.append("the trace read %d site(s) and the walk counted %d"
+                        % (len(rows), uncond + len(guards)))
+    if sum(1 for r in rows if r["guards"]) != len(guards):
+        problems.append("the trace read %d guarded and the walk kept %d"
+                        % (sum(1 for r in rows if r["guards"]), len(guards)))
+    if any(r["raw"] is None for r in rows):
+        problems.append("%d site(s) never reached the exclusion line, so the "
+                        "pre-exclusion guard list was not read for them"
+                        % sum(1 for r in rows if r["raw"] is None))
+    return rows, (uncond, len(guards)), problems
+
+
+def _construct_categories() -> dict:
+    """Which categories each guard construct can produce, read off `CATEGORIES`.
+
+    `CATEGORIES` names its construct in its **first** column -- "if", "try",
+    "for/while", "with", "anything else", the second being the effect on the
+    result -- and `GUARDING` names the AST classes this walk goes up through. A
+    class is matched to the categories whose construct column contains its own
+    name with a leading `Async` dropped, because `AsyncFor` is the async
+    spelling of one guard and the table has no separate row for it.
+
+    **Checked in both directions.** Every construct in `GUARDING` must be
+    explained by at least one category (`check_cross_agreement` reds if one is
+    not), so this map cannot quietly stop covering the walk's own model. It is
+    the one mapping in this file that is written rather than lifted, and it maps
+    two vocabularies rather than copying a number, which is the difference.
+    Reading the wrong column of that table made all five shared constructs
+    unmapped on the first run, and the check caught it as a red rather than as
+    208 unexplained disagreements.
+    """
+    out: dict[str, tuple] = {}
+    for cls in GUARDING:
+        base = cls.__name__.lower()
+        if base.startswith("async"):
+            base = base[len("async"):]
+        out[cls.__name__] = tuple(k for k, v in CATEGORIES.items()
+                                  if base in re.findall(r"[a-z]+", v[0].lower()))
+    return out
+
+
+def cross_audit(scripts_dir: Path):
+    """Both censuses of every file, side by side. No count in this is typed."""
+    try:
+        lift = cross_lift()
+    except Exception as exc:                      # noqa: BLE001 -- a red, not a skip
+        return {"lift_error": "%s: %s" % (type(exc).__name__, exc)}
+    cat_of = _construct_categories()
+    unmapped = sorted(c.__name__ for c in GUARDING if not cat_of[c.__name__])
+    d_constructs = {k for k, v in lift["constructs"].items() if v}
+    modelled = {c.__name__ for c in GUARDING}
+    # Construct-only-here: this walk guards on it, the auditor does not model
+    # it as a guard at all. Every classification disagreement has to be
+    # explained by one of these, or it is a FAIL -- see below.
+    only_here = sorted(modelled - d_constructs)
+    # The other direction, and it is a red: a construct the auditor guards on
+    # that this walk does not model would be a whole shape of site this file
+    # cannot see, which is the defect this file exists to move out of.
+    only_there = sorted(d_constructs - modelled)
+
+    rows, tracer, unreadable = [], [], []
+    seen_d, seen_g = set(), set()
+    for path in sorted(scripts_dir.glob("*.py")):
+        try:
+            src_text = read(path)
+        except Exception as exc:                  # noqa: BLE001 -- reported below
+            unreadable.append("%s: %s" % (path.name, exc))
+            continue
+        try:
+            drows, (uncond, nguard), problems = declarer_sites(src_text, lift)
+        except SyntaxError as exc:
+            unreadable.append("%s: does not parse (%s)" % (path.name, exc))
+            continue
+        if problems:
+            tracer.extend("%s: %s" % (path.name, p) for p in problems)
+        grows, gwhy = classify_file(src_text, path.name)
+        if grows is None:
+            unreadable.append(gwhy)
+            continue
+        dd = {(r["line"], r["call"]): r for r in drows}
+        gg = {(r["line"], r["call"]): r for r in grows}
+        for r in drows:
+            seen_d.add(r["call"])
+        for r in grows:
+            seen_g.add(r["call"])
+        both = sorted(set(dd) & set(gg))
+        dis = []
+        for key in both:
+            dr, gr = dd[key], gg[key]
+            d_guard = bool(dr["guards"])
+            g_guard = bool(gr["chain"]) or bool(gr["odd"])
+            if d_guard == g_guard:
+                continue
+            cats = [c for c, _, _, _ in gr["chain"]]
+            # Two accountings, both read from the code rather than declared.
+            # (1) the auditor had a guard and then dropped it, which is its
+            #     own exclusion list doing what it says; (2) every construct
+            #     this walk went up through is one the auditor does not model.
+            # Anything else is a site the two readers disagree about for a
+            # reason neither code path accounts for, and it is a FAIL.
+            if dr["raw"] and not dr["guards"]:
+                why = "the auditor dropped a guard test its own source excludes"
+            elif cats and all(any(c in cat_of.get(k, ()) for k in only_here)
+                             for c in cats):
+                why = "guarded here on %s, not modelled there" % "/".join(
+                    sorted({k for c in cats for k in only_here
+                            if c in cat_of.get(k, ())}))
+            else:
+                why = None
+            dis.append({"line": key[0], "call": key[1], "why": why,
+                        "d_guards": dr["guards"] or [], "d_raw": dr["raw"] or [],
+                        "g_cats": cats,
+                        "g_text": " | ".join("%s %s" % (c, t) for c, t, _, _
+                                             in gr["chain"]) or
+                                  ("unclassified" if gr["odd"] else "-")})
+        d_only = sorted(set(dd) - set(gg))
+        g_only = sorted(set(gg) - set(dd))
+        by_name: dict[str, int] = {}
+        for key in g_only:
+            by_name[gg[key]["call"]] = by_name.get(gg[key]["call"], 0) + 1
+        rows.append({"file": path.name, "both": len(both), "d_only": len(d_only),
+                     "g_only": len(g_only), "dis": dis, "d_uncond": uncond,
+                     "d_guard": nguard,
+                     "g_uncond": sum(1 for r in grows if not r["chain"] and not r["odd"]),
+                     "g_guard": sum(1 for r in grows if r["chain"] or r["odd"]),
+                     "g_only_by_name": by_name,
+                     "d_only_sites": ["%s:%d" % (path.name, k[0]) for k in d_only]})
+    return {
+        "lift_error": None,
+        "calls_declarer": lift["calls"], "calls_this": CALLS,
+        "seen_declarer": sorted(seen_d), "seen_this": sorted(seen_g),
+        "unmapped_constructs": unmapped,
+        "only_here_constructs": only_here, "only_there_constructs": only_there,
+        "rows": rows,
+        "shared": sum(r["both"] for r in rows),
+        "agreed": sum(r["both"] - len(r["dis"]) for r in rows),
+        "disagreed": sum(len(r["dis"]) for r in rows),
+        "unexplained": ["%s:%d" % (r["file"], d["line"])
+                        for r in rows for d in r["dis"] if d["why"] is None],
+        "d_only": sum(r["d_only"] for r in rows),
+        "g_only": sum(r["g_only"] for r in rows),
+        "g_only_by_name": {k: v for r in rows
+                           for k, v in r["g_only_by_name"].items()},
+        "d_only_sites": [s for r in rows for s in r["d_only_sites"]],
+        "tracer_problems": tracer, "unreadable": unreadable,
+    }
+
+
+def check_cross_agreement(x) -> tuple:
+    """The shared universe, and the equality asserted on it.
+
+    **The claim: on every site both censuses see, the two readers classify the
+    site the same way** -- unless one of the two accountings the code itself
+    supplies explains the disagreement, and the explanation is printed. A
+    disagreement with no accounting is a FAIL naming the site.
+
+    **What the accounting is, and why it is not a licence.** It is narrow on
+    purpose and both halves are read out of a code path rather than written
+    here:
+
+    * *the auditor dropped a guard test its own source excludes* -- measured by
+      comparing the guards it had collected before its exclusion list with the
+      ones it kept, both read off its own frame.
+    * *guarded here on a construct the auditor does not model* -- measured
+      against the set difference of the two code paths' own construct sets.
+
+    The second half has a measured size today, and it is not small: it is every
+    `with` site in the tree, a couple of hundred of them across five files,
+    because the auditor's walk does not go up through a context manager. **The
+    number is on the run, not here**, because a number written in a comment is
+    a number that rots, and the whole reason this section exists is that two
+    readers' numbers used to be able to rot apart silently. That is a real
+    difference of instrument between the two files and it is **not** a
+    disagreement about a site -- the two are answering two questions, and both
+    files' headers say so. It is recorded as a number on every run rather than
+    as a tolerance, so that it is one edit away from being visible, and so that
+    if it ever grows for a reason nobody wrote down, the growth is a red rather
+    than a slower gate.
+    """
+    if x.get("lift_error"):
+        return False, ("the auditor's census could not be lifted, so nothing "
+                       "was compared: %s" % x["lift_error"])
+    per_file = ["       %-38s %5d shared, %d agree, %d differ, %d only here, "
+                "%d only there" % (r["file"], r["both"],
+                                   r["both"] - len(r["dis"]), len(r["dis"]),
+                                   r["g_only"], r["d_only"])
+                for r in x["rows"] if r["dis"] or r["g_only"] or r["d_only"]]
+    lines = ["       %s" % ln for ln in per_file] or ["       (no file differs)"]
+    lines.append("       constructs only this walk guards on: %s -- and every "
+                 "disagreement below is on one of them"
+                 % (x["only_here_constructs"] or "none"))
+    lines.append("       constructs the auditor guards on that this walk does "
+                 "not model: %s"
+                 % (x["only_there_constructs"] or "none"))
+    lines.append("       constructs in GUARDING no category can explain: %s"
+                 % (x["unmapped_constructs"] or "none"))
+    # Every disagreement is named. **One `path:line`, not two**: the two
+    # censuses are talking about one site at one line, so there is one location
+    # and two verdicts, and printing it twice would imply they were two sites.
+    for r in x["rows"]:
+        for d in r["dis"]:
+            lines.append("       %s:%d %s  --  auditor: %s  |  this walk: %s  |  "
+                         "because: %s"
+                         % (r["file"], d["line"], d["call"],
+                            " | ".join(d["d_guards"]) or "unconditional",
+                            d["g_text"], d["why"]))
+    detail = ("%d site(s) are in both censuses and %d of them are classified the "
+              "same way by both. The two numbers this file and the auditor print "
+              "are not meant to meet -- one is a drift contract on a declared "
+              "census, this one feeds ENV_REMOVALS and the category table -- and "
+              "both files' headers say so. What must hold is the narrower thing "
+              "asserted here: on the shared universe the two readers do not "
+              "contradict each other, and where they do, the accounting is "
+              "printed rather than tolerated.\n       %d disagreement(s), every "
+              "one named:\n%s\n       %s"
+              % (x["shared"], x["agreed"], x["disagreed"], "\n".join(lines),
+                 "UNEXPLAINED: %s -- a site the two readers are reading "
+                 "differently, and nothing in either code path accounts for it"
+                 % x["unexplained"] if x["unexplained"] else
+                 "Every disagreement is accounted for by a difference the two "
+                 "code paths state themselves, so none of them is a site the two "
+                 "readers are reading differently."))
+    ok = (not x["unexplained"] and not x["unmapped_constructs"]
+          and not x["tracer_problems"] and not x["unreadable"])
+    if not ok:
+        detail += ("  PROBLEMS: unexplained=%s unmapped_constructs=%s "
+                   "tracer=%s unreadable=%s"
+                   % (x["unexplained"] or "none", x["unmapped_constructs"] or "none",
+                      x["tracer_problems"] or "none", x["unreadable"] or "none"))
+    return ok, detail
+
+
+def check_cross_difference(x) -> tuple:
+    """The deliberate difference, named, counted, and read off the code.
+
+    **Two differences are allowed, and both are derived rather than declared.**
+
+    * **The name sets.** The auditor counts four spellings; this file counts
+      those four plus `skip` and `pixel_check`. The extra names are in *this*
+      file's set and not the auditor's, and the sites they account for are
+      counted from the walk rather than transcribed -- so editing either tuple
+      moves this number, and a name dropped from this file's tuple turns the
+      other direction red below instead of quietly shrinking the census.
+    * **The construct sets.** This walk models `with` as a guard; the auditor
+      does not go up through one. The difference is the set difference of the
+      two files' own `GUARDING` and `isinstance` tests, not a list written here.
+
+    **The direction is argued, and it is labelled as an argument.** The
+    measurement -- how many sites the wider set sees -- is derived. The claim
+    that the wider set is the right one for *this* file is a reading: this file
+    asks which sites might fail to record a result, and a `skip` and a
+    `pixel_check` both record one, so a census that could not see them would be
+    blind to exactly the sites it exists to find. The auditor asks a different
+    question -- can this site stop running, measured against a declared census
+    -- and its four names are the right four for it. **A gate that printed that
+    argument as a measurement would be the failure this file is about**, so it
+    is printed as an argument and the measurement is printed beside it.
+    """
+    if x.get("lift_error"):
+        return False, ("the auditor's name set could not be read, so no "
+                       "difference is recorded: %s" % x["lift_error"])
+    only_here = sorted(set(x["calls_this"]) - set(x["calls_declarer"]))
+    only_there = sorted(set(x["calls_declarer"]) - set(x["calls_this"]))
+    seen_only_here = sorted(set(x["seen_this"]) - set(x["seen_declarer"]))
+    # A name in the auditor's set that this file does not count is a red: this
+    # walk is a leak detector, and a whole spelling it cannot see is a hole in
+    # the detector rather than a difference of opinion.
+    detail = ("the auditor's filter, read out of its own parse tree, is %s; this "
+              "file's CALLS is %s. Only this file counts: %s. Only the auditor "
+              "counts: %s.\n       The wider set is this file's, and that is the "
+              "right way round *for this file*, which asks which sites might "
+              "fail to record a result -- and that sentence is a reading, not a "
+              "measurement. The auditor asks whether a site can stop running, "
+              "measured against a declared census, and its four names are the "
+              "right four for that question. Neither number is meant to reach "
+              "the other.\n       Measured: %d site(s) are in this census and not "
+              "the auditor's, accounted for by %s; the names were seen at run "
+              "time: %s. Each is a spelling that records a result, so a leak "
+              "detector built on the narrower set would be blind to exactly the "
+              "sites it exists to find.\n       Site counts, all derived: this "
+              "walk %d unconditional / %d guarded over %d, the auditor %d "
+              "unconditional / %d guarded over %d.\n       %d site(s) are in the "
+              "auditor's census and not this file's: %s. %d construct(s) are "
+              "guarded here and not there: %s; %d the other way: %s."
+              % (x["calls_declarer"], x["calls_this"], only_here or "none",
+                 only_there or "none", x["g_only"],
+                 ", ".join("%s=%d" % (k, v)
+                           for k, v in sorted(x["g_only_by_name"].items()))
+                 or "no such site",
+                 seen_only_here or "none",
+                 sum(r["g_uncond"] for r in x["rows"]),
+                 sum(r["g_guard"] for r in x["rows"]),
+                 sum(r["g_uncond"] + r["g_guard"] for r in x["rows"]),
+                 sum(r["d_uncond"] for r in x["rows"]),
+                 sum(r["d_guard"] for r in x["rows"]),
+                 sum(r["d_uncond"] + r["d_guard"] for r in x["rows"]),
+                 x["d_only"], x["d_only_sites"][:20] or "none",
+                 len(x["only_here_constructs"]), x["only_here_constructs"] or "none",
+                 len(x["only_there_constructs"]), x["only_there_constructs"] or "none"))
+    ok = not only_there and not x["d_only"] and not x["only_there_constructs"] \
+        and not x["tracer_problems"] and not x["unreadable"]
+    if not ok:
+        detail += ("  PROBLEMS: the auditor counts %s and this file does not, "
+                   "which is a hole in the detector rather than a difference of "
+                   "opinion; %d site(s) it sees and this file does not (%s); it "
+                   "guards on %s and this walk does not model them."
+                   % (only_there or "none", x["d_only"],
+                      x["d_only_sites"][:20] or "none",
+                      x["only_there_constructs"] or "none"))
+    return ok, detail
+
+
+# --------------------------------------------------------------------------
 # main
 # --------------------------------------------------------------------------
+
 
 def main() -> int:
     section("the census: every check-like site, and the guard on each")
     a = audit(SCRIPTS)
-    ok, detail = check_census(a)
-    check(ok, "every in-scope file parses and every site in it is classified",
-          detail)
+    # One binding per check, not a shared `ok` reused down the function. The
+    # verdict-shape sweep resolves a `check(ok, ...)` site by finding the single
+    # assignment its first argument came from, so a name written eleven times
+    # leaves every one of those sites unreadable -- and an unreadable verdict is
+    # a red against a cap of zero, not a stylistic note. The names below say
+    # which check they carry, which is what made the collision findable.
+    census_ok, census_detail = check_census(a)
+    check(census_ok, "every in-scope file parses and every site in it is classified",
+          census_detail)
 
     section("the category table, read from both ends")
-    ok, detail = check_categories_both_sides(a)
-    check(ok, "every category in the table is exercised by a site that exists",
-          detail)
+    categories_ok, categories_detail = check_categories_both_sides(a)
+    check(categories_ok,
+          "every category in the table is exercised by a site that exists",
+          categories_detail)
 
     section("the machine-reading guards, and the inventory of the ones that remove")
-    ok, detail = check_env_removals_declared(a)
-    check(ok, "no machine-reading guard removes a result without a declared reason",
-          detail)
-    ok, detail = check_env_removals_fresh(a)
-    check(ok, "every declared removal still matches a guard that exists", detail)
-    ok, detail = check_env_names_read(a)
-    check(ok, "every declared machine-reading name is read by some guard", detail)
+    removals_ok, removals_detail = check_env_removals_declared(a)
+    check(removals_ok,
+          "no machine-reading guard removes a result without a declared reason",
+          removals_detail)
+    fresh_ok, fresh_detail = check_env_removals_fresh(a)
+    check(fresh_ok, "every declared removal still matches a guard that exists",
+          fresh_detail)
+    names_ok, names_detail = check_env_names_read(a)
+    check(names_ok, "every declared machine-reading name is read by some guard",
+          names_detail)
 
     section("%s: the headless question, per guard" % HEADLINE)
-    ok, detail = check_headline(a)
-    check(ok, "no guard in the headline file can be false headless with nothing "
-              "else failing", detail)
+    headless_ok, headless_detail = check_headline(a)
+    check(headless_ok,
+          "no guard in the headline file can be false headless with nothing "
+          "else failing", headless_detail)
 
     section("the file set")
-    ok, detail = check_role_agreement(a)
-    check(ok, "the derived file set agrees with four independent derivations",
-          detail)
+    roles_ok, roles_detail = check_role_agreement(a)
+    check(roles_ok, "the derived file set agrees with four independent derivations",
+          roles_detail)
 
     section("the probes")
-    ok, detail = probe_categories()
-    check(ok, "every category in the table is reachable, proven by building it",
-          detail)
-    ok, detail = probe_directions()
-    check(ok, "the census can be made to fail, in all four directions", detail)
+    probe_cats_ok, probe_cats_detail = probe_categories()
+    check(probe_cats_ok,
+          "every category in the table is reachable, proven by building it",
+          probe_cats_detail)
+    directions_ok, directions_detail = probe_directions()
+    check(directions_ok,
+          "the census can be made to fail, in all four directions",
+          directions_detail)
+
+    section("the two auditors, cross-checked (%s)"
+            % ", ".join("%s: %s" % (i, w) for i, w in CROSS_SECTIONS))
+    x = cross_audit(SCRIPTS)
+    cross_ok, cross_detail = check_cross_agreement(x)
+    check(cross_ok, "every site both censuses see is classified the same way by both",
+          cross_detail)
+    crossdiff_ok, crossdiff_detail = check_cross_difference(x)
+    check(crossdiff_ok,
+          "the two censuses differ by a name set read off the code, and "
+          "only by one", crossdiff_detail)
 
     section("the tally")
     check(

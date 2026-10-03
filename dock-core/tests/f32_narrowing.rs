@@ -89,6 +89,17 @@ fn translated(x: f64) -> Conformation {
 ///
 /// A per-axis guard budgets one penalty per axis coordinate, and a diagonal
 /// escape spends three, so this is the fixture that tells the two apart.
+///
+/// **Why this is `#[cfg]`-gated rather than `#[allow(dead_code)]`.** The only
+/// caller is `the_f32_boundary_is_bracketed_and_the_guard_sits_on_the_safe_side_of_it`,
+/// which is itself behind `#[cfg(feature = "gpu")]`, so in a build without the
+/// feature this helper genuinely has no caller. Gating the item states that
+/// fact; silencing it would leave a reader unable to tell "the helper is
+/// unused" from "the measurement did not exist", which is the distinction the
+/// rest of this repository goes out of its way to preserve. The gate and its
+/// one caller move together, because gating the caller alone would turn this
+/// `dead_code` warning into an unresolved name in the non-`gpu` build.
+#[cfg(feature = "gpu")]
 fn translated_diagonal(x: f64) -> Conformation {
     let mut v = vec![0.0f64; 6];
     v[0] = x;
@@ -99,9 +110,20 @@ fn translated_diagonal(x: f64) -> Conformation {
 
 /// A linear chain of `n` carbons, so `translated(x)` puts all `n` atoms out of
 /// the box on one face and the kernel's reduction sums `n` penalty terms.
+///
+/// Gated for the reason given on `translated_diagonal`: reachable only from
+/// the bracketing test, which is itself device-gated.
+#[cfg(feature = "gpu")]
 fn n_atom_ligand(n: usize) -> dock_core::ligand::Ligand {
     let atoms: Vec<Atom> = (0..n)
-        .map(|i| Atom::new(i as u32 + 1, [i as f64 * 1.5, 0.0, 0.0], Element::C, AtomType::CH))
+        .map(|i| {
+            Atom::new(
+                i as u32 + 1,
+                [i as f64 * 1.5, 0.0, 0.0],
+                Element::C,
+                AtomType::CH,
+            )
+        })
         .collect();
     let bonds: Vec<(usize, usize)> = (0..n.saturating_sub(1)).map(|i| (i, i + 1)).collect();
     let mol = Molecule::from_bonds(atoms, &bonds).expect("chain molecule");
@@ -114,12 +136,20 @@ fn n_atom_ligand(n: usize) -> dock_core::ligand::Ligand {
 /// This is the *whole row*, and it is the quantity the narrowing has to
 /// survive. Written as the arithmetic it is rather than as a number so that a
 /// change to the ceiling cannot quietly leave the test pinning the old one.
+///
+/// Gated for the reason given on `translated_diagonal`. Its callers are the two
+/// bracketing helpers below and the bracketing test, all three of which are
+/// device-gated, so the whole chain is gated as one unit.
+#[cfg(feature = "gpu")]
 fn row_term_f32(penalty: f64, axes: f64, atoms: f64, p: f64) -> f32 {
     (penalty * axes * atoms * p.abs()) as f32
 }
 
 /// The largest magnitude this file's probes use, chosen from the arithmetic
 /// rather than typed: the largest `f64` whose `f32` row term is still finite.
+///
+/// Gated for the reason given on `translated_diagonal`.
+#[cfg(feature = "gpu")]
 fn largest_runnable(penalty: f64, axes: f64, atoms: f64) -> f64 {
     let mut lo = 0.0f64;
     let mut hi = 1.0e39f64;
@@ -135,6 +165,9 @@ fn largest_runnable(penalty: f64, axes: f64, atoms: f64) -> f64 {
 }
 
 /// The smallest magnitude this file's probes use: the first one that overflows.
+///
+/// Gated for the reason given on `translated_diagonal`.
+#[cfg(feature = "gpu")]
 fn smallest_overflowing(penalty: f64, axes: f64, atoms: f64) -> f64 {
     let mut lo = 0.0f64;
     let mut hi = 1.0e39f64;
@@ -148,6 +181,25 @@ fn smallest_overflowing(penalty: f64, axes: f64, atoms: f64) -> f64 {
     }
     hi
 }
+
+/// One row of the bracketing table: a label, the ligand, the conformation
+/// builder, how many axes leave the box, and how many atoms the reduction
+/// sums.
+///
+/// Named rather than written inline because the inline form is a five-element
+/// tuple of a `&str`, a `&Ligand`, a `fn` pointer and two `f64`s, which is
+/// past the point where a reader can hold the row in their head -- and the
+/// reader of this table is the whole point of the table. `clippy::type_complexity`
+/// says the same thing about the same line, and this is its own prescription:
+/// factor the type out.
+#[cfg(feature = "gpu")]
+type Shape<'a> = (
+    &'a str,
+    &'a dock_core::ligand::Ligand,
+    fn(f64) -> Conformation,
+    f64,
+    f64,
+);
 
 /// **The boundary, bracketed, on every shape the shader can be handed.**
 ///
@@ -178,8 +230,12 @@ fn the_f32_boundary_is_bracketed_and_the_guard_sits_on_the_safe_side_of_it() {
     // (label, ligand, conformation builder, axes out, atoms summed)
     let one = ligand();
     let four = n_atom_ligand(4);
-    assert_eq!(four.len(), 4, "the 4-atom fixture must really have four atoms");
-    let shapes: Vec<(&str, &dock_core::ligand::Ligand, fn(f64) -> Conformation, f64, f64)> = vec![
+    assert_eq!(
+        four.len(),
+        4,
+        "the 4-atom fixture must really have four atoms"
+    );
+    let shapes: Vec<Shape<'_>> = vec![
         ("one atom, one axis", &one, translated, 1.0, 1.0),
         ("one atom, diagonal", &one, translated_diagonal, 3.0, 1.0),
         ("four atoms, one axis", &four, translated, 1.0, 4.0),
@@ -201,20 +257,28 @@ fn the_f32_boundary_is_bracketed_and_the_guard_sits_on_the_safe_side_of_it() {
         println!(
             "{label}: just inside  {run:e} A -> backend={backend_in:?} skip={:?} gpu={:e}",
             skip_in.as_ref().map(|s| s.reason),
-            gpu.get(0).copied().unwrap_or(f64::NAN)
+            gpu.first().copied().unwrap_or(f64::NAN)
         );
         if skip_in.is_some() {
             // Declining *inside* the safe range is allowed -- it is conservative
             // -- but it must say so, and it must hand back the CPU's answer.
-            assert_eq!(format!("{backend_in:?}"), "Cpu", "{label}: a decline runs on the CPU");
-            assert_eq!(gpu, cpu, "{label}: a decline must return the CPU's numbers exactly");
+            assert_eq!(
+                format!("{backend_in:?}"),
+                "Cpu",
+                "{label}: a decline runs on the CPU"
+            );
+            assert_eq!(
+                gpu, cpu,
+                "{label}: a decline must return the CPU's numbers exactly"
+            );
         } else {
             assert!(
                 gpu.first().copied().unwrap_or(f64::NAN).is_finite(),
                 "{label}: at {run:e} A, just inside the f32 ceiling, the GPU returned {:?} \
                  against the CPU's {:?} -- a non-finite answer on a row that is still returned \
                  and still ranked",
-                gpu.get(0), cpu.get(0)
+                gpu.first(),
+                cpu.first()
             );
         }
 
@@ -222,9 +286,7 @@ fn the_f32_boundary_is_bracketed_and_the_guard_sits_on_the_safe_side_of_it() {
         let (_, backend_out, skip_out) =
             evaluate_population(lig, &m, &scoring, &[place(over)], true);
         let reason = skip_out.as_ref().map(|s| s.reason);
-        println!(
-            "{label}: just outside {over:e} A -> backend={backend_out:?} skip={reason:?}"
-        );
+        println!("{label}: just outside {over:e} A -> backend={backend_out:?} skip={reason:?}");
         assert!(
             skip_out.is_some(),
             "{label}: at {over:e} A the row term is {:#e} in f32, which is an infinity, and the \
@@ -233,7 +295,11 @@ fn the_f32_boundary_is_bracketed_and_the_guard_sits_on_the_safe_side_of_it() {
              that is still returned and still ranked",
             row_term_f32(penalty, axes, atoms, over)
         );
-        assert_eq!(format!("{backend_out:?}"), "Cpu", "{label}: a decline runs on the CPU");
+        assert_eq!(
+            format!("{backend_out:?}"),
+            "Cpu",
+            "{label}: a decline runs on the CPU"
+        );
         let r = reason.unwrap_or_default();
         assert!(
             r.contains("f32"),
@@ -241,7 +307,6 @@ fn the_f32_boundary_is_bracketed_and_the_guard_sits_on_the_safe_side_of_it() {
         );
     }
 }
-
 
 /// The boundary itself, stated as arithmetic rather than as a claim.
 ///

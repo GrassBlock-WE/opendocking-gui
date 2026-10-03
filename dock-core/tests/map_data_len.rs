@@ -144,7 +144,10 @@ fn a_grid_on_the_ceiling_with_a_short_payload_is_still_refused() {
     assert_eq!(expected, 4_294_967_280);
     check_gpu_dims(dims).expect("this dims is arithmetically legal: the point ceiling holds");
     for d in dims {
-        assert!(d >= 2, "axis {d} is degenerate, so this would not be the case under test");
+        assert!(
+            d >= 2,
+            "axis {d} is degenerate, so this would not be the case under test"
+        );
     }
 
     let doc = map_doc(dims, 160);
@@ -278,8 +281,9 @@ fn the_three_rules_are_not_the_same_rule() {
     // 2. The shape. Every axis must hold two points. Payload is correct.
     for dims in [[1usize, 4, 4], [4, 0, 4], [4, 4, 1]] {
         let want = s * dims.iter().product::<usize>();
-        check_gpu_data_len(dims, want)
-            .unwrap_or_else(|e| panic!("dims {dims:?} with {want} values is a length-legal grid: {e}"));
+        check_gpu_data_len(dims, want).unwrap_or_else(|e| {
+            panic!("dims {dims:?} with {want} values is a length-legal grid: {e}")
+        });
         assert!(
             check_gpu_dims(dims).is_ok(),
             "dims {dims:?} is under the ceiling, so only the shape rule can refuse it"
@@ -366,8 +370,8 @@ fn the_wire_form_keeps_the_field_names_the_format_uses() {
     // as 0. "This map predates the counter" is a weaker claim than "every atom
     // was recognised", and it is not the same claim as an error.
     let maps: GridMaps = serde_json::from_str(&doc).expect("a pre-counter map file loads");
-    let round: GridMaps = serde_json::from_value(value)
-        .expect("a GridMaps round-trips through its wire form");
+    let round: GridMaps =
+        serde_json::from_value(value).expect("a GridMaps round-trips through its wire form");
     assert_eq!(
         round.data_len(),
         maps.data_len(),
@@ -400,7 +404,8 @@ fn the_expected_length_follows_map_stride() {
     check_gpu_data_len(dims, want).expect("the implied length is accepted");
     let e = check_gpu_data_len(dims, want - 1).expect_err("one value short is refused");
     assert!(
-        e.to_string().contains(&format!("must hold exactly {want} (")),
+        e.to_string()
+            .contains(&format!("must hold exactly {want} (")),
         "the expected length must track map_stride() = {s}; got: {e}"
     );
     assert_eq!(
@@ -410,7 +415,6 @@ fn the_expected_length_follows_map_stride() {
     );
     eprintln!("MEASURED: dims {dims:?} imply {want} values at map_stride() = {s}");
 }
-
 
 /// Both `u128` overflow arms are reachable, and each says which one fired.
 ///
@@ -454,9 +458,15 @@ fn the_u128_overflow_arms_are_reached_and_named() {
     if usize::BITS >= 64 {
         let dims = [usize::MAX, usize::MAX, usize::MAX];
         // The precondition, proved rather than assumed: the first two axes fit.
+        // This used to read `two <= u128::MAX`, which is a tautology -- `two`
+        // is a `u128`, so the comparison cannot fail and it proved nothing at
+        // all, while the comment above claimed it proved exactly that. What can
+        // fail is the round trip: if the multiply had wrapped, dividing by one
+        // factor would not hand the other back.
         let two = (usize::MAX as u128) * (usize::MAX as u128);
-        assert!(
-            two <= u128::MAX,
+        assert_eq!(
+            two / (usize::MAX as u128),
+            usize::MAX as u128,
             "the point arm needs the first two axes to fit, so the third is what \
              overflows; two = {two} vs u128::MAX = {}",
             u128::MAX
@@ -496,7 +506,15 @@ fn the_u128_overflow_arms_are_reached_and_named() {
     let dims = [1usize << 42, 1 << 42, 1 << 42];
     let points = (1u128 << 42) * (1u128 << 42) * (1u128 << 42);
     assert_eq!(points, 1u128 << 126);
-    assert!(points <= u128::MAX, "the point arm must not fire for this fixture");
+    // This used to read `points <= u128::MAX`, a tautology for the same
+    // reason: `points` is a `u128`, so it could never fail while claiming to
+    // show the point arm does not fire. The claim that can fail is that there
+    // is headroom left -- 1<<126 doubled is 1<<127, which still fits -- and it
+    // would stop being true the moment the fixture grew by one bit.
+    assert!(
+        points.checked_mul(2).is_some(),
+        "the point arm must not fire for this fixture: {points} doubled must still fit"
+    );
     assert!(
         points.checked_mul(s as u128).is_none(),
         "the value arm needs points * {s} to overflow; {} * {s} = {:?}",
@@ -531,8 +549,12 @@ fn the_u128_overflow_arms_are_reached_and_named() {
     // so it takes the ordinary mismatch arm instead.
     let over = [1usize << 41, 1 << 41, 1 << 41];
     let under = [1usize << 40, 1 << 40, 1 << 40];
-    let over_text = check_gpu_data_len(over, 0).expect_err("over the line").to_string();
-    let under_text = check_gpu_data_len(under, 0).expect_err("under the line").to_string();
+    let over_text = check_gpu_data_len(over, 0)
+        .expect_err("over the line")
+        .to_string();
+    let under_text = check_gpu_data_len(under, 0)
+        .expect_err("under the line")
+        .to_string();
     assert!(
         over_text.contains("the value count overflows u128"),
         "[1<<41; 3] = 2^123 points is past u128::MAX / 40; got: {over_text}"

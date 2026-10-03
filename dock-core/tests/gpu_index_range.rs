@@ -38,8 +38,8 @@ use dock_core::grid::{
     check_gpu_dims, estimate_dims, GridBox, GridMaps, MAPS_PER_TYPE, MAX_GRID_POINTS,
 };
 use dock_core::scoring::VinaScoring;
-use dock_core::types::{Atom, AtomType, Element, Molecule};
 use dock_core::types::GRID_TYPE_COUNT;
+use dock_core::types::{Atom, AtomType, Element, Molecule};
 
 /// The bound, derived here from the same two published facts `grid.rs` uses.
 ///
@@ -85,11 +85,9 @@ fn max_grid_points_is_the_kernel_bound() {
         derived_bound()
     );
     assert_eq!(
-        MAX_GRID_POINTS,
-        107_374_182,
+        MAX_GRID_POINTS, 107_374_182,
         "the derivation changed: (u32::MAX) / ({} * {}) is no longer 107374182",
-        GRID_TYPE_COUNT,
-        MAPS_PER_TYPE
+        GRID_TYPE_COUNT, MAPS_PER_TYPE
     );
 }
 
