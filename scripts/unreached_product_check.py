@@ -111,6 +111,30 @@ still legitimately in the table -- while the writer believed they had recorded
 a second opinion. `no row key is written twice in the table literal` counts
 the keys in this file's own AST and compares that with the dict's length.
 
+**And a number in a header comment is not a number either.** The table is
+partitioned by comments of the shape `# -- <tier label>: <N> rows`, and a
+previous edit added three rows to the first tier, removed one, and rewrote the
+header from 253 to 256 -- counting the additions and forgetting the removal.
+Nothing caught it, because **no assertion anywhere read a tier header count**:
+a mutation that changed 255 to 999 left this gate 22/22 green. A number written
+in a comment that describes a data structure, with no check, is the same defect
+class this file exists to eliminate, one level below the one it hunts.
+`every tier header's claimed row count is the count derived from the rows' own
+state words` locates each header by AST-bounded scan of the literal's own
+span, derives the true membership by keying on the `state` string in each
+row's value tuple, and compares. Which reading of "rows" the number is asserting
+-- rows of the tier, or rows of the physical block the header sits on -- is
+decided at `TIER_STATES` from the file's own prose rather than assumed, and both
+numbers are printed on every run because they are not the same number. A second
+check perturbs **each of the six findings** in a copy of this file's source and
+requires the first one to go red and name a line, so a check that has stopped
+being able to fail is itself red rather than a green that means nothing. That
+second check is deliberately wider than the number: a first version that moved
+only a count reported "4 of 4 caught" while deleting the malformed-header, the
+rows-outside-their-block and the tier-with-no-header findings each turned the
+gate green, and a self-test narrower than the check it audits certifies less
+than it appears to.
+
 # What an AST cannot see, and how each case is handled
 
 Stated here rather than left for a reader to discover, because the honest
@@ -223,7 +247,17 @@ PYQT_ROOT = "PyQt6"
 #: could not run and a check that ran are different numbers on purpose, and
 #: "the tally went up by one because a defect got fixed" is a sentence worth
 #: being able to say.
-EXPECTED_CHECKS = 22  # measured from a green run of this file on this tree, counted by running it
+#:
+#: **22 -> 24, and the cause is two checks that were absent rather than one
+#: that failed.** The table literal's tier headers carried row counts that
+#: nothing read: 255 could be rewritten to 999 and every check here stayed
+#: green, because a number in a comment is decorative until something derives
+#: it. Two results close that -- the comparison itself, and a self-test that
+#: perturbs each header's number in a copy of this file's source and requires
+#: the comparison to go red and name the line. Both are unconditional sites, so
+#: the `GATE-DECLARE` census below moves with them; neither is a skip, so both
+#: are in this number.
+EXPECTED_CHECKS = 24  # measured from a green run of this file on this tree, counted by running it
 
 #: The call-site census, declared in the format
 #: `scripts/check_scripts_declare.py` reads, and verified in this file by
@@ -231,8 +265,32 @@ EXPECTED_CHECKS = 22  # measured from a green run of this file on this tree, cou
 #: `_declaration_of`. Those are lifted out by AST because the module `sys.exit`s
 #: at import; see the section on `load_declarer`.
 #: GATE-DECLARE 1
-#: sites: 20 unconditional + 3 guarded
+#: sites: 22 unconditional + 3 guarded
 #: guards: sha256:eedb526e6b7126b61a5e0fc21e0d138e897c1b2cf05710f0983192e129ea0e5e
+#:
+#: **What this number is, and what it is not.** It is a drift contract: the
+#: check below compares it against `_sites_of` walking this same file, so a
+#: red here means the declaration and the walk disagree. It is a count over
+#: `_sites_of`'s site universe -- a bare `check`/`ok`/`bad`/`expect` statement
+#: -- and it is not a coverage claim about this file.
+#:
+#: **A second gate censuses this file too, and reports one more guarded site:
+#: `guarded_sites_check.py` says 22 unconditional + 4 guarded.** That is not two
+#: auditors answering one question differently, and the two numbers are not
+#: meant to be reconciled. Its universe is two names wider: it also counts
+#: `skip` and `pixel_check`, because it asks which sites can fail to record a
+#: result and a `skip` records one. The extra site is the `skip` sitting beside
+#: a `check` under this file's one `if ok_all:`; all 25 sites counted here are
+#: classified the same way by both walks. `3 + 22 = 25` here and `4 + 22 = 26`
+#: there, over one file, is the two questions showing rather than a disagreement
+#: about one of them.
+#:
+#: **The two agreeing on 22 unconditional is arithmetic, not agreement.** It
+#: holds only because the one site the wider walk adds is a guarded one. Nothing
+#: enforces that, so it must not be cited as the two definitions matching; a
+#: future unconditional `skip` would move one column and not the other with no
+#: gate going red. The honest statement is that the definitions differ by
+#: construction, and both are correct for the question each is asked.
 
 CHECKS = 0
 FAILURES: list[str] = []
@@ -314,6 +372,41 @@ SHARED_SENTENCES = {
     "OWN-CTOR-READ": CTOR_READ_REASON,
 }
 
+#: The tier headers in the table literal below, and the **state words** each one
+#: is about. No count is written here: this table says only *which state words a
+#: header's number is talking about*, and the number itself is derived from the
+#: rows' own `state` strings by `_tier_check` and compared with the one the
+#: comment claims. A count typed in this file would be the same defect one
+#: level up, so there is none.
+#:
+#: **A tier is not one-to-one with a state word, and this file says so rather
+#: than leaving a reader to assume it.** The first header names the whole group
+#: of rows nothing in the product reaches -- `GATE-ONLY`, `OPEN-QUESTION` and
+#: `UNREAD-FIELD` together -- so one tier is carried by three states. The second
+#: header names one state word, `OWN-MODULE-ONLY`, while the block of rows
+#: physically under it also carries two `OWN-CTOR-READ` rows. That is the
+#: ambiguity this table exists to settle, and the file's own prose settles it:
+#: the note directly under that header says the tier's reason is "one sentence
+#: and one constant, not 255 sentences", and `OWN_MODULE_REASON` is carried by
+#: exactly the `OWN-MODULE-ONLY` rows and by neither `OWN-CTOR-READ` row.
+#:
+#: **So the number a header claims is the count of its tier's state words, not
+#: the number of rows in the block the header happens to sit on.** For the
+#: second header those are two different numbers -- the block physically holds
+#: 257 rows -- and that gap is how a header came to read 256 once while three
+#: rows were added and one removed. `_tier_check` therefore derives the tier
+#: count, *and* derives the block size, and prints both on every run, so the
+#: difference is a line of output rather than something a reader reconstructs.
+#:
+#: Keys are header labels verbatim and matching is exact. A label that drifts
+#: turns the run red naming the label, rather than quietly matching the tier the
+#: reader thought it did.
+TIER_STATES = {
+    "the tier with no product reference at all":
+        ("GATE-ONLY", "OPEN-QUESTION", "UNREAD-FIELD"),
+    "reached only inside its own module": ("OWN-MODULE-ONLY",),
+}
+
 #: One row per name that no product module outside its own module references,
 #: after the three derived dispatch classes have had their say.
 #:
@@ -325,7 +418,7 @@ SHARED_SENTENCES = {
 #: wrong.** A name that gains a product caller must lose its row in the same
 #: commit that gives it one.
 DISPOSITIONS: dict[str, tuple[str, str]] = {
-    # -- the tier with no product reference at all: 52 rows ----
+    # -- the tier with no product reference at all: 51 rows ----
     "core:GridBox.contains": (
         "GATE-ONLY",
             "The point-in-box predicate. `scripts/core_check.py` is the "
@@ -695,8 +788,8 @@ DISPOSITIONS: dict[str, tuple[str, str]] = {
             "constructor the product does use. The representation gates still "
             "call this one.",
     ),
-    # -- reached only inside its own module: 256 rows ----------
-    # The reason is one sentence and one constant, not 256
+    # -- reached only inside its own module: 255 rows ----------
+    # The reason is one sentence and one constant, not 255
     # sentences: the fact is identical across the tier, and
     # inventing a different one per row would manufacture a
     # specificity that is not there. What makes each row
@@ -1729,6 +1822,14 @@ def main() -> int:
     ok_dupes, detail_dupes = _duplicate_keys()
     check("no row key is written twice in the table literal",
           ok_dupes, detail_dupes)
+    ok_tiers, detail_tiers = _tier_check(SELF.read_text(encoding="utf-8"),
+                                          SELF.relative_to(ROOT).as_posix())
+    check("every tier header's claimed row count is the count derived from the "
+          "rows' own state words", ok_tiers, detail_tiers)
+    ok_tier_probe, detail_tier_probe = _tier_selftest(
+        SELF.read_text(encoding="utf-8"))
+    check("the tier check can still catch every kind of header defect it claims "
+          "to", ok_tier_probe, detail_tier_probe)
     check("every unreached name has a disposition row",
           not (needed - rowset),
           "%d row(s) missing: %s" % (len(needed - rowset), names(needed - rowset)))
@@ -1882,6 +1983,260 @@ def _generic_reasons(s: dict, rows: dict, c: dict) -> tuple[set, set]:
         else:
             generic.add(tk)
     return generic, ok
+
+
+#: A tier header is a comment of the shape `# -- <label>: <N> rows`, optionally
+#: followed by a rule of dashes. `head` is captured separately from `label` only
+#: so that `_tier_selftest` can splice a new number into a real line without
+#: having to rebuild the comment marker itself.
+_TIER_HEADER_RE = re.compile(
+    r"^(?P<head>\s*#\s*--\s*)(?P<label>[^:]+?):\s*(?P<claimed>\d+)\s+rows\b")
+#: What a tier header would look like if it were malformed. This is the only
+#: thing that sees a header that *meant* to carry a count and does not parse --
+#: `# -- the tier with no reference: fifty rows`, or a header whose number was
+#: deleted. The strict pattern cannot report those, because not matching it is
+#: how it detects them, and a check that only notices well-formed numbers is a
+#: check whose failure mode is silence.
+_TIER_MAYBE_RE = re.compile(r"^\s*#\s*--\s*.*\brows\b")
+
+
+def _tier_spans(src: str):
+    """Headers, rows and the table literal's own line span, out of one source.
+
+    `(headers, rows, span)`, where `headers` is `[(lineno, label, claimed)]` in
+    source order, `rows` is `[(lineno, state)]` for every key written into the
+    literal, and `span` is the literal's first and last line, 1-based inclusive.
+
+    **The span is the load-bearing part.** It comes from the AST, and the header
+    scan is restricted to it. A whole-file regex for `# -- ...: N rows` would
+    also match this file's own prose about tier headers -- the module docstring
+    above, the `TIER_STATES` docstring, and the name of the check that reads
+    them -- and a check that reads its own documentation as data is a check
+    whose verdict depends on how the documentation happens to be worded. The
+    shape requirement (`# --`, a colon, a number, the word `rows`) is a second,
+    independent restriction on top of that, and the two together are also what
+    keeps `main`'s own `# -- the report, every name, no cap ---` out.
+
+    The state of a row is read off the *first element of its value tuple* in
+    the AST, not out of the dict this module built: the value is written as a
+    tuple literal in the source, and reading the source is what makes a header
+    count comparable with a row even when the two disagree about something
+    else entirely.
+    """
+    tree = ast.parse(src)
+    lit = None
+    for node in tree.body:
+        if isinstance(node, ast.AnnAssign) \
+                and getattr(node.target, "id", "") == "DISPOSITIONS" \
+                and isinstance(node.value, ast.Dict):
+            lit = node.value
+    if lit is None:
+        raise LookupError("no DISPOSITIONS dict literal in this source")
+    lines = src.splitlines()
+    headers = []
+    for i in range(lit.lineno - 1, lit.end_lineno):
+        m = _TIER_HEADER_RE.match(lines[i])
+        if m:
+            headers.append((i + 1, m.group("label").strip(),
+                            int(m.group("claimed"))))
+    rows = []
+    for key, val in zip(lit.keys, lit.values):
+        state = val.elts[0] if isinstance(val, ast.Tuple) and val.elts else None
+        rows.append((key.lineno,
+                     state.value if isinstance(state, ast.Constant) else "?"))
+    return headers, rows, (lit.lineno, lit.end_lineno)
+
+
+def _tier_check(src: str, where: str) -> tuple[bool, str]:
+    """Every tier header's claimed count against the count its rows derive.
+
+    Six findings, and the point of enumerating them is that none of them is "a
+    count is wrong" without a `path:line`, a label and both numbers attached.
+    A reader who has to grep to find out which number moved has been handed the
+    same work the check existed to do:
+
+    1. a comment inside the literal that reads as a tier header but does not
+       parse as one (malformed);
+    2. two headers claiming the same tier;
+    3. a declared tier with rows but no header at all;
+    4. a header whose label is not a declared tier, so its number is compared
+       against nothing;
+    5. a claimed count that is not the count derived from the rows' states;
+    6. a tier whose rows sit outside the block its header labels, which is what
+       a header moved or a row filed under the wrong neighbour looks like.
+
+    Every one of them is a **finding, not a crash**: a missing header, a
+    malformed one and a duplicated one each produce a named sentence and a red,
+    and none of them can end the run or -- the direction that matters -- pass
+    quietly. Direction 3 is why the tier list is walked the other way round as
+    well: iterating the headers alone would notice a header nobody declared, and
+    would not notice a tier whose header somebody deleted.
+    """
+    headers, rows, (lo, hi) = _tier_spans(src)
+    lines = src.splitlines()
+    faults = []
+
+    parsed = {h[0] for h in headers}
+    for i in range(lo - 1, hi):
+        if (i + 1) not in parsed and _TIER_MAYBE_RE.match(lines[i]):
+            faults.append("%s:%d: reads as a tier header but does not parse as "
+                          "one, so no count in it was compared: %r"
+                          % (where, i + 1, lines[i].strip()))
+
+    first_at = {}
+    for lineno, label, _claimed in headers:
+        if label in first_at:
+            faults.append("%s:%d: a second header for tier %r; the first is at "
+                          "line %d" % (where, lineno, label, first_at[label]))
+        else:
+            first_at[label] = lineno
+    for label, states in sorted(TIER_STATES.items()):
+        if label not in first_at:
+            faults.append("%s: no header at all for tier %r, and %d row(s) carry "
+                          "one of its states (%s), so rows with no count above "
+                          "them are a finding rather than an absence"
+                          % (where, label,
+                             sum(1 for _l, st in rows if st in states),
+                             ", ".join(states)))
+
+    counted, noted = [], []
+    for idx, (lineno, label, claimed) in enumerate(headers):
+        if label not in TIER_STATES:
+            faults.append("%s:%d: header label %r is not a declared tier, so the "
+                          "%d row(s) it claims are compared against nothing"
+                          % (where, lineno, label, claimed))
+            continue
+        states = TIER_STATES[label]
+        derived = sum(1 for _l, st in rows if st in states)
+        if derived == 0:
+            faults.append("%s:%d: tier %r claims %d row(s) and no row in the "
+                          "table carries one of its states (%s), so the header "
+                          "labels a tier that does not exist"
+                          % (where, lineno, label, claimed, ", ".join(states)))
+        elif derived != claimed:
+            faults.append("%s:%d: tier %r claims %d row(s); %d row(s) of the "
+                          "table carry one of its states (%s)"
+                          % (where, lineno, label, claimed, derived,
+                             ", ".join(states)))
+        nxt = headers[idx + 1][0] if idx + 1 < len(headers) else hi
+        block = [l for l, _st in rows if lineno < l < nxt]
+        outside = [l for l, st in rows
+                   if st in states and not lineno < l < nxt]
+        if outside:
+            faults.append("%s:%d: %d row(s) of tier %r sit outside the block this "
+                          "header labels, the first at line %d"
+                          % (where, lineno, len(outside), label, outside[0]))
+        counted.append("%r at line %d claims %d, derived %d"
+                       % (label, lineno, claimed, derived))
+        if len(block) != derived:
+            noted.append("the block under line %d physically holds %d row(s), "
+                         "so %d of them are state %s and counted by the header's "
+                         "number while the other %d are not"
+                         % (lineno, len(block), derived,
+                            "/".join(states), len(block) - derived))
+
+    if faults:
+        return False, "; ".join(faults)
+    return True, ("%d header(s) in %s, %s, over %d row(s)%s"
+                  % (len(headers), where, "; ".join(counted), len(rows),
+                     ("; " + "; ".join(noted)) if noted else ""))
+
+
+def _tier_selftest(src: str) -> tuple[bool, str]:
+    """Hand the tier check every kind of wrong, and require it to name the line.
+
+    A check that cannot fail is worse than no check, and the only way to know
+    whether `_tier_check` can fail is to run it against a source that is wrong
+    in each of the ways it is supposed to catch. **Every one of the six
+    findings is perturbed, not just the count**, because a self-test that only
+    moved a number would have left three of them free to be deleted: measured
+    on this tree, a first version that only perturbed the number reported
+    "4 of 4 caught" while `drop-malformed`, `drop-outside-block` and
+    `drop-missing-tier` each turned the gate green. A self-test narrower than
+    the check it audits is a green that certifies less than it appears to.
+
+    Both number directions are tried on every header, because the defect this
+    whole exercise exists for was a header that read one too *high*, and a
+    self-test that only moved a number the other way would have passed it.
+
+    The perturbation is a splice on a copy of the source **string** rather than
+    an edit to the file, so this costs no second copy of the tree, cannot dirty
+    the file it audits, and cannot be satisfied by a check that only recognises
+    a number because it has seen that number. A test that rewrote the file and
+    restored it would pass even if the check ignored its input entirely. Every
+    splice lands inside a comment, so no trial can fail for a syntax reason and
+    be mistaken for a caught one.
+    """
+    try:
+        headers, _rows, _span = _tier_spans(src)
+    except (SyntaxError, LookupError) as exc:
+        return False, "could not read this file's tier headers to perturb: %s: %s" \
+            % (type(exc).__name__, exc)
+    if len(headers) < 2:
+        return False, ("%d tier header(s) found, and this self-test needs two to "
+                       "perturb the block shape, so it tested nothing"
+                       % len(headers))
+    lines = src.splitlines(keepends=True)
+    first, second = headers[0][0], headers[1][0]
+
+    def renumbered(lineno, new):
+        out = list(lines)
+        out[lineno - 1] = _TIER_HEADER_RE.sub(
+            lambda m: "%s%s: %d rows" % (m.group("head"), m.group("label"), new),
+            out[lineno - 1], count=1)
+        return "".join(out), "claims"
+
+    def spelled_out(lineno):
+        out = list(lines)
+        out[lineno - 1] = re.sub(r":\s*\d+\s+rows\b", ": many rows",
+                                 out[lineno - 1], count=1)
+        return "".join(out), "does not parse as one"
+
+    def deleted(lineno):
+        out = list(lines)
+        del out[lineno - 1]
+        return "".join(out), "no header at all for tier"
+
+    def doubled(lineno):
+        out = list(lines)
+        out.insert(lineno, lines[lineno - 1])
+        return "".join(out), "a second header for tier"
+
+    def swapped(a, b):
+        out = list(lines)
+        out[a - 1], out[b - 1] = lines[b - 1], lines[a - 1]
+        return "".join(out), "sit outside the block"
+
+    trials = []
+    for lineno, _label, claimed in headers:
+        trials.append(("claimed number one too high at line %d" % lineno,
+                       renumbered(lineno, claimed + 1)))
+        if claimed:
+            trials.append(("claimed number one too low at line %d" % lineno,
+                           renumbered(lineno, claimed - 1)))
+    trials.append(("number spelled out instead of written",
+                   spelled_out(first)))
+    trials.append(("a tier's header deleted", deleted(first)))
+    trials.append(("a tier's header duplicated", doubled(first)))
+    trials.append(("two headers swapped onto each other's rows",
+                   swapped(first, second)))
+
+    missed = []
+    for name, (spliced, phrase) in trials:
+        ok, detail = _tier_check(spliced, "self-test")
+        if ok or not detail.startswith("self-test:") or phrase not in detail:
+            missed.append("%s, expected a fault containing %r and got %r"
+                          % (name, phrase, detail[:160]))
+    if not missed:
+        return True, ("%d perturbation(s) across %d header(s), covering all %d "
+                      "findings: a number one too high and one too low on each, "
+                      "a number spelled out, a header deleted, a header "
+                      "duplicated, and two headers swapped onto each other's "
+                      "rows; every one turned the check red and named a line"
+                      % (len(trials), len(headers), 6))
+    return False, ("%d of %d perturbation(s) went unnoticed, so this check "
+                   "cannot be relied on to catch what it claims to: %s"
+                   % (len(missed), len(trials), "; ".join(missed)))
 
 
 def _duplicate_keys() -> tuple[bool, str]:

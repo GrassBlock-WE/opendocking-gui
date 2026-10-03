@@ -37,17 +37,22 @@ describing it had stopped being true without anyone noticing, which is the
 ordinary way this repository rots.
 
 **`check_doc_encoding.py` is no longer a file, and that is why the paragraph
-above is entirely past tense.** A sync removed it from the mirror and then from
-this tree as "not a source in the development tree", so a sentence written while
-it existed is now a sentence about a file no run can resolve -- the same stale
-justification `check_exemptions_are_real` went red on. The rename it was
-stalled behind has since happened, and the two external references have followed
-it: `ci.yml` and `PULL_REQUEST_TEMPLATE.md` both name
-`scripts/check_text_encoding.py`, checked on 2026-10-03. The tense is the whole
-difference, and this file is the one entitled to say so: a name is present
-tense only while the file answering to it is on disk, and a paragraph that keeps
-its present after its subject has left sends the next reader looking for a file
-that has been gone for a session.
+above is entirely past tense.** The rename it was stalled behind has happened,
+and the two files it was waiting on have followed it:
+`.github/workflows/ci.yml` and `.github/PULL_REQUEST_TEMPLATE.md` both name
+`scripts/check_text_encoding.py`. Three more files name it -- `CONTRIBUTING.md`,
+`README.md`, `README.en.md` -- in four places between them, and a reader who
+wants the census rather than this file's word for it should grep for
+`scripts/check_text_encoding.py` and read the hits. A hand-written count in
+prose is a number nobody re-checks, and the one this paragraph used to carry
+was wrong.
+
+A name is present tense only while the file answering to it is on disk. Do not
+go looking in a sync log for the removal, though: `_sync_release.py` deletes
+only under its destination, and the string it prints for a path it drops, "not
+a source in the development tree", is its `or` fallback -- emitted precisely
+when the rule says the path *is* a source. The development-tree copy went away
+because the file was renamed.
 
 # What is covered, and what is not
 

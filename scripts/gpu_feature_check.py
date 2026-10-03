@@ -41,10 +41,16 @@ are split by what the build can answer:
 
 `EXPECTED_CHECKS` is 11 on every machine, and `skip` writes a third tag onto
 `RESULTS` so a skip reaches the total exactly the way a pass does. The summary
-prints three numbers that are never added. A build without the `gpu` feature
-reports `9 passed, 0 failed, 2 skipped`; a build with it and an adapter reports
-`11 passed, 0 failed, 0 skipped`; both are 11. The check that stops the opposite
-mistake reaching the summary is
+prints three numbers that are never added, and the total beside them is read
+**after** the pin block has recorded itself, so the three add up to the total on
+every run. A summary whose numbers do not add up is a reporting defect and this
+file had one: it used to sample the three tags before the pin and print
+`8 passed, 0 failed, 2 skipped` beside `11 results`, which a reader cannot tell
+from a pin that was forgotten. A build without the `gpu` feature skips the two
+rows that need the kernel and passes the other nine, so it reports
+`9 passed, 0 failed, 2 skipped`; a build with the feature and an adapter
+reaches the kernel, skips nothing, and reports `11 passed, 0 failed, 0 skipped`.
+The check that stops the opposite mistake reaching the summary is
 `the_pinned_total_counts_results_and_not_only_passes`.
 
 **The two rows that skip name the mechanism, not the symptom.**
@@ -61,10 +67,15 @@ cause is a hole wearing a result's clothes.
 
 **Nothing here is transcribed that can be derived.**
 
-The out-of-box penalty, the kernel's workgroup size, the shape of the shader's
-per-axis sum, and the census of decline reasons are all read out of the sources
-this repository owns, by the functions named next to them. The decline census in
-particular is a grep for `reason: "` in `dock-core/src/search/mod.rs` and is
+The out-of-box penalty, the kernel's workgroup size, the shape of the kernel's
+out-of-box term, and the census of decline reasons are all read out of the
+sources this repository owns, by the functions named next to them. The shape is
+the one that is read and **printed rather than asserted**, because
+`dock-core/src/gpu/mod.rs` already binds the shader to the Rust in
+`shader_and_rust_agree_on_the_out_of_box_penalty` and `cargo test` runs that on
+a machine that never runs this file; the reading is printed here because the
+`f32` bound below is computed on top of it. The decline census in particular is
+a grep for `reason: "` in `dock-core/src/search/mod.rs` and is
 **never written down here**, because a closed list of the ways a decline can
 happen is a list that goes stale the moment a seventh is added -- and the last
 one that was added to this repository, the `f32` narrowing guard, was found by
@@ -119,7 +130,7 @@ F32_PROBES = (1.0e35, 1.0e38, 1.0e39, 1.0e308)
 #: rather than a silent pass.
 REQUIRED_REPORT_KEYS = ("backend", "gpu_skip_reason", "adapter")
 
-#: The nine, and what each one *is*:
+#: The eleven, and what each one *is*:
 #:
 #:   4  build-identity contracts that need neither an adapter nor the feature:
 #:      the `gpu_status` shape, `available` not being claimed on a build with no
@@ -147,7 +158,7 @@ REQUIRED_REPORT_KEYS = ("backend", "gpu_skip_reason", "adapter")
 #:   could fall through without recording would move the total rather than
 #:   shrink it quietly.
 #:
-#: **What moves it.** A tenth block, a block split in two, or a block that
+#: **What moves it.** An extra block, a block split in two, or a block that
 #: records twice -- each a diff against this comment and each a deliberate edit
 #: here. Nothing else moves it: not the machine, not the absence of the `gpu`
 #: feature, and not the absence of an adapter.
@@ -245,26 +256,47 @@ def workgroup_size() -> int:
     return int(m.group(1))
 
 
-def shader_sums_the_three_axes() -> bool:
-    """Whether the shader still reduces the out-of-box term per axis.
+def shader_charges_the_hosts_summed_violation() -> bool:
+    """Whether the kernel's out-of-box term is still the one the bound assumes.
 
-    This is the shape the safe-coordinate bound below depends on, so it is
-    asserted rather than remembered: if the ramp went back to a per-atom
-    distance, the divisor in `f32_safe_coordinate` would be wrong by a factor of
-    three and the gate would be quietly measuring a different thing.
+    The bound is `OUT_OF_BOX_PENALTY * AXES * n_atoms * max|p|`, and it needs two
+    things: a sum over the three axes somewhere, and a kernel that multiplies one
+    already-summed scalar by the penalty instead of reducing a per-atom distance
+    itself. Both still hold. The host sums the axes in `f64`
+    (`out_of_box_violation_per_axis(...).iter().sum()`, `gpu/mod.rs`) and the
+    shader takes that scalar as `violation: f32` and multiplies it once.
+
+    What does not hold is the *previous* version of this probe, which looked for
+    `max(per_axis, vec3<f32>(0.0))` in the shader. That reduction moved to the
+    host, so the probe kept asking a question the shader stopped being asked and
+    read `False` for a shape the shader has -- and a printed `False` reads to a
+    reader as the opposite of the truth, which is the whole failure this
+    repository exists to remove.
+
+    **It is read and printed, not asserted, and that is the honest limit.** The
+    first version of this docstring claimed the shape was "asserted rather than
+    remembered" while the only thing that happened to it was a `print`, and a
+    docstring claiming an assertion that does not exist is worse than no
+    docstring. Making it a twelfth result would move `EXPECTED_CHECKS` and the
+    call-site census for a shape that `dock-core/src/gpu/mod.rs` already binds
+    in `shader_and_rust_agree_on_the_out_of_box_penalty`, which `cargo test` runs
+    on machines that never run this file -- so the strong assertion lives there,
+    and this run prints the reading beside the number that is computed on top of
+    it.
     """
     wgsl = read_text(ENERGY_WGSL)
     return (
-        "max(per_axis, vec3<f32>(0.0))" in wgsl
-        and "OUT_OF_BOX_PENALTY * violation" in wgsl
+        "OUT_OF_BOX_PENALTY * violation" in wgsl
+        and "violation: f32" in wgsl
     )
 
 
-#: The per-axis form sums three axes and the kernel's reduction sums one term
-#: per atom, so a row's `f32` total is bounded by
+#: The out-of-box term is a sum over three axes and the kernel's reduction sums
+#: one term per atom, so a row's `f32` total is bounded by
 #: `OUT_OF_BOX_PENALTY * AXES * n_atoms * max|p|`. Both factors are counted
-#: from something: `AXES` from the `vec3` the shader reduces, `n_atoms` from the
-#: ligand the caller passed.
+#: from something: `AXES` from the `vec3` the **host** reduces -- the shader
+#: stopped reducing it and takes the summed scalar as `violation: f32` -- and
+#: `n_atoms` from the ligand the caller passed.
 AXES = 3
 
 
@@ -693,8 +725,9 @@ def main() -> int:
     section("what the sources declare, read rather than transcribed")
     print(f"OUT_OF_BOX_PENALTY = {penalty:g}  (dock-core/src/search/mod.rs)")
     print(f"workgroup_size     = {wg}      (dock-core/src/gpu/energy.wgsl)")
-    print(f"per-axis sum       = {shader_sums_the_three_axes()}      (energy.wgsl, the shape the "
-          "safe-coordinate bound below assumes)")
+    print(f"out-of-box term    = {shader_charges_the_hosts_summed_violation()}      (energy.wgsl, "
+          "the shape the safe-coordinate bound below assumes; READ AND PRINTED, not asserted -- "
+          "cargo test binds it in dock-core/src/gpu/mod.rs)")
     print(f"decline sites      = {len(reasons)}      (grep of `reason: \"` in search/mod.rs; not "
           "written down anywhere, because a closed list goes stale)")
     # Printed one per line and never totalled into anything.
@@ -801,6 +834,15 @@ def main() -> int:
     nfail = sum(1 for t, _n, _d in RESULTS if t == "FAIL")
     nskip = sum(1 for t, _n, _d in RESULTS if t == "SKIP")
     block_pinned_total(npass, nfail, nskip)
+    # Re-read, and not reused: the three tags have to cover the pin's own result
+    # as well, or the summary prints a triple that does not add up to the total
+    # printed beside it. `block_pinned_total` adds its `+ 1` because its caller
+    # samples the counts *before* it records; the line below samples them after.
+    # Re-reading also means a pin that fails is counted as the failure it is, so
+    # a count that is wrong exits 1 rather than slipping out as a count mismatch.
+    npass = sum(1 for t, _n, _d in RESULTS if t == "PASS")
+    nfail = sum(1 for t, _n, _d in RESULTS if t == "FAIL")
+    nskip = sum(1 for t, _n, _d in RESULTS if t == "SKIP")
     print()
     print(f"--- {npass} passed, {nfail} failed, {nskip} skipped, {len(RESULTS)} results "
           f"(expected {EXPECTED_CHECKS})")

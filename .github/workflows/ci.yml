@@ -407,6 +407,7 @@ jobs:
           python scripts/check_scripts_declare.py
           python scripts/docs_claims_check.py
           python scripts/check_counted_constants.py
+          python scripts/skip_reasons_check.py
 
       # Two more audits over the tree, same trade as the step above: no wheel, no
       # display, pure stdlib, so they are worth having when the artefact is broken.

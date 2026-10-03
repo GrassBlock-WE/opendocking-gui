@@ -5320,7 +5320,38 @@ def main() -> int:
     import opendocking
     from opendocking.workbench import MoleculeView
 
-    shifted = EXAMPLES / "_shifted_receptor.pdbqt"
+    # This fixture is **derived, not shipped**. It is `rec_prep.pdbqt` with every
+    # x shifted by -40, and re-running these six lines reproduces it byte for
+    # byte, so it carries no information the tree does not already have.
+    #
+    # It used to be written into `examples/`, which did two wrong things at once.
+    # `dock-core/tests/shipped_inputs.rs` sweeps `examples/` as the repository's
+    # shipped structure files, so a file this gate regenerates on every run moved
+    # that count 17 -> 18 and took the TORSDOF and nothing-refused asserts down
+    # with it, because the count assert runs first. And
+    # `release_tree_parity_check.py` then spent a check insisting that this file
+    # *must* ship on the grounds that this same gate reads it -- which made a
+    # scratch file look like a shipped input to anyone reading the check, and is
+    # how the next reader inherits the mistake. A gate reading its own output,
+    # minutes earlier in the same process, is not evidence that the repository
+    # ships it.
+    #
+    # `target/` is the scratch root this repository already declares and already
+    # excludes: `/target/` in `.gitignore`, and `release_tree_rule.py:485-488`
+    # declines it as the Cargo build directory. So this needs no new `.gitignore`
+    # line, cannot be published, and is not swept by anything that means
+    # "shipped input".
+    #
+    # **Deliberately not `%TEMP%`.** The check at the end of section 7c globs
+    # `tmp*.pdbqt` in `tempfile.gettempdir()` and is right to -- those are the
+    # docking engine's own scratch files, and a fresh one there is a leak. This
+    # fixture is not that, and naming it `tmp*` to stay outside the glob would be
+    # dodging a check rather than satisfying it. The fix is not to move the file
+    # somewhere the check has to be argued about; it is to move it somewhere the
+    # check does not reach, which is what `target/` is. That check is unchanged.
+    scratch = ROOT / "target" / "workbench_interaction"
+    scratch.mkdir(parents=True, exist_ok=True)
+    shifted = scratch / "_shifted_receptor.pdbqt"
     rows = []
     for line in rec.read_text(encoding="utf-8").splitlines():
         if line.startswith(("ATOM", "HETATM")):
@@ -5329,6 +5360,9 @@ def main() -> int:
         else:
             rows.append(line)
     shifted.write_text("\n".join(rows) + "\n", encoding="utf-8")
+    print(f"  negative-coordinate fixture: {shifted} "
+          f"({shifted.stat().st_size} B, derived from "
+          f"{rec.name}; outside examples/ and outside %TEMP%)")
 
     win2 = MainWindow(receptor=shifted)
     win2.resize(1000, 700)

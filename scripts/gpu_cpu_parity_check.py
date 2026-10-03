@@ -12,12 +12,12 @@ behind the optional `gpu` feature.
 otherwise.** They now say **not on the search hot path**: an "opt-in GPU
 batch-scoring path -- which is not on the search hot path", whose "only caller
 is the batch entry point `evaluate_conformations`", with `use_gpu` defaulting
-to False so that runs stay comparable across machines (`README.en.md` 15-16 and
-375-378, `README.md` 311-313). Until 2026-10-02 both said the opposite -- the
-largest claim either made about the kernel was that it was "a working GPU
-batch-scoring path" / "actually on the hot path" -- and that claim had never
-been compared against anything. The correction is the claim *this* file
-measured, and it is dated here because a gate that quotes its own
+to False so that runs stay comparable across machines (`README.en.md` 16-17 and
+453-456, `README.md` 11-12 and 387-389). Until 2026-10-02 both said the
+opposite -- the largest claim either made about the kernel was that it was "a
+working GPU batch-scoring path" / "actually on the hot path" -- and that claim
+had never been compared against anything. The correction is the claim *this*
+file measured, and it is dated here because a gate that quotes its own
 self-description has to be able to say which tense that description was in.
 
 The reason a claim of that shape needed measuring at all is that it is not the
@@ -36,28 +36,33 @@ returns. The engine's fixture is the right place to *measure* the kernel and
 this file does not duplicate that; what it cannot be is run by CI on the
 platform that ships. This file can.
 
-**One more thing that used to be in this paragraph and is not any more.** A
-copy of the READMEs under `opendocking-gui/` still carries the pre-2026-10-02
-wording -- `opendocking-gui/README.en.md` 15-16 still reads "a GPU
-batch-scoring path that is actually on the hot path", and 296-299 still tells
-the reader to "pass `use_gpu=True` explicitly, then read the fallback reason out
-of `report_backend`", which is the clause this file's own failure message must
-**not** quote as if it were the dev tree's. It is a separate product tree, it is
-not a file this gate audits, and it is recorded here rather than silently
-dropped because this paragraph is the one place in the repository that states
-what the claim is and when it stopped being true. If the two trees are meant to
-ship one README, that copy is the remaining instance of defect 278 and it belongs
-to whoever owns that directory.
+**The mirror carries the same sentence in the same tense, and that is a
+reading rather than a guarantee.** `opendocking-gui/README.en.md` 16-17 reads
+"an opt-in GPU batch-scoring path -- which is not on the search hot path" and
+`opendocking-gui/README.md` 11-12 says the same in Chinese, so a reader who
+checks the claim in the mirror now gets the answer this paragraph gives instead
+of the pre-2026-10-02 wording: 296-299 there is a table header about pose
+trust, not a `report_backend` instruction. This paragraph used to claim the
+opposite, and it was wrong in the direction that matters, because a reader who
+was told the mirror still said "actually on the hot path" would have had no
+reason to open it and would have carried the stale claim forward. It is still
+not a file this gate audits: the mirror is written by a one-way sync this file
+does not run, so "in the same tense today" is a reading with a date on it and
+not a property, and the only thing that can put the old words back is a
+re-sync from a tree that still has them.
 
-**What it establishes on a machine with no GPU, and what it cannot.**
+**What it establishes on a build that cannot reach the kernel, and what it
+cannot.**
 
 Seven of the nine results it records need no adapter, and all seven are about
 *reporting* rather than arithmetic -- which is deliberate, because reporting is
 the part that goes wrong silently. Two of them are the whole point of the GPU
 question: whether the `gpu` line in `available_backends()` is a probe or a
 constant, and whether a caller who asks for the GPU is ever told why they did
-not get one. The last two results need real hardware, and on a GPU-less machine
-each is **skipped with the skip recorded and counted**, so a reader can tell the
+not get one. The last two results need the kernel, and this file keys that on
+whether the adapter probe ever ran rather than on what hardware is in the case,
+so a build without the `gpu` feature skips them **with the skip recorded and
+counted** even on a machine that has a card in it, and a reader can tell the
 difference between "the two backends agree" and "nobody looked".
 
 **The skip convention, stated so it cannot be misread.**
@@ -88,67 +93,43 @@ nodes nearly cancel is evaluated from nodes orders of magnitude larger than its
 own total -- a total-proportional band collapses exactly where the kernel is
 hardest to get right.
 
-**One block is red on a build without the `gpu` feature, on purpose.**
+**One block was red on a build without the `gpu` feature, and is not any more.**
 
-* `a_batch_the_gpu_cannot_take_is_declined_with_a_reason` fails on a build
-  without the `gpu` feature. `evaluate_population` ignores `prefer_gpu` in its
-  `#[cfg(not(feature = "gpu"))]` arm and returns no skip reason, so
-  `report_backend["gpu_skip_reason"]` is `None` while `report_backend["backend"]`
-  is `"cpu"`. The energies are still right and the backend is still named, so
-  this is a missing reason rather than a wrong number. Both `README.md` 332-335
-  and `README.en.md` 402-405 already say so, in those words: `report_backend`
-  carried `backend` throughout, so a GPU run and a CPU run were *always*
-  distinguishable, and what lies is "a build with no `gpu` feature, where
-  `use_gpu=True` falls back silently and gives no reason". So the prose is
-  **not** the defect and a reader who follows this failure to it will edit
-  correct documentation; the fix is the `#[cfg]` arm in `dock-core/src`.
+* `a batch the gpu cannot take is declined with a reason, not silently` failed on
+  a build without the `gpu` feature, because `evaluate_population` dropped
+  `prefer_gpu` in its `#[cfg(not(feature = "gpu"))]` arm and returned no skip
+  reason, so the report carried `backend: "cpu"` and no reason at all. The
+  energies were still right and the backend was still named, so it was a missing
+  reason rather than a wrong number -- and the READMEs said so in those words
+  before the arm was repaired (`README.md` 415-417 and `README.en.md` 487-490,
+  both of which are now in the past tense and say so). A reader who followed
+  that failure to the prose would have edited correct documentation; the defect
+  was the `#[cfg]` arm in `dock-core/src`, and this block is the reason it is
+  fixed.
 
-  **The source is fixed; the binary this file measures is not.** The
-  `#[cfg(not(feature = "gpu"))]` arm at `dock-core/src/search/mod.rs:437-457`
-  now returns `Some(GpuSkip { reason: "this build was compiled without the gpu
+  **The arm is fixed in the source and in the binary this gate imports.** The
+  `#[cfg(not(feature = "gpu"))]` arm at `dock-core/src/search/mod.rs:439-459`
+  returns `Some(GpuSkip { reason: "this build was compiled without the gpu
   feature" })` when `prefer_gpu` is set and `None` when it is not -- it used to
-  read `let _ = prefer_gpu;` and drop the request. **That fix is not in the
-  extension this gate imports.** The numbers below are a reading of the
-  *installed wheel*, and its timestamps are what settle it:
+  read `let _ = prefer_gpu;` and drop the request. The binary that implemented
+  the old arm is gone from this machine, so the block above is green and the
+  question is no longer "is it red" but "which build said so".
 
-  | what | last written |
-  |---|---|
-  | `dock-core/src/search/mod.rs` (the fix) | 2026-10-02 13:23 |
-  | `dock-py/python/opendocking/_dockpy.pyd` | 2026-10-02 09:59 |
-  | `site-packages/opendocking/_dockpy.pyd` | 2026-10-02 09:59 |
+  **This file no longer transcribes that build, because it was wrong within a
+  day of being written.** It used to carry a table of three timestamps and one
+  run's split, which is a claim about a binary typed into a file that outlives
+  the binary: it named an install of 778,240 B / `066fdd0c` dated 2026-10-02
+  09:59, and a `mod.rs` of 2026-10-02 13:23, and none of the three is what is on
+  disk now. So every run prints the size and the digest of the extension its
+  import resolved to, in the `which binary this run measured` block, and a
+  recorded number in this file is tied to a build by the reader who runs it
+  rather than by the reader who remembers. A number in this docstring that is
+  not beside a digest is one of the dated measurements below, and those name
+  their date and the shape of the build they came from instead.
 
-  The run reports `opendocking = F:\python310\lib\site-packages\opendocking`,
-  so it measured a binary built three and a half hours **before** the fix
-  existed. Re-measured 2026-10-02 against that install -- 778,240 B, sha256
-  `066fdd0c`, byte-identical in the source tree and in `site-packages` -- the
-  run is **5 passed, 2 failed, 2 skipped** (9 results), with `gpu_status()`
-  reporting `compiled=False, available=False`.
-
-  **So this number is a measurement of a binary that is about to stop existing,
-  and it is expected to become 7 passed, 2 skipped after the rebuild.** That is
-  a prediction, not a result, and it is labelled as one: this file measures the
-  *installed* extension, so no assertion in it can move until the engine owner
-  rebuilds and reinstalls. A reader who wants the post-rebuild number should
-  re-run this file and take what it prints. What the two failures below share is
-  one root cause and it is the `#[cfg]` arm, now repaired in source and not yet
-  in any binary.
-
-  An earlier run of this file recorded **3 passed, 3 failed, 2 skipped**. That
-  was a measurement of a binary that no longer exists anywhere: the
-  `site-packages` wheel was then 748,032 B / `3b46188c`, and the source tree held
-  a third build at 755,200 B / `c181af49` that did not export
-  `DockingResult.unknown_atom_types`. It is recorded here only so the number
-  that used to sit in this paragraph is not mistaken for a current reading. The
-  two failures above are both the live `#[cfg]` defect and share one root cause;
-  the third failure of that older run was the stale binary rather than a defect,
-  and the decomposition block reports that absence as the absence it is.
-
-  Neither binary is swapped while other owners' work is in flight, so **any
-  number in this file that came from a run is a number about the build that was
+  **Any number here that came from a run is a number about the build that was
   loaded when it was run**; the pins, the call-site census and the declaration
-  are not, because none of them was read off a build. A reader who needs to know
-  which build a recorded number describes should look for the size and digest
-  beside it, and should find one.
+  are not, because none of them was read off a build.
 
 A gate that cannot fail is worse than no gate, so this one is not papered over.
 
@@ -156,7 +137,7 @@ A gate that cannot fail is worse than no gate, so this one is not papered over.
 more -- so its failure text is written against the current claim, not the old
 one.**
 
-`a_row_that_leaves_the_box_is_scored_by_the_same_function_on_both_backends` is
+`a row that leaves the box is scored by the same function on both backends` is
 the block that found the second of those defects, and it is described here
 because *how a gate's prose rots* is the subject. The kernel used to return a
 flat `1000.0` for an atom outside the tabulated volume
@@ -166,10 +147,14 @@ atoms` while the CPU's was unbounded, the two differed by thousands of kcal/mol,
 and the ranking of poses outside the box inverted. Nothing reported it: the
 `report_backend` calls that ran all said `backend: "gpu"`.
 
-`energy.wgsl` now evaluates `max(p - bmax, min - p)` per axis, sums it, and
-multiplies by `OUT_OF_BOX_PENALTY` -- the same per-axis, per-angstrom function
-`grid::out_of_box_violation_per_axis` evaluates on the CPU -- and
-`shader_and_rust_agree_on_the_out_of_box_penalty`
+The host now evaluates `max(p - bmax, min - p)` per axis and sums it in `f64`
+(`out_of_box_violation_per_axis(...).iter().sum()`, `gpu/mod.rs`), and the
+kernel multiplies that one scalar by `OUT_OF_BOX_PENALTY` -- the same
+per-axis, per-angstrom function the CPU evaluates, just evaluated on the side
+that has the `f64` copy of the coordinate. That move is also why the shader no
+longer contains the per-axis `max`: a sentence here used to say the shader
+itself "evaluates ... per axis, sums it", and that was the sentence that rotted
+while the arithmetic stayed right. `shader_and_rust_agree_on_the_out_of_box_penalty`
 (`dock-core/src/gpu/mod.rs`) binds the two transcriptions of the constant
 together and pins the ramp's *shape*, which a constant-only assertion could not
 tell apart from a flat step.
@@ -187,17 +172,19 @@ picked the edits up; every number above is identical on both builds, which is
 the only reason they are quoted without a revision attached.
 
 **How far this paragraph is still true, as of its own date.** These numbers came
-from a `--features gpu` build made at the time, not from either of the two
-checked-in binaries the rest of this file talks about, so the stale
-`site-packages` wheel does not invalidate them. What *has* moved underneath them
-is the tree: `dock-core/` and `dock-py/` have both been edited since 2026-10-02
-07:00, and the compiled extension in the source tree is now itself stale. So
-read this as "this is what the two backends did on an RTX 3050 on that date",
-which is what a dated measurement is for -- and not as a claim about the binary
-currently on disk, which is 755,200 B / sha256 `c181af49e363df58` and does not
-export `DockingResult.unknown_atom_types`. Re-running it is the only way to
-turn it back into a present-tense claim, and it needs the GPU build swapped
-first.
+from a `--features gpu` build made at the time, not from the non-gpu extension
+the rest of this file talks about, so that extension does not invalidate them.
+The tree has moved underneath them, and this file no longer claims to know by
+how much: `dock-core/` and `dock-py/` have both been edited since, and the
+extension on disk has been rebuilt twice since, so the sentence this paragraph
+used to close with -- naming the size, the digest and a missing export of the
+binary "currently on disk" -- was a claim about a build that no longer exists,
+and it named one that *does* export `DockingResult.unknown_atom_types` as the
+one that does not. Read this as "this is what the two backends did on an RTX
+3050 on that date", which is what a dated measurement is for. Re-running it is
+the only way to turn it back into a present-tense claim, and a run now prints
+the digest of whatever it loaded, so the reader can say which build they are
+looking at.
 
 **That paragraph is the hazard, and it is why the blocks are keyed on the
 disagreement rather than on it.** A gate whose description of the product is out
@@ -214,6 +201,7 @@ what tells them apart.
 
 from __future__ import annotations
 
+import hashlib
 import sys
 from pathlib import Path
 
@@ -460,6 +448,29 @@ def provoke_a_decline(n_atoms: int):
     )
 
 
+def extension_fingerprint(od) -> str:
+    """Size and digest of the extension this run's import actually resolved to.
+
+    Printed rather than transcribed into this file's docstring, and that is the
+    whole point of it: a number about a binary written into a file that outlives
+    the binary is a claim that goes stale without looking stale, and this
+    repository has had three of them. A rebuild in `site-packages` announces
+    itself to nobody, so the run says which one it measured and a reader who
+    wants to tie a recorded figure to a build runs the file and reads this.
+
+    No verdict rides on it. The numbers below are the results; this is the
+    address they were read from.
+    """
+    pkg = Path(od.__file__).resolve().parent
+    found = sorted(p for p in pkg.glob("_dockpy*") if p.is_file())
+    if not found:
+        return "(no _dockpy* extension beside the package, so this run measured no binary)"
+    return "; ".join(
+        f"{p.name} {p.stat().st_size} B sha256 {hashlib.sha256(p.read_bytes()).hexdigest()}"
+        for p in found
+    )
+
+
 # --- the blocks ------------------------------------------------------------
 
 
@@ -595,13 +606,12 @@ def block_declined_batch_says_why(core, maps) -> None:
                   f"(bit-identical to the CPU run) and `backend` is named, so the "
                   f"caller can tell what ran -- what is missing is the *reason*. "
                   f"The fix is in `dock-core/src`, in that arm; nothing in this "
-                  f"repository's prose needs changing, because README.md:332-335 "
-                  f"and README.en.md:402-405 already name this exact behaviour as "
-                  f"the defect ('a build with no gpu feature, where use_gpu=True "
-                  f"falls back silently and gives no reason'). A stale copy of the "
-                  f"pre-correction wording survives only in the mirror tree at "
-                  f"opendocking-gui/README.en.md:296-299, which is a separate "
-                  f"product this gate does not audit")
+                  f"repository's prose needs changing, because README.md:415-417 "
+                  f"and README.en.md:487-490 already name this exact behaviour as "
+                  f"the defect -- in the past tense, which is what they have said "
+                  f"since the arm was repaired, and before that in the present "
+                  f"tense ('a build with no gpu feature, where use_gpu=True "
+                  f"falls back silently and gives no reason')")
     else:
         bad(name, f"provoked batch came back as {gpu_report}, reason={reason!r}, "
                   f"bit-identical to cpu={same}")
@@ -769,6 +779,7 @@ def main() -> int:
     section("which binary this run measured")
     print(f"opendocking = {od.__file__}")
     print(f"engine      = {core.engine_version()} from {where}")
+    print(f"extension   = {extension_fingerprint(od)}")
     print(f"gpu_status  = {core.gpu_status()}")
     print(f"backends    = {core.available_backends()}")
 

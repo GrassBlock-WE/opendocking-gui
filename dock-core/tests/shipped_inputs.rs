@@ -39,6 +39,14 @@
 //! such. `examples/*.sdf` is RDKit input for the Python front-end and no
 //! `.pdbqt` reader is supposed to accept it; a silent skip would leave the
 //! enumeration looking complete while covering less than it appears to.
+//!
+//! Files a *gate generates* are a third thing, and are listed in
+//! [`GENERATED_UNDER_EXAMPLES`] rather than swept. "A gate reads this file" and
+//! "the repository ships this file" are different claims: the first is true of
+//! a scratch file a gate writes and then loads, and it does not make the file an
+//! input. That distinction is stated here, at the sweep, because getting it
+//! backwards is not a wrong count — it is a rule that protects a scratch file
+//! from cleanup and a reader who concludes the file is a legitimate input.
 
 use std::path::{Path, PathBuf};
 
@@ -107,17 +115,56 @@ struct Verdict {
     receptor: Result<usize, String>,
 }
 
+/// Structure files that live under `examples/` but are **generated**, as
+/// `(path relative to examples/, the gate that writes it)`.
+///
+/// The distinction this table exists to make is the one
+/// `scripts/release_tree_parity_check.py` had backwards. That file asserted
+/// that `examples/_shifted_receptor.pdbqt` was a shipped *input* because
+/// `scripts/workbench_interaction_check.py` reads it — but that gate is the only
+/// thing that ever wrote it, from `examples/rec_prep.pdbqt` with every x shifted
+/// by -40, and it regenerates the file byte for byte. "A gate reads this file"
+/// and "the repository ships this file" are different claims, and only the
+/// second one makes a file a member of this sweep.
+///
+/// The generator now writes to `target/workbench_interaction/`, which is
+/// outside `examples/` and already declared non-source. This entry is therefore
+/// a **tolerance for a copy left behind by a run from before that change**, and
+/// it is deliberately not a licence for the sweep to grow: the path is named
+/// here, a copy that is present is named in the report below, and the file is
+/// never parsed. Nothing consults this table to reach a count — the 17 below is
+/// `paths.len()`, and a classified file never enters `paths` — so the table
+/// cannot be widened to make a number pass. Delete the leftover copy and this
+/// table goes with it.
+const GENERATED_UNDER_EXAMPLES: &[(&str, &str)] = &[
+    (
+        "_shifted_receptor.pdbqt",
+        "scripts/workbench_interaction_check.py section 9, derived from rec_prep.pdbqt",
+    ),
+];
+
 /// Read every shipped structure file and record what the engine did with it.
-fn sweep() -> (PathBuf, Vec<Verdict>, Vec<(String, String)>) {
+fn sweep() -> (PathBuf, Vec<Verdict>, Vec<(String, String)>, Vec<(String, String)>) {
     let root = examples_dir();
     let mut files = Vec::new();
     all_files(&root, &mut files);
 
     let mut paths: Vec<PathBuf> = Vec::new();
     let mut unreadable_by_design: Vec<(String, String)> = Vec::new();
+    let mut generated: Vec<(String, String)> = Vec::new();
     for file in &files {
         let ext = extension(file);
         let rel = relative(file, &root);
+        if let Some((_, why)) = GENERATED_UNDER_EXAMPLES
+            .iter()
+            .find(|(p, _)| *p == rel.as_str())
+        {
+            // Classified, not swept: a derived artefact says nothing about
+            // whether the crate's readers accept the tree, so it is recorded
+            // and skipped rather than read and counted.
+            generated.push((rel.clone(), (*why).to_string()));
+            continue;
+        }
         match ext.as_str() {
             "pdbqt" | "pdb" => paths.push(file.clone()),
             "sdf" => unreadable_by_design.push((rel, "sdf: RDKit front-end input".to_string())),
@@ -161,7 +208,7 @@ fn sweep() -> (PathBuf, Vec<Verdict>, Vec<(String, String)>) {
             receptor,
         });
     }
-    (root, verdicts, unreadable_by_design)
+    (root, verdicts, unreadable_by_design, generated)
 }
 
 /// The first line of a message, trimmed for a table cell.
@@ -178,7 +225,7 @@ fn first_line(s: &str) -> String {
 
 #[test]
 fn every_shipped_structure_file_is_read_and_accepted() {
-    let (root, verdicts, unreadable_by_design) = sweep();
+    let (root, verdicts, unreadable_by_design, generated) = sweep();
 
     // The enumeration is asserted before any verdict, because a sweep that
     // silently found nothing would pass every check below — and this file's
@@ -272,18 +319,29 @@ fn every_shipped_structure_file_is_read_and_accepted() {
 
     let report = format!(
         "\nexamples/: {root:?}\nshipped structure files: {}\nshipped files with no reader in this \
-         crate: {}\nshipped files declaring TORSDOF: {}\nrefused by the engine: {}\n\n{}\n\nnot read \
-         here: {}\n",
+         crate: {}\nshipped files declaring TORSDOF: {}\nrefused by the engine: {}\ngenerated files \
+         found under examples/ and classified rather than swept: {}\n\n{}\n\nnot read here: \
+         {}\ngenerated, if any: {}\n",
         verdicts.len(),
         unreadable_by_design.len(),
         declared.len(),
         refused.len(),
+        generated.len(),
         table.join("\n"),
         unreadable_by_design
             .iter()
             .map(|(p, why)| format!("{p} ({why})"))
             .collect::<Vec<_>>()
             .join(", "),
+        if generated.is_empty() {
+            "none — the classification is empty and can be deleted".to_string()
+        } else {
+            generated
+                .iter()
+                .map(|(p, why)| format!("{p} ({why})"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        },
     );
     // Written to a file as well as stdout: this table is the evidence, and a
     // `--nocapture` run is the only way to see it.

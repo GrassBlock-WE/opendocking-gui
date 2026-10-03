@@ -332,6 +332,7 @@ INVENTORY = [
     "representation_names_check.py",
     "scoring_cross_check.py",
     "screenshot_frame_check.py",
+    "skip_reasons_check.py",
     "docs_claims_check.py",
     "structure_bond_check.py",
     "torsion_bond_record_check.py",
@@ -1197,7 +1198,7 @@ MAX_IN_FLIGHT = 2
 #: this comment keeps restating the rule instead of the arithmetic: three of the
 #: values this number has passed through were miscounts, and a comment that
 #: showed the sum would have made all three look deliberate.
-EXPECTED_CHECKS = 189
+EXPECTED_CHECKS = 192
 
 #: Gates with no `EXPECTED_CHECKS`. **Derived, not typed.**
 #:
@@ -4323,6 +4324,12 @@ SKIP_CONVENTION = {
         "records the skip as a third tag on RESULTS and asserts inside its own run "
         "that npass + nfail + nskip == len(RESULTS) == EXPECTED_CHECKS - 1, so the "
         "tag is inside the partition and a padded pin cannot pass",
+    "skip_reasons_check.py":
+        "records the skip on RESULTS as a third tag and deliberately does NOT "
+        "increment its check counter, so a skip cannot let this file reach its pin "
+        "by declining to look -- the one failure mode the file exists to detect. "
+        "Its incomplete-enumeration case does not ride on the tally at all: it is a "
+        "separate summary line and exit 3, which outranks the failing exit 1",
     "structure_bond_check.py":
         "records the skip in its own list, counts it into the pinned total, and "
         "prints pass/fail/skip as three separate numbers that never sum to a "

@@ -113,11 +113,54 @@ AUDITOR = SCRIPTS / "check_scripts_declare.py"
 #: here; the one whose guarded sites are worth reading out loud.
 HEADLINE = "workbench_interaction_check.py"
 
-#: The names a check-like call is spelled with across this tree. The first four
-#: are the ones `check_scripts_declare.py`'s own `_sites_of` counts, and are
-#: lifted from it rather than typed, so the two files cannot disagree about what
-#: a check site is; the last two are this tree's two other spellings, a skip that
-#: records a result and a pixel check that routes to one.
+#: The names a check-like call is spelled with across this tree.
+#:
+#: **The first four are a hand-typed copy of the tuple inside
+#: `check_scripts_declare.py`'s `_sites_of`, and this comment used to claim the
+#: opposite.** It said they "are lifted from it rather than typed, so the two
+#: files cannot disagree about what a check site is". Nothing lifted them --
+#: `CALLS` below is a literal -- so the guarantee was false, and it was false in
+#: the one place a reader goes to decide whether two censuses of the same file
+#: are counting the same sites. A stale comment is a nuisance; a false claim
+#: about census provenance is a confidently wrong census. The four are still the
+#: four; the guarantee is not, so what is written here is a fact a reader can
+#: check rather than a mechanism that does not exist.
+#:
+#: **The last two are this tree's two other spellings -- a `skip` that records
+#: a result and a `pixel_check` that routes to one -- and the two censuses
+#: therefore have different site universes.** Measured on
+#: `unreached_product_check.py`, which both files census: this walk reports
+#: `22 unconditional + 4 guarded` over 26 sites, the declarer's `_sites_of`
+#: reports `22 unconditional + 3 guarded` over 25. The extra site is the `skip`
+#: under the same `if ok_all:` as a `check`; every site the two share is
+#: classified identically, and the whole difference is whether that `skip` is a
+#: site at all.
+#:
+#: **The two numbers are not supposed to meet, and forcing them to would mean
+#: deleting a site that exists.** They answer different questions. The
+#: GATE-DECLARE number is a drift contract on a declared census, read by
+#: `_declaration_of` and compared against one shared walk; it is a statement
+#: about a declaration, not a coverage claim. This number feeds
+#: `ENV_REMOVALS` and the category table, so its question is which sites can
+#: fail to record and what each guard does to the result. A `skip` records a
+#: result, so a leak detector that could not see it would be blind to exactly
+#: the sites it exists to find.
+#:
+#: **The matching unconditional column is a coincidence and is not evidence the
+#: two definitions agree.** It matches only because the one extra site happens
+#: to be guarded. Moving that `skip` out of its `if` and leaving everything else
+#: alone was measured, not guessed: the columns then read 22 and 23. So nothing
+#: enforces the agreement, it must not be cited as the two definitions
+#: matching, and a future unconditional `skip` would move one column and leave
+#: the other where it is with no gate going red. Two further differences are
+#: latent there and neither is a bug: the declarer drops
+#: `if __name__ == "__main__"` and `if True` guards, which this walk counts as
+#: guards, and this walk's `with` arm in `classify_file` models a context
+#: manager as a guard where the declarer does
+#: not. That last one is the widest gap in the tree -- 280 sites -- and it is
+#: why `cli_check.py` reads 82 unconditional in the declarer's census and 0
+#: here. Fixing it means editing the declarer's guard set, which is not this
+#: file's to change.
 CALLS = ("check", "ok", "bad", "expect", "skip", "pixel_check")
 
 #: A statement that cannot fall through to the next statement. The `if` category
